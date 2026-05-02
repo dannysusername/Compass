@@ -4,16 +4,19 @@
 
 <form method="post" action="/syllabus" enctype="multipart/form-data" class="upload-card">
     <h1>Upload a syllabus</h1>
-    <p class="subtle">StudyFlow will auto-create the class, extract policies, and pull exam dates from the PDF.</p>
+    <p class="subtle">StudyFlow auto-creates the class, extracts policies, and pulls exam dates from the PDF.</p>
     <div class="drop-zone" data-upload-zone>
         <input type="file" name="file" accept="application/pdf,.pdf" required>
         <div class="drop-prompt">
-            <div class="drop-line">Drop a PDF here, or click to choose</div>
-            <div class="drop-hint">PDF only, up to 25&nbsp;MB</div>
+            <div class="drop-glyph">. . .</div>
+            <p class="drop-line">
+                Drop a PDF here<span class="or">or</span><span class="underline">choose a file</span>
+            </p>
+            <div class="drop-hint">PDF &middot; up to 25&nbsp;MB</div>
         </div>
         <div class="drop-picked"></div>
     </div>
-    <button type="submit">Upload &amp; parse</button>
+    <button type="submit">Upload syllabus</button>
 </form>
 
 {% if classes %}
