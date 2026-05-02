@@ -9,6 +9,7 @@ studyflow.log
 uploads/
 .env
 .studyflow_token
+.anthropic_key
 .DS_Store
 Thumbs.db
 .idea/

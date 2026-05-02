@@ -21,15 +21,15 @@ from sqlmodel import (
     SQLModel, Field, Relationship, Session, create_engine, select, delete,
 )
 from icalendar import Calendar, Event as ICalEvent
+import anthropic
 import pdfplumber
 
 
 # ---- Config ----
 
 LOCAL_TZ = ZoneInfo("America/New_York")  # change to your timezone
-OLLAMA_MODEL = "qwen2.5:7b"
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6").strip()
 MAX_UPLOAD_MB = 25
-MAX_SYLLABUS_CHARS = 30_000  # cap text fed to LLM
 STUDYFLOW_TOKEN = os.environ.get("STUDYFLOW_TOKEN", "").strip()  # empty = dev mode (no auth)
 COOKIE_NAME = "studyflow_token"
 
@@ -196,54 +196,262 @@ def parse_iso_dt(value) -> Optional[datetime]:
 
 
 def extract_pdf_text(path: Path) -> str:
+    """Extract text. dedupe_chars handles 'fake bold' double-stamped glyphs
+    (e.g. 'CCIISS33995500' instead of 'CIS 3950') that show up in many
+    professor-authored syllabi. Safe on already-clean PDFs (no-op)."""
+    chunks: list[str] = []
     with pdfplumber.open(path) as pdf:
-        chunks = [page.extract_text() or "" for page in pdf.pages]
-    return "\n\n".join(chunks)[:MAX_SYLLABUS_CHARS]
+        for page in pdf.pages:
+            try:
+                cleaned = page.dedupe_chars()
+                chunks.append(cleaned.extract_text() or "")
+            except Exception:
+                chunks.append(page.extract_text() or "")
+    return "\n\n".join(chunks)
 
 
-def build_syllabus_prompt(text: str) -> str:
-    return f"""You are a syllabus parser. Given the text of a university course syllabus, extract the following as a single JSON object:
+SYLLABUS_SYSTEM_PROMPT = """You are a structured-extraction system for university course syllabi.
 
-{{
-  "course_code": "string — the course identifier, e.g. 'MATH 250' or 'CS 101'",
-  "course_name": "string — full course title, e.g. 'Calculus II'",
-  "instructor": "string or null",
-  "late_policy": "string or null — describe the late submission policy",
-  "attendance_policy": "string or null",
-  "grading_breakdown": [{{"category": "string", "weight_percent": number}}],
-  "office_hours": [{{"day": "string", "time": "string", "location": "string"}}],
+INPUT: the full text of a syllabus (any subject, any university). The text may include header metadata, instructor info, course description, learning outcomes, grading breakdown, attendance and late-submission policies, office-hour schedules, and a calendar/schedule of dated events.
+
+OUTPUT: a single JSON object exactly matching the enforced schema. Fields you cannot determine return null (or empty arrays for list types). Do not include preamble, commentary, or markdown — only the JSON.
+
+# Field-by-field extraction rules
+
+## course_code
+The course identifier as it appears in the syllabus header. UPPERCASE with a single space between the department prefix and number.
+- "math 250" → "MATH 250"
+- "CIS3950" → "CIS 3950"
+- "ENGL-1010" → "ENGL 1010"
+- "Bio II Lab Section 003" → "BIO II" (strip section/lab modifiers if present in a separate field; keep only the course identifier)
+If no clear course code is present, return null.
+
+## course_name
+The full course title as listed in the header (e.g. "Calculus II", "Introduction to Computer Science", "American Literature: 1865 to Present"). Don't include the course code, the section number, or the term ("Fall 2026"). If the syllabus has both a short title and an expanded title, prefer the expanded title.
+
+## instructor
+Primary instructor's full name including title if given ("Dr. Jane Doe", "Prof. Smith"). If multiple instructors are listed, use the first ("Primary Instructor", "Lead Faculty", or the one listed first by position). For TA-only or co-taught courses with no clear primary, use the first name listed.
+
+## late_policy
+A concise summary of the late-submission rules (verbatim quote or summary, ≤ 300 chars). Examples:
+- "10% deduction per day late, max 5 days"
+- "No late work accepted without medical excuse"
+- "Late work loses 1 letter grade per 24 hours"
+If the syllabus doesn't address late work, return null. Do NOT invent a default policy.
+
+## attendance_policy
+Same shape as late_policy but for attendance/absence rules. Examples:
+- "Required; more than 3 unexcused absences lowers final grade"
+- "Attendance not graded but recommended"
+If the syllabus doesn't address attendance, return null.
+
+## grading_breakdown
+Array of {category, weight_percent} objects. Categories should be the human label as written ("Homework", "Midterm 1", "Final Project", "Class Participation"). Weights should be numbers (not strings). If percentages are given, use them. If only points are given, convert to percentages where total points are stated:
+- "Homework 80 of 100 points" → {"category": "Homework", "weight_percent": 80}
+If the breakdown is purely qualitative ("homework counts heavily"), return an empty array. Weights should sum to 100 when the syllabus is fully specified, but don't fabricate to make them sum.
+
+## office_hours
+Array of {day, time, location} objects. One entry per scheduled office-hours block:
+- "Tuesdays 2-4pm in Room 304" → {"day": "Tuesday", "time": "14:00-16:00", "location": "Room 304"}
+- "MWF 10-11am, by appointment" → two entries: one structured, one with location: "by appointment"
+- "Mon to Fri 10-10:30 AM via Zoom" → {"day": "Mon-Fri", "time": "10:00-10:30", "location": "Zoom"}
+Times should be in 24-hour format (HH:MM-HH:MM) when convertible. Day can be a single day, a comma list ("Monday, Wednesday"), or a range ("Mon-Fri"). location can be a room, "Zoom", a Zoom URL, "by appointment", or null if unspecified.
+
+## events
+Array of dated occurrences from the course schedule: exams, project deadlines, major assignment due dates, important milestones. Each entry: {title, kind, starts_at, ends_at}.
+
+- title: short human label ("Midterm 1", "Project 2 Due", "Final Exam", "Paper 1 Draft Due")
+- kind: one of `exam`, `assignment`, `project`, `milestone`
+  - exam: graded sit-down assessment
+  - assignment: homework/problem set/short paper due
+  - project: longer multi-stage project due
+  - milestone: anything else with a deadline (registration, drop deadline, presentation slot)
+- starts_at: ISO 8601 datetime in local time without timezone offset (e.g. "2026-09-15T18:00:00"). If only a date is given, use 23:59:00 of that day.
+- ends_at: ISO 8601 datetime, or null. Only set if the syllabus specifies a duration ("Final Exam: Dec 14, 8-10am" → starts_at "2026-12-14T08:00:00", ends_at "2026-12-14T10:00:00").
+
+DATE HANDLING — STRICT:
+- DO NOT INVENT DATES. If the syllabus says "Week 5 — Midterm" without an explicit calendar date, set starts_at: null and put the descriptor in the title ("Week 5 — Midterm").
+- If you can resolve a date from term context (e.g. syllabus says "Fall 2026" + "Week 5 of class"), still leave starts_at: null. Term-relative dates require knowing the academic calendar; you don't.
+- Recurring weekly assignments ("Problem Set due every Friday") are too low-signal to enumerate as events. Skip them. Capture only specific dated milestones.
+- Time zones: the syllabus may state a time zone explicitly. Ignore it — emit naive ISO datetimes; the application handles timezone attachment.
+
+# Examples
+
+## Example 1 — typical CS syllabus
+
+INPUT (excerpted):
+"CS 101 - Intro to Programming
+Spring 2026 Syllabus
+Instructor: Dr. Jane Doe (jane@university.edu)
+Office Hours: Tuesday and Thursday, 1-2pm, Room 207
+
+Late Policy: -10% per day late, no submissions accepted after 5 days late.
+Attendance: required for lab sections; lecture attendance not graded.
+
+Grading:
+- Homework: 30%
+- Lab Reports: 20%
+- Midterm: 20%
+- Final Project: 30%
+
+Important Dates:
+- Midterm Exam: March 15, 2026 at 6:00pm
+- Final Project Due: May 7, 2026
+- Final Project Presentations: May 10, 2026, 9am-12pm"
+
+OUTPUT:
+{
+  "course_code": "CS 101",
+  "course_name": "Intro to Programming",
+  "instructor": "Dr. Jane Doe",
+  "late_policy": "-10% per day late, no submissions accepted after 5 days late",
+  "attendance_policy": "Required for lab sections; lecture attendance not graded",
+  "grading_breakdown": [
+    {"category": "Homework", "weight_percent": 30},
+    {"category": "Lab Reports", "weight_percent": 20},
+    {"category": "Midterm", "weight_percent": 20},
+    {"category": "Final Project", "weight_percent": 30}
+  ],
+  "office_hours": [
+    {"day": "Tuesday", "time": "13:00-14:00", "location": "Room 207"},
+    {"day": "Thursday", "time": "13:00-14:00", "location": "Room 207"}
+  ],
   "events": [
-    {{
-      "title": "string — e.g. 'Midterm 1' or 'Project 2 due'",
-      "kind": "exam|assignment|project|milestone",
-      "starts_at": "ISO 8601 datetime in local time, or null",
-      "ends_at": "ISO 8601 datetime, or null"
-    }}
+    {"title": "Midterm Exam", "kind": "exam", "starts_at": "2026-03-15T18:00:00", "ends_at": null},
+    {"title": "Final Project Due", "kind": "project", "starts_at": "2026-05-07T23:59:00", "ends_at": null},
+    {"title": "Final Project Presentations", "kind": "project", "starts_at": "2026-05-10T09:00:00", "ends_at": "2026-05-10T12:00:00"}
   ]
-}}
+}
 
-Rules:
-- Return ONLY valid JSON. No markdown, no commentary.
-- If a field cannot be determined, return null (or empty array for lists).
-- DO NOT invent dates. If a date isn't explicitly in the syllabus, use null.
-- For events without a date (e.g. "Week 5 — Midterm"), set starts_at to null and put context in the title.
-- If only a date is given (no time), use 23:59:00 of that day.
-- Course code should be UPPERCASE with a single space (e.g. "MATH 250").
+## Example 2 — humanities syllabus, week-relative dates
 
-SYLLABUS TEXT:
-{text}"""
+INPUT (excerpted):
+"ENGL 245 - American Literature 1865-Present
+Prof. Maria Lopez, mlopez@uni.edu
+Office hours by appointment only (email to schedule).
+
+Grading is based on three papers (20% each), one final exam (30%), and class participation (10%).
+
+Course Schedule:
+- Week 3: Paper 1 due
+- Week 7: Paper 2 due
+- Week 11: Paper 3 due
+- Final Exam: December 18, 2026"
+
+OUTPUT:
+{
+  "course_code": "ENGL 245",
+  "course_name": "American Literature 1865-Present",
+  "instructor": "Prof. Maria Lopez",
+  "late_policy": null,
+  "attendance_policy": null,
+  "grading_breakdown": [
+    {"category": "Papers", "weight_percent": 60},
+    {"category": "Final Exam", "weight_percent": 30},
+    {"category": "Class Participation", "weight_percent": 10}
+  ],
+  "office_hours": [
+    {"day": null, "time": null, "location": "by appointment"}
+  ],
+  "events": [
+    {"title": "Week 3: Paper 1 due", "kind": "assignment", "starts_at": null, "ends_at": null},
+    {"title": "Week 7: Paper 2 due", "kind": "assignment", "starts_at": null, "ends_at": null},
+    {"title": "Week 11: Paper 3 due", "kind": "assignment", "starts_at": null, "ends_at": null},
+    {"title": "Final Exam", "kind": "exam", "starts_at": "2026-12-18T23:59:00", "ends_at": null}
+  ]
+}
+
+# Final reminders
+
+- Return only the JSON object, matching the enforced schema exactly.
+- When uncertain, prefer null over inventing.
+- The user message contains the full syllabus text. Read it all before responding."""
 
 
-def parse_syllabus_with_ollama(text: str) -> dict:
-    """Call Ollama with format=json. Raises on failure."""
-    from ollama import chat
-    resp = chat(
-        model=OLLAMA_MODEL,
-        messages=[{"role": "user", "content": build_syllabus_prompt(text)}],
-        format="json",
-        options={"temperature": 0.0},
+# JSON schema for output_config.format. Sonnet 4.6 will constrain output to this shape.
+SYLLABUS_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "course_code": {"type": ["string", "null"]},
+        "course_name": {"type": ["string", "null"]},
+        "instructor": {"type": ["string", "null"]},
+        "late_policy": {"type": ["string", "null"]},
+        "attendance_policy": {"type": ["string", "null"]},
+        "grading_breakdown": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "category": {"type": "string"},
+                    "weight_percent": {"type": "number"},
+                },
+                "required": ["category", "weight_percent"],
+            },
+        },
+        "office_hours": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "day": {"type": ["string", "null"]},
+                    "time": {"type": ["string", "null"]},
+                    "location": {"type": ["string", "null"]},
+                },
+                "required": ["day", "time", "location"],
+            },
+        },
+        "events": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "title": {"type": "string"},
+                    "kind": {"type": "string", "enum": ["exam", "assignment", "project", "milestone"]},
+                    "starts_at": {"type": ["string", "null"]},
+                    "ends_at": {"type": ["string", "null"]},
+                },
+                "required": ["title", "kind", "starts_at", "ends_at"],
+            },
+        },
+    },
+    "required": [
+        "course_code", "course_name", "instructor",
+        "late_policy", "attendance_policy",
+        "grading_breakdown", "office_hours", "events",
+    ],
+}
+
+
+def parse_syllabus_with_claude(text: str) -> dict:
+    """Call Claude (Sonnet 4.6 by default) with structured-output enforcement and
+    a cached system prompt. Raises anthropic exceptions on failure; caller logs."""
+    if not os.environ.get("ANTHROPIC_API_KEY", "").strip():
+        raise RuntimeError(
+            "ANTHROPIC_API_KEY is not set. Put your key in .anthropic_key next to "
+            "main.py, or export it before launching."
+        )
+    client = anthropic.Anthropic()
+    response = client.messages.create(
+        model=ANTHROPIC_MODEL,
+        max_tokens=8192,
+        system=[
+            {
+                "type": "text",
+                "text": SYLLABUS_SYSTEM_PROMPT,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ],
+        messages=[{"role": "user", "content": text}],
+        output_config={"format": {"type": "json_schema", "schema": SYLLABUS_SCHEMA}},
     )
-    return json.loads(resp["message"]["content"])
+    text_block = next((b.text for b in response.content if b.type == "text"), None)
+    if not text_block:
+        raise RuntimeError("Claude returned no text content")
+    return json.loads(text_block)
 
 
 def process_syllabus(syllabus_id: int) -> None:
@@ -255,7 +463,33 @@ def process_syllabus(syllabus_id: int) -> None:
             if not syllabus:
                 parse_jobs[syllabus_id] = "error: syllabus not found"
                 return
-            data = parse_syllabus_with_ollama(syllabus.raw_text)
+            try:
+                data = parse_syllabus_with_claude(syllabus.raw_text)
+            except anthropic.AuthenticationError:
+                parse_jobs[syllabus_id] = (
+                    "error: ANTHROPIC_API_KEY is invalid. Check your key at "
+                    "https://console.anthropic.com/settings/keys"
+                )
+                return
+            except anthropic.RateLimitError as e:
+                retry_after = e.response.headers.get("retry-after", "unknown") if hasattr(e, "response") else "unknown"
+                parse_jobs[syllabus_id] = f"error: rate limited by Anthropic API. Retry after {retry_after}s."
+                return
+            except anthropic.APIConnectionError:
+                parse_jobs[syllabus_id] = "error: could not reach the Anthropic API. Check your internet connection."
+                return
+            except anthropic.BadRequestError as e:
+                parse_jobs[syllabus_id] = f"error: bad request to Claude. {str(e)[:300]}"
+                return
+            except anthropic.APIStatusError as e:
+                parse_jobs[syllabus_id] = f"error: Anthropic API returned {e.status_code}. {str(e)[:200]}"
+                return
+            except json.JSONDecodeError as e:
+                parse_jobs[syllabus_id] = f"error: Claude output was not valid JSON. {str(e)[:200]}"
+                return
+            except RuntimeError as e:
+                parse_jobs[syllabus_id] = f"error: {e}"
+                return
 
             cls = session.get(Class, syllabus.class_id)
             if data.get("course_code"):

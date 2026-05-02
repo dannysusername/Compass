@@ -282,6 +282,15 @@ def main() -> int:
             os.environ["STUDYFLOW_TOKEN"] = token
             log.info("loaded STUDYFLOW_TOKEN from %s", token_file.name)
 
+    # Optional: load ANTHROPIC_API_KEY from a .anthropic_key file next to main.py
+    # so the user doesn't have to set the env var in every shell.
+    api_key_file = ROOT / ".anthropic_key"
+    if api_key_file.is_file():
+        api_key = api_key_file.read_text(encoding="utf-8").strip()
+        if api_key:
+            os.environ["ANTHROPIC_API_KEY"] = api_key
+            log.info("loaded ANTHROPIC_API_KEY from %s", api_key_file.name)
+
     proc = start_server()
     atexit.register(stop_server, proc)
 
