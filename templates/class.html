@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}{{ cls.code }} — StudyFlow{% endblock %}
+{% block content %}
+<a href="/" class="back">← All classes</a>
+
+<h1>{{ cls.code }} <span class="subtle">{{ cls.name }}</span></h1>
+
+<section>
+    <h2>Policies</h2>
+    {% if policies %}
+    <ul class="policy-list">
+        {% for p in policies %}
+        <li>
+            <strong>{{ p.kind | replace('_', ' ') | title }}:</strong>
+            <span>{{ p.content }}</span>
+        </li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <p class="empty">No policies yet. Upload a syllabus to extract them.</p>
+    {% endif %}
+</section>
+
+<section>
+    <h2>Upcoming events</h2>
+    {% if events %}
+    <ul class="event-list">
+        {% for e in events %}
+        <li>
+            <span class="kind">{{ e.kind }}</span>
+            <span class="title">{{ e.title }}</span>
+            <span class="when">{{ e.starts_at.strftime('%Y-%m-%d %H:%M') if e.starts_at else 'TBD' }}</span>
+        </li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <p class="empty">No events yet.</p>
+    {% endif %}
+</section>
+
+<section>
+    <h2>Documents</h2>
+    {% if documents %}
+    <ul class="doc-list">
+        {% for d in documents %}
+        <li><a href="/uploads/{{ d.filename }}">{{ d.title }}</a></li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <p class="empty">No documents yet.</p>
+    {% endif %}
+</section>
+
+<form method="post" action="/classes/{{ cls.id }}/delete" class="danger" onsubmit="return confirm('Delete this class and everything in it?')">
+    <button type="submit">Delete class</button>
+</form>
+{% endblock %}

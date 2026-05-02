@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}StudyFlow — Classes{% endblock %}
+{% block content %}
+<h1>Your classes</h1>
+
+{% if classes %}
+<ul class="class-list">
+    {% for c in classes %}
+    <li>
+        <a href="/classes/{{ c.id }}" class="class-card">
+            <span class="code">{{ c.code }}</span>
+            <span class="name">{{ c.name }}</span>
+        </a>
+    </li>
+    {% endfor %}
+</ul>
+{% else %}
+<p class="empty">No classes yet. Add one below to get started.</p>
+{% endif %}
+
+<form method="post" action="/classes" class="add-class">
+    <h2>Add a class</h2>
+    <label>
+        Code
+        <input type="text" name="code" placeholder="MATH 250" required>
+    </label>
+    <label>
+        Name
+        <input type="text" name="name" placeholder="Calculus II" required>
+    </label>
+    <button type="submit">Add class</button>
+</form>
+{% endblock %}
