@@ -1,33 +1,50 @@
 {% extends "base.html" %}
-{% block title %}StudyFlow — Classes{% endblock %}
+{% block title %}StudyFlow{% endblock %}
 {% block content %}
-<h1>Your classes</h1>
+
+<form method="post" action="/syllabus" enctype="multipart/form-data" class="upload-card">
+    <h1>Upload a syllabus</h1>
+    <p class="subtle">StudyFlow will auto-create the class, extract policies, and pull exam dates from the PDF.</p>
+    <label class="file-input">
+        <input type="file" name="file" accept="application/pdf,.pdf" required>
+        <span>Choose PDF</span>
+    </label>
+    <button type="submit">Upload &amp; parse</button>
+</form>
 
 {% if classes %}
-<ul class="class-list">
-    {% for c in classes %}
-    <li>
-        <a href="/classes/{{ c.id }}" class="class-card">
-            <span class="code">{{ c.code }}</span>
-            <span class="name">{{ c.name }}</span>
-        </a>
-    </li>
-    {% endfor %}
-</ul>
-{% else %}
-<p class="empty">No classes yet. Add one below to get started.</p>
+<section>
+    <h2>Your classes</h2>
+    <ul class="class-list">
+        {% for c in classes %}
+        <li>
+            <a href="/classes/{{ c.id }}" class="class-card">
+                <span class="code">{{ c.code }}</span>
+                <span class="name">{{ c.name }}</span>
+            </a>
+        </li>
+        {% endfor %}
+    </ul>
+</section>
 {% endif %}
 
-<form method="post" action="/classes" class="add-class">
-    <h2>Add a class</h2>
-    <label>
-        Code
-        <input type="text" name="code" placeholder="MATH 250" required>
-    </label>
-    <label>
-        Name
-        <input type="text" name="name" placeholder="Calculus II" required>
-    </label>
-    <button type="submit">Add class</button>
-</form>
+<details class="manual-add">
+    <summary>No syllabus yet? Add a class manually</summary>
+    <form method="post" action="/classes" class="add-class">
+        <label>
+            Code
+            <input type="text" name="code" placeholder="MATH 250" required>
+        </label>
+        <label>
+            Name
+            <input type="text" name="name" placeholder="Calculus II" required>
+        </label>
+        <button type="submit">Add class</button>
+    </form>
+</details>
+
+<footer class="cal-link">
+    <p>Calendar feed: <code>/calendar.ics</code> &mdash; subscribe in Apple Calendar.</p>
+</footer>
+
 {% endblock %}

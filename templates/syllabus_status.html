@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Parsing syllabus — StudyFlow{% endblock %}
+{% block content %}
+<a href="/" class="back">← Cancel</a>
+
+<div class="status-card" id="status-card" data-syllabus-id="{{ syllabus_id }}" data-class-id="{{ class_id }}" data-status="{{ status }}">
+    <h1>Parsing syllabus…</h1>
+    <p class="subtle" id="status-line">Status: {{ status }}</p>
+    <p class="hint">This usually takes 30-90 seconds on CPU. Don't close this tab.</p>
+    <div class="spinner"></div>
+</div>
+
+<script>
+(async function poll() {
+    const card = document.getElementById('status-card');
+    const line = document.getElementById('status-line');
+    const sid = card.dataset.syllabusId;
+    const cid = card.dataset.classId;
+
+    function tick() {
+        fetch(`/syllabus/${sid}/status.json`)
+            .then(r => r.json())
+            .then(j => {
+                line.textContent = 'Status: ' + j.status;
+                if (j.status === 'done') {
+                    window.location.href = `/classes/${cid}`;
+                } else if (j.status && j.status.startsWith('error')) {
+                    card.classList.add('error');
+                    document.querySelector('.spinner').style.display = 'none';
+                } else {
+                    setTimeout(tick, 3000);
+                }
+            })
+            .catch(() => setTimeout(tick, 5000));
+    }
+
+    if (card.dataset.status === 'done') {
+        window.location.href = `/classes/${cid}`;
+    } else {
+        setTimeout(tick, 2000);
+    }
+})();
+</script>
+
+{% endblock %}

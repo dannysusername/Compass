@@ -11,8 +11,37 @@
     <ul class="policy-list">
         {% for p in policies %}
         <li>
-            <strong>{{ p.kind | replace('_', ' ') | title }}:</strong>
-            <span>{{ p.content }}</span>
+            <strong>{{ p.kind | replace('_', ' ') | title }}</strong>
+            {% if p.kind == 'grading' and p.structured %}
+                <table class="grading">
+                    {% for row in p.structured %}
+                    <tr>
+                        <td>{{ row.category }}</td>
+                        <td>{{ row.weight_percent }}%</td>
+                    </tr>
+                    {% endfor %}
+                </table>
+            {% elif p.kind == 'office_hours' and p.structured %}
+                <ul class="oh">
+                    {% for oh in p.structured %}
+                    <li>{{ oh.day }} {{ oh.time }}{% if oh.location %} &middot; {{ oh.location }}{% endif %}</li>
+                    {% endfor %}
+                </ul>
+            {% else %}
+                <p>{{ p.content }}</p>
+            {% endif %}
+            <details class="row-actions">
+                <summary>Edit / delete</summary>
+                {% if p.kind not in ('grading', 'office_hours') %}
+                <form method="post" action="/policies/{{ p.id }}/edit" class="inline-edit">
+                    <textarea name="content" rows="3">{{ p.content }}</textarea>
+                    <button type="submit">Save</button>
+                </form>
+                {% endif %}
+                <form method="post" action="/policies/{{ p.id }}/delete" onsubmit="return confirm('Delete this policy?')">
+                    <button type="submit" class="danger-btn">Delete</button>
+                </form>
+            </details>
         </li>
         {% endfor %}
     </ul>
@@ -22,14 +51,37 @@
 </section>
 
 <section>
-    <h2>Upcoming events</h2>
+    <h2>Events</h2>
     {% if events %}
     <ul class="event-list">
         {% for e in events %}
         <li>
             <span class="kind">{{ e.kind }}</span>
             <span class="title">{{ e.title }}</span>
-            <span class="when">{{ e.starts_at.strftime('%Y-%m-%d %H:%M') if e.starts_at else 'TBD' }}</span>
+            <span class="when">{{ e.starts_at.strftime('%a %b %d %H:%M') if e.starts_at else 'TBD' }}</span>
+            <details class="row-actions">
+                <summary>Edit</summary>
+                <form method="post" action="/events/{{ e.id }}/edit" class="inline-edit">
+                    <label>Title <input type="text" name="title" value="{{ e.title }}" required></label>
+                    <label>Kind
+                        <select name="kind">
+                            {% for k in ['exam','assignment','project','milestone'] %}
+                            <option value="{{ k }}" {% if k == e.kind %}selected{% endif %}>{{ k }}</option>
+                            {% endfor %}
+                        </select>
+                    </label>
+                    <label>Starts at (ISO)
+                        <input type="text" name="starts_at" value="{{ e.starts_at.strftime('%Y-%m-%dT%H:%M:%S') if e.starts_at else '' }}" placeholder="2026-09-15T23:59:00">
+                    </label>
+                    <label>Ends at (optional)
+                        <input type="text" name="ends_at" value="{{ e.ends_at.strftime('%Y-%m-%dT%H:%M:%S') if e.ends_at else '' }}">
+                    </label>
+                    <button type="submit">Save</button>
+                </form>
+                <form method="post" action="/events/{{ e.id }}/delete" onsubmit="return confirm('Delete this event?')">
+                    <button type="submit" class="danger-btn">Delete</button>
+                </form>
+            </details>
         </li>
         {% endfor %}
     </ul>
@@ -43,12 +95,30 @@
     {% if documents %}
     <ul class="doc-list">
         {% for d in documents %}
-        <li><a href="/uploads/{{ d.filename }}">{{ d.title }}</a></li>
+        <li>
+            <a href="/uploads/{{ d.filename }}" target="_blank">{{ d.title }}</a>
+            <form method="post" action="/docs/{{ d.id }}/delete" class="inline" onsubmit="return confirm('Delete this document?')">
+                <button type="submit" class="danger-btn small">×</button>
+            </form>
+        </li>
         {% endfor %}
     </ul>
     {% else %}
     <p class="empty">No documents yet.</p>
     {% endif %}
+
+    <form method="post" action="/classes/{{ cls.id }}/docs" enctype="multipart/form-data" class="add-doc">
+        <h3>Add a document</h3>
+        <label>
+            Title (optional)
+            <input type="text" name="title" placeholder="Study guide for midterm 1">
+        </label>
+        <label class="file-input">
+            <input type="file" name="file" required>
+            <span>Choose file</span>
+        </label>
+        <button type="submit">Upload</button>
+    </form>
 </section>
 
 <form method="post" action="/classes/{{ cls.id }}/delete" class="danger" onsubmit="return confirm('Delete this class and everything in it?')">

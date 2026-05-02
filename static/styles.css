@@ -7,8 +7,10 @@
     --text: #f0f0f2;
     --subtle: #9a9aa0;
     --accent: #5b9dff;
+    --accent-2: #4a8cee;
     --danger: #ff5b5b;
     --ok: #4ade80;
+    --warn: #fbbf24;
     --radius: 10px;
 }
 
@@ -20,6 +22,7 @@
         --text: #1a1a1d;
         --subtle: #5a5a60;
         --accent: #2563eb;
+        --accent-2: #1d4ed8;
     }
 }
 
@@ -58,26 +61,33 @@ main {
 }
 
 h1 {
-    margin: 0 0 24px;
-    font-size: 28px;
+    margin: 0 0 16px;
+    font-size: 26px;
     letter-spacing: -0.02em;
+    line-height: 1.2;
 }
 
 h1 .subtle {
     color: var(--subtle);
     font-weight: 400;
-    font-size: 18px;
-    margin-left: 8px;
+    font-size: 17px;
+    margin-left: 6px;
+    display: inline-block;
 }
 
 h2 {
-    margin: 32px 0 12px;
-    font-size: 18px;
+    margin: 36px 0 12px;
+    font-size: 12px;
     color: var(--subtle);
-    font-weight: 600;
+    font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
-    font-size: 13px;
+    letter-spacing: 0.06em;
+}
+
+h3 {
+    margin: 16px 0 8px;
+    font-size: 15px;
+    font-weight: 600;
 }
 
 .back {
@@ -88,10 +98,8 @@ h2 {
     font-size: 14px;
 }
 
-.empty {
-    color: var(--subtle);
-    font-style: italic;
-}
+.subtle, .hint { color: var(--subtle); }
+.empty { color: var(--subtle); font-style: italic; }
 
 .class-list, .policy-list, .event-list, .doc-list {
     list-style: none;
@@ -101,6 +109,46 @@ h2 {
     flex-direction: column;
     gap: 8px;
 }
+
+/* ---- Upload card ---- */
+
+.upload-card {
+    background: var(--surface);
+    padding: 20px;
+    border-radius: var(--radius);
+    margin-bottom: 24px;
+    border: 1px solid var(--surface-2);
+}
+.upload-card h1 { margin: 0 0 6px; font-size: 22px; }
+.upload-card p { margin: 0 0 16px; font-size: 14px; }
+
+/* ---- File input ---- */
+
+.file-input {
+    display: block;
+    position: relative;
+    margin-bottom: 12px;
+}
+.file-input input[type="file"] {
+    position: absolute;
+    opacity: 0;
+    width: 1px;
+    height: 1px;
+}
+.file-input span {
+    display: block;
+    padding: 14px 16px;
+    background: var(--surface-2);
+    border-radius: 8px;
+    text-align: center;
+    cursor: pointer;
+    font-size: 14px;
+    color: var(--text);
+    border: 1px dashed var(--subtle);
+}
+.file-input input[type="file"]:focus + span { outline: 2px solid var(--accent); }
+
+/* ---- Class cards ---- */
 
 .class-card {
     display: flex;
@@ -113,18 +161,52 @@ h2 {
     color: var(--text);
     transition: background 0.15s;
 }
-
 .class-card:active { background: var(--surface-2); }
 .class-card .code { font-weight: 700; font-size: 16px; min-width: 80px; }
 .class-card .name { color: var(--subtle); font-size: 15px; }
 
-.policy-list li, .event-list li, .doc-list li {
-    padding: 12px 16px;
+/* ---- Policies ---- */
+
+.policy-list li {
+    padding: 14px 16px;
     background: var(--surface);
     border-radius: var(--radius);
 }
+.policy-list li strong {
+    display: block;
+    font-size: 12px;
+    color: var(--subtle);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-bottom: 6px;
+    font-weight: 700;
+}
+.policy-list li p { margin: 0; }
+.policy-list table.grading {
+    border-collapse: collapse;
+    margin-top: 4px;
+}
+.policy-list table.grading td {
+    padding: 4px 12px 4px 0;
+    font-size: 14px;
+}
+.policy-list table.grading td:last-child {
+    color: var(--subtle);
+    font-variant-numeric: tabular-nums;
+}
+.policy-list ul.oh {
+    margin: 4px 0 0;
+    padding-left: 16px;
+    font-size: 14px;
+    color: var(--text);
+}
+
+/* ---- Events ---- */
 
 .event-list li {
+    padding: 12px 16px;
+    background: var(--surface);
+    border-radius: var(--radius);
     display: grid;
     grid-template-columns: 80px 1fr auto;
     gap: 12px;
@@ -135,11 +217,59 @@ h2 {
     text-transform: uppercase;
     color: var(--subtle);
     letter-spacing: 0.04em;
+    font-weight: 700;
 }
 .event-list .title { font-weight: 500; }
 .event-list .when { font-size: 13px; color: var(--subtle); white-space: nowrap; }
+.event-list .row-actions { grid-column: 1 / -1; margin-top: 4px; }
 
-.doc-list a { color: var(--accent); text-decoration: none; }
+/* ---- Inline edit ---- */
+
+.row-actions summary {
+    cursor: pointer;
+    font-size: 12px;
+    color: var(--accent);
+    list-style: none;
+    margin-top: 8px;
+}
+.row-actions summary::-webkit-details-marker { display: none; }
+.row-actions summary::before { content: "✎ "; opacity: 0.6; }
+.row-actions[open] summary::before { content: "✕ "; }
+
+.inline-edit {
+    margin-top: 12px;
+    padding: 12px;
+    background: var(--bg);
+    border-radius: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.inline-edit label { font-size: 12px; }
+.inline-edit textarea, .inline-edit input, .inline-edit select {
+    padding: 8px 10px;
+    font-size: 14px;
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--surface-2);
+    border-radius: 6px;
+    font-family: inherit;
+}
+
+/* ---- Doc list ---- */
+
+.doc-list li {
+    padding: 12px 16px;
+    background: var(--surface);
+    border-radius: var(--radius);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+.doc-list a { color: var(--accent); text-decoration: none; flex: 1; }
+.doc-list .inline { display: inline; margin: 0; }
+
+/* ---- Forms ---- */
 
 form {
     margin-top: 32px;
@@ -148,15 +278,14 @@ form {
     gap: 12px;
 }
 
-form.add-class {
+form.add-class, form.add-doc {
     background: var(--surface);
-    padding: 20px;
+    padding: 18px;
     border-radius: var(--radius);
+    margin-top: 12px;
 }
 
-form.add-class h2 {
-    margin: 0 0 8px;
-}
+form.upload-card { margin-top: 0; }
 
 label {
     display: flex;
@@ -166,7 +295,7 @@ label {
     color: var(--subtle);
 }
 
-input[type="text"], input[type="file"] {
+input[type="text"], select, textarea {
     padding: 12px 14px;
     border: 1px solid var(--surface-2);
     border-radius: 8px;
@@ -176,7 +305,12 @@ input[type="text"], input[type="file"] {
     font-family: inherit;
 }
 
-input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+textarea { resize: vertical; min-height: 60px; }
+
+input:focus, select:focus, textarea:focus {
+    outline: 2px solid var(--accent);
+    outline-offset: -1px;
+}
 
 button {
     padding: 14px 18px;
@@ -189,12 +323,83 @@ button {
     cursor: pointer;
     font-family: inherit;
 }
+button:active { background: var(--accent-2); }
 
-button:active { opacity: 0.85; }
+button.danger-btn {
+    background: transparent;
+    color: var(--danger);
+    border: 1px solid var(--danger);
+    padding: 8px 14px;
+    font-size: 13px;
+}
+button.danger-btn.small {
+    padding: 4px 10px;
+    font-size: 16px;
+    line-height: 1;
+}
 
 form.danger { margin-top: 48px; }
 form.danger button {
     background: transparent;
     color: var(--danger);
     border: 1px solid var(--danger);
+}
+
+/* ---- Manual add (collapsed by default) ---- */
+
+.manual-add {
+    margin-top: 32px;
+    padding: 12px 16px;
+    background: var(--surface);
+    border-radius: var(--radius);
+}
+.manual-add summary {
+    cursor: pointer;
+    font-size: 14px;
+    color: var(--subtle);
+}
+.manual-add summary:hover { color: var(--text); }
+
+/* ---- Status (parsing) ---- */
+
+.status-card {
+    background: var(--surface);
+    padding: 32px 24px;
+    border-radius: var(--radius);
+    margin-top: 32px;
+    text-align: center;
+}
+.status-card.error {
+    border: 1px solid var(--danger);
+    background: color-mix(in srgb, var(--danger) 12%, var(--surface));
+}
+.status-card .hint { font-size: 13px; margin-top: 8px; }
+.spinner {
+    width: 32px;
+    height: 32px;
+    margin: 24px auto 0;
+    border: 3px solid var(--surface-2);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+/* ---- Footer ---- */
+
+.cal-link {
+    margin-top: 48px;
+    padding-top: 16px;
+    border-top: 1px solid var(--surface-2);
+    font-size: 13px;
+    color: var(--subtle);
+    text-align: center;
+}
+.cal-link code {
+    background: var(--surface-2);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-family: ui-monospace, SF Mono, Menlo, monospace;
 }
