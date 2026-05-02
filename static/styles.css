@@ -122,31 +122,106 @@ h3 {
 .upload-card h1 { margin: 0 0 6px; font-size: 22px; }
 .upload-card p { margin: 0 0 16px; font-size: 14px; }
 
-/* ---- File input ---- */
+/* ---- Drop zone (drag/drop file upload) ---- */
 
-.file-input {
-    display: block;
+.drop-zone {
     position: relative;
-    margin-bottom: 12px;
-}
-.file-input input[type="file"] {
-    position: absolute;
-    opacity: 0;
-    width: 1px;
-    height: 1px;
-}
-.file-input span {
-    display: block;
-    padding: 14px 16px;
-    background: var(--surface-2);
-    border-radius: 8px;
-    text-align: center;
+    padding: 32px 20px;
+    border: 2px dashed var(--surface-2);
+    border-radius: var(--radius);
+    background: var(--bg);
     cursor: pointer;
-    font-size: 14px;
-    color: var(--text);
-    border: 1px dashed var(--subtle);
+    transition: border-color 0.15s ease, background 0.15s ease, transform 0.05s ease;
+    margin-bottom: 12px;
+    text-align: center;
+    overflow: hidden;
 }
-.file-input input[type="file"]:focus + span { outline: 2px solid var(--accent); }
+.drop-zone:hover { border-color: var(--accent); }
+.drop-zone.drag {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 12%, var(--bg));
+    transform: scale(1.005);
+}
+.drop-zone.reject {
+    border-color: var(--danger);
+    animation: dropShake 0.4s;
+}
+.drop-zone.has-file {
+    padding: 16px 20px;
+    border-style: solid;
+    border-color: color-mix(in srgb, var(--ok, #4ade80) 60%, var(--surface-2));
+    background: color-mix(in srgb, var(--ok, #4ade80) 8%, var(--bg));
+}
+
+@keyframes dropShake {
+    0%, 100% { transform: translateX(0); }
+    20% { transform: translateX(-5px); }
+    60% { transform: translateX(5px); }
+    80% { transform: translateX(-2px); }
+}
+
+/* The native input covers the whole zone so click-anywhere works. */
+.drop-zone input[type="file"] {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    opacity: 0;
+    cursor: pointer;
+    z-index: 1;
+}
+
+.drop-prompt { pointer-events: none; }
+.drop-zone.has-file .drop-prompt { display: none; }
+
+.drop-line {
+    font-size: 15px;
+    font-weight: 500;
+    color: var(--text);
+}
+.drop-hint {
+    margin-top: 6px;
+    font-size: 12px;
+    color: var(--subtle);
+}
+
+.drop-picked {
+    display: none;
+    align-items: center;
+    gap: 12px;
+    text-align: left;
+    position: relative;
+    z-index: 2;  /* sits above the invisible input so the Remove button is clickable */
+}
+.drop-zone.has-file .drop-picked { display: flex; }
+
+.drop-picked .name {
+    flex: 1 1 auto;
+    font-weight: 500;
+    color: var(--text);
+    word-break: break-all;
+    font-size: 14px;
+}
+.drop-picked .size {
+    color: var(--subtle);
+    font-size: 12px;
+    flex-shrink: 0;
+    font-variant-numeric: tabular-nums;
+}
+.drop-picked .clear-file {
+    flex-shrink: 0;
+    padding: 4px 10px;
+    font-size: 12px;
+    background: transparent;
+    color: var(--subtle);
+    border: 1px solid var(--surface-2);
+    border-radius: 6px;
+    cursor: pointer;
+}
+.drop-picked .clear-file:hover {
+    color: var(--danger);
+    border-color: var(--danger);
+}
 
 /* ---- Class cards ---- */
 

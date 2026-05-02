@@ -113,10 +113,14 @@
             Title (optional)
             <input type="text" name="title" placeholder="Study guide for midterm 1">
         </label>
-        <label class="file-input">
+        <div class="drop-zone" data-upload-zone>
             <input type="file" name="file" required>
-            <span>Choose file</span>
-        </label>
+            <div class="drop-prompt">
+                <div class="drop-line">Drop a file here, or click to choose</div>
+                <div class="drop-hint">Any file type, up to 25&nbsp;MB</div>
+            </div>
+            <div class="drop-picked"></div>
+        </div>
         <button type="submit">Upload</button>
     </form>
 </section>
