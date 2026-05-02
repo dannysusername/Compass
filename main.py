@@ -171,6 +171,16 @@ def validate_pdf(content: bytes) -> None:
         raise HTTPException(400, "Not a valid PDF (bad magic bytes)")
 
 
+def event_sort_key(e) -> tuple:
+    """None last, then naive comparison (SQLite drops tz on roundtrip)."""
+    dt = e.starts_at
+    if dt is None:
+        return (1, datetime.max)
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return (0, dt)
+
+
 def parse_iso_dt(value) -> Optional[datetime]:
     """Parse an ISO datetime string, attaching LOCAL_TZ if naive. Returns None on failure."""
     if not value or not isinstance(value, str):
@@ -358,7 +368,7 @@ def class_detail(request: Request, class_id: int):
         if not cls:
             raise HTTPException(404, "Class not found")
         policies = sorted(cls.policies, key=lambda p: p.kind)
-        events = sorted(cls.events, key=lambda e: e.starts_at or datetime.max.replace(tzinfo=LOCAL_TZ))
+        events = sorted(cls.events, key=event_sort_key)
         documents = sorted(cls.documents, key=lambda d: d.uploaded_at, reverse=True)
         # Pre-decode any JSON-stored policies for the template
         decoded_policies = []
