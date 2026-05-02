@@ -5,8 +5,10 @@ __pycache__/
 *.pyd
 studyflow.db
 studyflow.db-journal
+studyflow.log
 uploads/
 .env
+.studyflow_token
 .DS_Store
 Thumbs.db
 .idea/
