@@ -97,7 +97,7 @@ templates = Jinja2Templates(directory="templates")
 def home(request: Request):
     with Session(engine) as session:
         classes = session.exec(select(Class).order_by(Class.code)).all()
-    return templates.TemplateResponse("home.html", {"request": request, "classes": classes})
+    return templates.TemplateResponse(request, "home.html", {"classes": classes})
 
 
 @app.post("/classes")
@@ -127,8 +127,9 @@ def class_detail(request: Request, class_id: int):
         events = sorted(cls.events, key=lambda e: e.starts_at or datetime.max)
         documents = list(cls.documents)
     return templates.TemplateResponse(
+        request,
         "class.html",
-        {"request": request, "cls": cls, "policies": policies, "events": events, "documents": documents},
+        {"cls": cls, "policies": policies, "events": events, "documents": documents},
     )
 
 
