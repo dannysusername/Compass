@@ -80,6 +80,40 @@ def port_in_use(host: str, port: int) -> bool:
             return False
 
 
+def evict_stale_python_on_port(port: int) -> bool:
+    """If a python.exe is listening on `port`, kill it. Returns True if a process
+    was evicted. Prevents a stale StudyFlow from before a code change holding the
+    port and silently making relaunches no-op."""
+    if sys.platform != "win32":
+        return False
+    ps_script = (
+        f"$p = (Get-NetTCPConnection -LocalPort {port} -State Listen "
+        f"-ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess; "
+        f"if ($p) {{ "
+        f"  $proc = Get-Process -Id $p -ErrorAction SilentlyContinue; "
+        f"  if ($proc -and $proc.ProcessName -in @('python','pythonw')) {{ "
+        f"    Stop-Process -Id $p -Force -ErrorAction SilentlyContinue; "
+        f"    Write-Output \"killed $p\" "
+        f"  }} "
+        f"}}"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps_script],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            creationflags=CREATE_NO_WINDOW,
+        )
+        if "killed" in (result.stdout or ""):
+            log.info("evicted stale python on port %d: %s", port, result.stdout.strip())
+            time.sleep(1.0)  # give the OS a moment to free the socket
+            return True
+    except Exception:
+        log.exception("eviction check failed")
+    return False
+
+
 # ---- Windows Job Object: any child of this process dies when this process exits ----
 #
 # uvicorn runs in its own subprocess. If this launcher is force-killed (Task Manager,
@@ -268,11 +302,16 @@ def _on_quit(icon: pystray.Icon, item: MenuItem) -> None:  # noqa: ARG001
 def main() -> int:
     log.info("StudyFlow tray launcher starting (root=%s)", ROOT)
 
-    # If port is taken, assume StudyFlow is already running and just open the browser.
+    # If port is taken, first try to evict any stale StudyFlow on it so a relaunch
+    # actually picks up new code. If something else (non-python) is on the port,
+    # just open Brave to it as before.
     if port_in_use("127.0.0.1", PORT):
-        log.info("port %d already in use; opening Brave at %s and exiting", PORT, LOCAL_URL)
-        open_in_brave()
-        return 0
+        evicted = evict_stale_python_on_port(PORT)
+        if not evicted or port_in_use("127.0.0.1", PORT):
+            log.info("port %d already in use (not ours); opening Brave at %s and exiting", PORT, LOCAL_URL)
+            open_in_brave()
+            return 0
+        log.info("evicted stale StudyFlow; starting fresh server")
 
     # Optional: load STUDYFLOW_TOKEN from a .studyflow_token file next to main.py
     token_file = ROOT / ".studyflow_token"
