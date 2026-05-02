@@ -387,6 +387,30 @@ form.danger button {
     to { transform: rotate(360deg); }
 }
 
+/* ---- Setup ---- */
+
+.setup-card {
+    background: var(--surface);
+    padding: 28px 24px;
+    border-radius: var(--radius);
+    margin-top: 32px;
+}
+.setup-card h1 { margin: 0 0 12px; font-size: 22px; }
+.setup-card p { margin: 0 0 20px; }
+.setup-card code {
+    background: var(--surface-2);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-family: ui-monospace, SF Mono, Menlo, monospace;
+    font-size: 13px;
+}
+.primary-link {
+    display: inline-block;
+    color: var(--accent);
+    text-decoration: none;
+    font-weight: 600;
+}
+
 /* ---- Footer ---- */
 
 .cal-link {

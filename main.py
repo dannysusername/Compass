@@ -5,10 +5,11 @@ from typing import Optional, List
 from zoneinfo import ZoneInfo
 import json
 import os
+import secrets
 import uuid
 
 from fastapi import (
-    FastAPI, BackgroundTasks, File, Form, HTTPException,
+    Depends, FastAPI, BackgroundTasks, File, Form, HTTPException,
     Request, UploadFile,
 )
 from fastapi.responses import (
@@ -29,6 +30,8 @@ LOCAL_TZ = ZoneInfo("America/New_York")  # change to your timezone
 OLLAMA_MODEL = "qwen2.5:7b"
 MAX_UPLOAD_MB = 25
 MAX_SYLLABUS_CHARS = 30_000  # cap text fed to LLM
+STUDYFLOW_TOKEN = os.environ.get("STUDYFLOW_TOKEN", "").strip()  # empty = dev mode (no auth)
+COOKIE_NAME = "studyflow_token"
 
 
 # ---- Database models ----
@@ -118,6 +121,36 @@ templates = Jinja2Templates(directory="templates")
 # ---- Parse-job status (in-memory; resets on restart) ----
 
 parse_jobs: dict[int, str] = {}  # syllabus_id -> "pending"|"running"|"done"|"error: ..."
+
+
+# ---- Auth ----
+
+def _token_matches(candidate: str) -> bool:
+    if not candidate or not STUDYFLOW_TOKEN:
+        return False
+    return secrets.compare_digest(candidate, STUDYFLOW_TOKEN)
+
+
+def require_token(request: Request) -> None:
+    """Dependency: enforce auth on mutating routes if STUDYFLOW_TOKEN is set."""
+    if not STUDYFLOW_TOKEN:
+        return  # dev mode
+    header = request.headers.get("x-studyflow-token", "")
+    if _token_matches(header):
+        return
+    cookie = request.cookies.get(COOKIE_NAME, "")
+    if _token_matches(cookie):
+        return
+    qp = request.query_params.get("token", "")
+    if _token_matches(qp):
+        return
+    raise HTTPException(401, "Missing or invalid token. Set X-StudyFlow-Token header or visit /setup-token in a browser.")
+
+
+def has_valid_cookie(request: Request) -> bool:
+    if not STUDYFLOW_TOKEN:
+        return True
+    return _token_matches(request.cookies.get(COOKIE_NAME, ""))
 
 
 # ---- Helpers ----
@@ -266,14 +299,39 @@ def process_syllabus(syllabus_id: int) -> None:
 
 # ---- Routes: Home & class CRUD ----
 
+@app.get("/setup-token", response_class=HTMLResponse)
+def setup_token_page(request: Request):
+    return templates.TemplateResponse(request, "setup_token.html", {
+        "auth_required": bool(STUDYFLOW_TOKEN),
+        "already_set": has_valid_cookie(request),
+    })
+
+
+@app.post("/setup-token")
+def setup_token_submit(token: str = Form(...)):
+    if STUDYFLOW_TOKEN and not _token_matches(token.strip()):
+        raise HTTPException(401, "Wrong token")
+    resp = RedirectResponse("/", status_code=303)
+    resp.set_cookie(
+        COOKIE_NAME,
+        token.strip() or "dev",
+        httponly=True,
+        samesite="lax",
+        max_age=60 * 60 * 24 * 365,
+    )
+    return resp
+
+
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):
+    if STUDYFLOW_TOKEN and not has_valid_cookie(request):
+        return RedirectResponse("/setup-token", status_code=303)
     with Session(engine) as session:
         classes = session.exec(select(Class).order_by(Class.code)).all()
     return templates.TemplateResponse(request, "home.html", {"classes": classes})
 
 
-@app.post("/classes")
+@app.post("/classes", dependencies=[Depends(require_token)])
 def add_class(name: str = Form(...), code: str = Form(...)):
     with Session(engine) as session:
         cls = Class(name=name.strip(), code=code.strip().upper())
@@ -282,7 +340,7 @@ def add_class(name: str = Form(...), code: str = Form(...)):
     return RedirectResponse(url="/", status_code=303)
 
 
-@app.get("/classes.json")
+@app.get("/classes.json", dependencies=[Depends(require_token)])
 def classes_json():
     with Session(engine) as session:
         classes = session.exec(select(Class).order_by(Class.code)).all()
@@ -293,6 +351,8 @@ def classes_json():
 
 @app.get("/classes/{class_id}", response_class=HTMLResponse)
 def class_detail(request: Request, class_id: int):
+    if STUDYFLOW_TOKEN and not has_valid_cookie(request):
+        return RedirectResponse("/setup-token", status_code=303)
     with Session(engine) as session:
         cls = session.get(Class, class_id)
         if not cls:
@@ -318,7 +378,7 @@ def class_detail(request: Request, class_id: int):
     })
 
 
-@app.post("/classes/{class_id}/delete")
+@app.post("/classes/{class_id}/delete", dependencies=[Depends(require_token)])
 def delete_class(class_id: int):
     with Session(engine) as session:
         cls = session.get(Class, class_id)
@@ -331,7 +391,7 @@ def delete_class(class_id: int):
 
 # ---- Routes: Syllabus upload + parsing ----
 
-@app.post("/syllabus")
+@app.post("/syllabus", dependencies=[Depends(require_token)])
 async def syllabus_upload(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
@@ -399,7 +459,7 @@ def syllabus_status_json(syllabus_id: int):
 
 # ---- Routes: Event + Policy edit/delete ----
 
-@app.post("/events/{event_id}/edit")
+@app.post("/events/{event_id}/edit", dependencies=[Depends(require_token)])
 def edit_event(
     event_id: int,
     title: str = Form(...),
@@ -421,7 +481,7 @@ def edit_event(
     return RedirectResponse(f"/classes/{cls_id}", status_code=303)
 
 
-@app.post("/events/{event_id}/delete")
+@app.post("/events/{event_id}/delete", dependencies=[Depends(require_token)])
 def delete_event(event_id: int):
     with Session(engine) as session:
         ev = session.get(CalendarEvent, event_id)
@@ -433,7 +493,7 @@ def delete_event(event_id: int):
     return RedirectResponse(f"/classes/{cls_id}", status_code=303)
 
 
-@app.post("/policies/{policy_id}/edit")
+@app.post("/policies/{policy_id}/edit", dependencies=[Depends(require_token)])
 def edit_policy(policy_id: int, content: str = Form(...)):
     with Session(engine) as session:
         p = session.get(Policy, policy_id)
@@ -446,7 +506,7 @@ def edit_policy(policy_id: int, content: str = Form(...)):
     return RedirectResponse(f"/classes/{cls_id}", status_code=303)
 
 
-@app.post("/policies/{policy_id}/delete")
+@app.post("/policies/{policy_id}/delete", dependencies=[Depends(require_token)])
 def delete_policy(policy_id: int):
     with Session(engine) as session:
         p = session.get(Policy, policy_id)
@@ -460,7 +520,7 @@ def delete_policy(policy_id: int):
 
 # ---- Routes: Document upload ----
 
-@app.post("/classes/{class_id}/docs")
+@app.post("/classes/{class_id}/docs", dependencies=[Depends(require_token)])
 async def upload_doc(
     class_id: int,
     file: UploadFile = File(...),
@@ -487,7 +547,7 @@ async def upload_doc(
     return RedirectResponse(f"/classes/{class_id}", status_code=303)
 
 
-@app.post("/docs/{doc_id}/delete")
+@app.post("/docs/{doc_id}/delete", dependencies=[Depends(require_token)])
 def delete_doc(doc_id: int):
     with Session(engine) as session:
         d = session.get(Document, doc_id)

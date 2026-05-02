@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Set up — StudyFlow{% endblock %}
+{% block content %}
+
+<div class="setup-card">
+    {% if not auth_required %}
+        <h1>No token configured</h1>
+        <p class="subtle">StudyFlow is running in dev mode (no <code>STUDYFLOW_TOKEN</code> env var set). You don't need to do anything — just go to the home page.</p>
+        <a href="/" class="primary-link">Go to home →</a>
+    {% elif already_set %}
+        <h1>Already set up</h1>
+        <p class="subtle">Your token cookie is valid.</p>
+        <a href="/" class="primary-link">Go to home →</a>
+    {% else %}
+        <h1>Paste your token</h1>
+        <p class="subtle">StudyFlow is gated to prevent random devices on your WiFi from posting to your backend. Paste the token you set as <code>STUDYFLOW_TOKEN</code> when you started the server. It'll be saved as an HttpOnly cookie on this device.</p>
+        <form method="post" action="/setup-token">
+            <label>
+                Token
+                <input type="password" name="token" required autofocus autocomplete="off">
+            </label>
+            <button type="submit">Save token &amp; continue</button>
+        </form>
+        <p class="hint">Lost your token? Stop the server, set a new <code>STUDYFLOW_TOKEN</code>, restart.</p>
+    {% endif %}
+</div>
+
+{% endblock %}
