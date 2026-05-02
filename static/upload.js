@@ -105,8 +105,31 @@
         }
     }
 
+    function wireThemeToggle() {
+        var btn = document.querySelector("[data-theme-toggle]");
+        if (!btn) return;
+        var html = document.documentElement;
+
+        function setLabel() {
+            btn.textContent = html.classList.contains("dark") ? "Light" : "Dark";
+        }
+        setLabel();
+
+        btn.addEventListener("click", function () {
+            var goingDark = !html.classList.contains("dark");
+            html.classList.toggle("dark", goingDark);
+            try {
+                localStorage.setItem("studyflow-theme", goingDark ? "dark" : "light");
+            } catch (e) {
+                // localStorage may be unavailable in private mode; toggle still works for the session.
+            }
+            setLabel();
+        });
+    }
+
     function init() {
         document.querySelectorAll("[data-upload-zone]").forEach(wireZone);
+        wireThemeToggle();
     }
 
     if (document.readyState === "loading") {

@@ -2,26 +2,9 @@
 {% block title %}StudyFlow{% endblock %}
 {% block content %}
 
-<form method="post" action="/syllabus" enctype="multipart/form-data" class="upload-card">
-    <h1>Upload a syllabus</h1>
-    <p class="subtle">StudyFlow auto-creates the class, extracts policies, and pulls exam dates from the PDF.</p>
-    <div class="drop-zone" data-upload-zone>
-        <input type="file" name="file" accept="application/pdf,.pdf" required>
-        <div class="drop-prompt">
-            <div class="drop-glyph">. . .</div>
-            <p class="drop-line">
-                Drop a PDF here<span class="or">or</span><span class="underline">choose a file</span>
-            </p>
-            <div class="drop-hint">PDF &middot; up to 25&nbsp;MB</div>
-        </div>
-        <div class="drop-picked"></div>
-    </div>
-    <button type="submit">Upload syllabus</button>
-</form>
-
-{% if classes %}
 <section>
-    <h2>Your classes</h2>
+    <h2>Your courses</h2>
+    {% if classes %}
     <ul class="class-list">
         {% for c in classes %}
         <li>
@@ -32,8 +15,31 @@
         </li>
         {% endfor %}
     </ul>
+    {% else %}
+    <p class="empty">No courses yet. Upload a syllabus below to add one.</p>
+    {% endif %}
 </section>
-{% endif %}
+
+<section class="upload-card">
+    <h2>Add a syllabus</h2>
+    <p class="subtle">StudyFlow auto-creates the class, extracts policies, and pulls exam dates from the PDF.</p>
+    <form method="post" action="/syllabus" enctype="multipart/form-data">
+        <div class="drop-zone" data-upload-zone>
+            <input type="file" name="file" accept="application/pdf,.pdf" required>
+            <div class="drop-prompt">
+                <div class="drop-glyph">. . .</div>
+                <p class="drop-line">
+                    Drop a PDF here<span class="or">or</span><span class="underline">choose a file</span>
+                </p>
+                <div class="drop-hint">PDF &middot; up to 25&nbsp;MB</div>
+            </div>
+            <div class="drop-picked"></div>
+        </div>
+        <div class="actions">
+            <button type="submit">Upload syllabus</button>
+        </div>
+    </form>
+</section>
 
 <details class="manual-add">
     <summary>No syllabus yet? Add a class manually</summary>

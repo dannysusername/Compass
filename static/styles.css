@@ -1,6 +1,6 @@
 /* StudyFlow — Bullet Journal aesthetic
    Cream paper, ink blue, rust accents, serif body, mono for tech labels.
-   Mobile-first. Light-only (no dark mode — the paper IS the design). */
+   Mobile-first. Light by default, dark = midnight-ink mode (toggle in header). */
 
 :root {
     --paper:    #F4F1E8;
@@ -21,6 +21,28 @@
     --mono:   "JetBrains Mono", "SF Mono", "IBM Plex Mono",
               Menlo, Consolas, ui-monospace, monospace;
     --radius: 4px;
+}
+
+/* Dark mode = "midnight ink" — same paper-and-ink language, after dusk.
+   Cream becomes the foreground, deep navy becomes the page. Rust glows. */
+:root.dark {
+    --paper:    #14181F;
+    --paper-2:  #1C2230;
+    --paper-3:  #262E40;
+    --ink:      #E8E2D0;
+    --ink-2:    #F0EBD9;
+    --ink-3:    #C4C0B0;
+    --rust:     #E89668;
+    --muted:    #8E8674;
+    --rule:     rgba(232, 226, 208, 0.18);
+    --ok:       #8DBC6A;
+    --danger:   #E27575;
+    --warn:     #E5B36A;
+}
+:root.dark body {
+    background-image:
+      radial-gradient(circle at 20% 10%, rgba(232, 226, 208, 0.04) 0, transparent 45%),
+      radial-gradient(circle at 80% 70%, rgba(232, 226, 208, 0.05) 0, transparent 55%);
 }
 
 * { box-sizing: border-box; }
@@ -48,6 +70,10 @@ header {
     position: sticky;
     top: 0;
     z-index: 10;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
 }
 
 .logo {
@@ -62,6 +88,31 @@ header {
 }
 .logo em { font-style: italic; font-weight: 700; }
 .logo .dot { color: var(--rust); font-weight: 900; font-style: normal; }
+
+/* Theme toggle: small mono pill on the right of the masthead. */
+.theme-toggle {
+    background: transparent;
+    color: var(--ink);
+    border: 1px solid var(--ink);
+    padding: 5px 12px;
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    cursor: pointer;
+    border-radius: 2px;
+    box-shadow: none;
+    align-self: center;
+    transition: background 0.12s, color 0.12s;
+}
+.theme-toggle:hover {
+    background: var(--ink);
+    color: var(--paper);
+    transform: none;
+    box-shadow: none;
+}
+.theme-toggle:active { transform: none; box-shadow: none; }
 
 main {
     max-width: 720px;
@@ -157,18 +208,26 @@ code {
     gap: 12px;
 }
 
-/* ---- Upload card (home page primary) ---- */
+/* ---- Upload card (now positioned below the classes list) ---- */
 
 .upload-card {
-    margin: 0 0 32px;
+    margin: 8px 0 0;
     padding: 0;
     display: block;
 }
-.upload-card > h1 {
-    margin: 0 0 4px;
-    font-size: 22px;
-}
+.upload-card > h2 { margin-top: 36px; }
 .upload-card > p.subtle { margin: 0 0 20px; font-size: 15px; }
+.upload-card form { margin-top: 0; }
+
+/* Center the primary upload button under the drop zone. */
+.upload-card .actions {
+    margin-top: 18px;
+    display: flex;
+    justify-content: center;
+}
+.upload-card .actions button {
+    align-self: center;
+}
 
 /* ---- Drop zone ---- */
 

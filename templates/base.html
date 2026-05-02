@@ -3,13 +3,23 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="theme-color" content="#1a1a1a">
+    <meta name="theme-color" content="#F4F1E8">
     <title>{% block title %}StudyFlow{% endblock %}</title>
     <link rel="stylesheet" href="/static/styles.css">
+    <script>
+      // Apply saved theme before paint to avoid a flash of light mode.
+      (function () {
+        try {
+          var t = localStorage.getItem("studyflow-theme");
+          if (t === "dark") document.documentElement.classList.add("dark");
+        } catch (e) {}
+      })();
+    </script>
 </head>
 <body>
     <header>
         <a href="/" class="logo"><em>Study</em>flow<span class="dot">.</span></a>
+        <button type="button" class="theme-toggle" data-theme-toggle aria-label="Toggle dark mode">Dark</button>
     </header>
     <main>
         {% block content %}{% endblock %}
