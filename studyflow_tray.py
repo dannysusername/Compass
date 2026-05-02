@@ -286,15 +286,117 @@ def make_ico_file(out: Path) -> None:
     base.save(out, format="ICO", sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
 
 
+# ---- Server controller (wraps start/stop with state for the tray menu) ----
+
+class ServerController:
+    """Owns the uvicorn subprocess. The tray menu calls into this to stop,
+    restart, or restart the server on demand without ever touching PowerShell."""
+
+    def __init__(self) -> None:
+        self.proc: subprocess.Popen | None = None
+
+    def is_running(self) -> bool:
+        return self.proc is not None and self.proc.poll() is None
+
+    def status_text(self) -> str:
+        if self.is_running():
+            return f"Running on :{PORT}"
+        return "Stopped"
+
+    def reload_env(self) -> None:
+        """Re-read .anthropic_key and .studyflow_token so a Restart picks up
+        any edits the user made since the launcher started."""
+        for fname, var in (
+            (".studyflow_token", "STUDYFLOW_TOKEN"),
+            (".anthropic_key", "ANTHROPIC_API_KEY"),
+        ):
+            f = ROOT / fname
+            if f.is_file():
+                v = f.read_text(encoding="utf-8").strip()
+                if v:
+                    os.environ[var] = v
+                    log.info("reloaded %s from %s", var, fname)
+
+    def start(self) -> bool:
+        """Start uvicorn if it isn't already running. Returns True on success."""
+        if self.is_running():
+            return True
+        # Evict anything else on :8000 (some other StudyFlow instance, etc.)
+        if port_in_use("127.0.0.1", PORT):
+            evict_stale_python_on_port(PORT)
+        self.reload_env()
+        self.proc = start_server()
+        # Wait for port to bind
+        deadline = time.time() + 30.0
+        while time.time() < deadline:
+            if self.proc.poll() is not None:
+                log.error("uvicorn exited early with code %s", self.proc.returncode)
+                self.proc = None
+                return False
+            if port_in_use("127.0.0.1", PORT):
+                log.info("server listening on :%d", PORT)
+                return True
+            time.sleep(0.3)
+        log.error("server did not become ready within 30s")
+        self.stop()
+        return False
+
+    def stop(self) -> None:
+        if self.proc is None:
+            return
+        if self.proc.poll() is None:
+            stop_server(self.proc)
+        self.proc = None
+
+    def restart(self) -> bool:
+        log.info("restart requested")
+        self.stop()
+        return self.start()
+
+
 # ---- Tray menu actions ----
 
-def _on_open(icon: pystray.Icon, item: MenuItem) -> None:  # noqa: ARG001
-    open_in_brave()
+def make_menu(controller: ServerController) -> Menu:
+    """Build the tray menu. Text and enabled state are functions so they
+    re-evaluate every time the menu opens — no manual update_menu() needed."""
 
+    def status_item_text(_item: MenuItem) -> str:
+        return ("● " if controller.is_running() else "○ ") + controller.status_text()
 
-def _on_quit(icon: pystray.Icon, item: MenuItem) -> None:  # noqa: ARG001
-    log.info("quit requested via tray menu")
-    icon.stop()
+    def toggle_text(_item: MenuItem) -> str:
+        return "Stop server" if controller.is_running() else "Start server"
+
+    def on_open(_icon: pystray.Icon, _item: MenuItem) -> None:
+        if not controller.is_running():
+            log.info("Open clicked while server stopped; starting first")
+            if not controller.start():
+                return
+        open_in_brave()
+
+    def on_restart(_icon: pystray.Icon, _item: MenuItem) -> None:
+        controller.restart()
+
+    def on_toggle(_icon: pystray.Icon, _item: MenuItem) -> None:
+        if controller.is_running():
+            controller.stop()
+        else:
+            controller.start()
+
+    def on_quit(icon: pystray.Icon, _item: MenuItem) -> None:
+        log.info("quit requested via tray menu")
+        controller.stop()
+        icon.stop()
+
+    return Menu(
+        MenuItem(status_item_text, None, enabled=False),
+        Menu.SEPARATOR,
+        MenuItem("Open StudyFlow", on_open, default=True),
+        Menu.SEPARATOR,
+        MenuItem("Restart server", on_restart, enabled=lambda _i: controller.is_running()),
+        MenuItem(toggle_text, on_toggle),
+        Menu.SEPARATOR,
+        MenuItem("Quit StudyFlow", on_quit),
+    )
 
 
 # ---- Main ----
@@ -313,40 +415,11 @@ def main() -> int:
             return 0
         log.info("evicted stale StudyFlow; starting fresh server")
 
-    # Optional: load STUDYFLOW_TOKEN from a .studyflow_token file next to main.py
-    token_file = ROOT / ".studyflow_token"
-    if token_file.is_file():
-        token = token_file.read_text(encoding="utf-8").strip()
-        if token:
-            os.environ["STUDYFLOW_TOKEN"] = token
-            log.info("loaded STUDYFLOW_TOKEN from %s", token_file.name)
-
-    # Optional: load ANTHROPIC_API_KEY from a .anthropic_key file next to main.py
-    # so the user doesn't have to set the env var in every shell.
-    api_key_file = ROOT / ".anthropic_key"
-    if api_key_file.is_file():
-        api_key = api_key_file.read_text(encoding="utf-8").strip()
-        if api_key:
-            os.environ["ANTHROPIC_API_KEY"] = api_key
-            log.info("loaded ANTHROPIC_API_KEY from %s", api_key_file.name)
-
-    proc = start_server()
-    atexit.register(stop_server, proc)
-
-    # Wait for the server to be reachable, then open Brave.
-    deadline = time.time() + 30.0
-    while time.time() < deadline:
-        if proc.poll() is not None:
-            log.error("uvicorn exited early with code %s", proc.returncode)
-            return 1
-        if port_in_use("127.0.0.1", PORT):
-            log.info("server listening on :%d", PORT)
-            break
-        time.sleep(0.3)
-    else:
-        log.error("server did not become ready within 30s")
-        stop_server(proc)
+    controller = ServerController()
+    if not controller.start():
+        log.error("initial server start failed; exiting")
         return 1
+    atexit.register(controller.stop)
 
     open_in_brave()
 
@@ -354,15 +427,12 @@ def main() -> int:
         "studyflow",
         icon=make_icon_image(64),
         title="StudyFlow",
-        menu=Menu(
-            MenuItem("Open StudyFlow", _on_open, default=True),
-            MenuItem("Quit", _on_quit),
-        ),
+        menu=make_menu(controller),
     )
     try:
         icon.run()
     finally:
-        stop_server(proc)
+        controller.stop()
         log.info("StudyFlow tray launcher exited")
     return 0
 
