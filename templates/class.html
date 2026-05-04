@@ -8,105 +8,57 @@
 <div class="class-page">
 
 {% if syllabus %}
+<div class="test-layout">
+    <div class="test-pdf-pane">
+        <iframe class="test-pdf-iframe"
+                src="/uploads/{{ syllabus.filename }}"
+                title="Syllabus preview"></iframe>
+    </div>
+
+    <aside class="test-transform-pane">
+        <h3>Transform a selection</h3>
+
+        <label class="test-field">
+            <span class="test-label">Selected text</span>
+            <textarea id="test-text" rows="6"
+                      placeholder="Highlight in the PDF → Ctrl/Cmd+C → paste here"></textarea>
+        </label>
+
+        <label class="test-field">
+            <span class="test-label">How should the AI format this?</span>
+            <textarea id="test-prompt" rows="3"
+                      placeholder="e.g. simplify this, make a clean table without colors, bullet list"></textarea>
+        </label>
+
+        <div class="test-actions">
+            <button type="button" id="test-go" class="primary">Transform</button>
+            <button type="button" id="test-clear" class="secondary">Clear</button>
+        </div>
+
+        <p id="test-status" class="subtle test-status" hidden></p>
+
+        <div id="test-output" class="test-output" hidden>
+            <h4>Result</h4>
+            <div id="test-output-body" class="card-body"></div>
+            <details class="test-source">
+                <summary>view markdown source</summary>
+                <pre id="test-output-md"></pre>
+            </details>
+        </div>
+    </aside>
+</div>
+
+<p class="syllabus-meta subtle">
+    <a href="/uploads/{{ syllabus.filename }}" target="_blank" rel="noopener">Open PDF in a new tab</a>
+    &middot;
+    <a href="/uploads/{{ syllabus.filename }}" download="{{ syllabus.filename }}">Download</a>
+</p>
+{% else %}
 <section class="syllabus-link">
     <h2>Syllabus</h2>
-    <p>
-        <a href="/syllabus/{{ syllabus.id }}/sections" class="primary-link">Pick sections → add cards</a>
-    </p>
-    <p>
-        <a href="/uploads/{{ syllabus.filename }}" target="_blank" rel="noopener">View PDF</a>
-        <span class="subtle"> &middot; </span>
-        <a href="/uploads/{{ syllabus.filename }}" download="{{ syllabus.filename }}">Download</a>
-    </p>
+    <p class="empty">No syllabus uploaded for this class yet. Upload one from the home page.</p>
 </section>
 {% endif %}
-
-<details class="class-section" data-state-key="class-{{ cls.id }}-cards" open>
-<summary class="class-section-summary">
-    <h2>Cards</h2>
-    <span class="section-toggle-chevron" aria-hidden="true"></span>
-</summary>
-<div class="class-section-body">
-    {% if cards %}
-    <ul class="card-list" data-class-id="{{ cls.id }}">
-        {% for c in cards %}
-        {% set parsed = c.display_text | split_card_sections %}
-        {% set parsed_headings = parsed | selectattr('heading') | map(attribute='heading') | list %}
-        {% set card_title = parsed_headings | join(' · ') if parsed_headings else (c.label or '') %}
-        {% set kinds_by_heading = c | section_kinds_for_card %}
-        <li class="card-item card-item--{{ c.kind }}" data-card-id="{{ c.id }}">
-            <div class="card-drag-handle" title="Drag to reorder" aria-label="Drag to reorder">
-                <span class="burger-icon" aria-hidden="true"></span>
-            </div>
-            <details class="card-details" data-state-key="card-{{ c.id }}" open>
-                <summary class="card-summary">
-                    <span class="card-summary-text">
-                        {% if card_title %}<span class="card-title">{{ card_title }}</span>{% endif %}
-                        {% if c.tailor_prompt %}<span class="card-tailor-prompt"><span class="card-tailor-prompt-label">Tailored with:</span> {{ c.tailor_prompt }}</span>{% endif %}
-                    </span>
-                    <span class="card-summary-controls">
-                        <button type="button" class="card-delete-btn" data-card-id="{{ c.id }}" title="Delete this card">Delete</button>
-                        <span class="card-toggle-chevron" aria-hidden="true"></span>
-                    </span>
-                </summary>
-                <div class="card-content">
-                    {% if parsed | length > 1 %}
-                        {% for sec in parsed %}
-                        {% set sec_kind = kinds_by_heading.get(sec.heading) %}
-                        <details class="section-details" data-state-key="card-{{ c.id }}-sec-{{ loop.index0 }}" open>
-                            <summary class="section-summary">
-                                <span class="section-summary-text">
-                                    {% if sec.heading %}
-                                    <span class="section-title">{{ sec.heading }}</span>
-                                    {% else %}
-                                    <span class="section-title section-title--unnamed">Notes</span>
-                                    {% endif %}
-                                    {% if sec_kind %}
-                                    <span class="section-kind section-kind--{{ sec_kind }}">{{ sec_kind }}</span>
-                                    {% endif %}
-                                </span>
-                                <span class="section-toggle-chevron" aria-hidden="true"></span>
-                            </summary>
-                            <div class="section-content card-body">{{ sec.body | render_text_with_tables(c.tables_json) }}</div>
-                        </details>
-                        {% endfor %}
-                    {% else %}
-                        {# Single-section card — render the body directly to avoid a redundant inner toggle #}
-                        {% set only_kind = (kinds_by_heading.values() | list | first) if kinds_by_heading else (c.kind if c.kind in ('summary','verbatim') else None) %}
-                        {% if only_kind %}
-                        <p class="single-section-kind"><span class="section-kind section-kind--{{ only_kind }}">{{ only_kind }}</span></p>
-                        {% endif %}
-                        <div class="card-body">{{ c.display_text | render_text_with_tables(c.tables_json) }}</div>
-                    {% endif %}
-
-                    {% if c.kind == 'summary' %}
-                    <details class="source" data-state-key="card-{{ c.id }}-source"><summary>show original</summary><blockquote>{{ c.original_text | render_text_with_tables(c.tables_json) }}</blockquote></details>
-                    {% endif %}
-                    <details class="row-actions" data-state-key="card-{{ c.id }}-edit">
-                        <summary>Edit</summary>
-                        <form method="post" action="/cards/{{ c.id }}/edit" class="inline-edit">
-                            <label>Label
-                                <input type="text" name="label" value="{{ c.label or '' }}" placeholder="e.g. Office hours">
-                            </label>
-                            <label>Body
-                                <textarea name="display_text" rows="3">{{ c.display_text }}</textarea>
-                            </label>
-                            <button type="submit">Save</button>
-                        </form>
-                        <form method="post" action="/cards/{{ c.id }}/delete" class="card-delete-form" data-card-id="{{ c.id }}">
-                            <button type="submit" class="danger-btn">Delete card</button>
-                        </form>
-                    </details>
-                </div>
-            </details>
-        </li>
-        {% endfor %}
-    </ul>
-    {% else %}
-    <p class="empty">No cards yet. {% if syllabus %}<a href="/syllabus/{{ syllabus.id }}/sections">Pick sections from your syllabus</a> to add some.{% else %}Upload a syllabus first.{% endif %}</p>
-    {% endif %}
-</div>
-</details>
 
 <details class="class-section" data-state-key="class-{{ cls.id }}-events" open>
 <summary class="class-section-summary">
@@ -211,9 +163,85 @@
 <script src="{{ '/static/todo.js' | static_v }}" defer></script>
 <script src="{{ '/static/modal.js' | static_v }}" defer></script>
 
+{% if syllabus %}
 <script>
-// Floating task panel toggle. Clicking the FAB shows/hides the panel; the
-// panel is fully fixed-position so it never pushes page content around.
+// PDF + AI transform sidebar.
+(function () {
+    const textInput = document.getElementById('test-text');
+    const promptInput = document.getElementById('test-prompt');
+    const goBtn = document.getElementById('test-go');
+    const clearBtn = document.getElementById('test-clear');
+    const status = document.getElementById('test-status');
+    const output = document.getElementById('test-output');
+    const outputBody = document.getElementById('test-output-body');
+    const outputMd = document.getElementById('test-output-md');
+    if (!textInput) return;
+
+    function setStatus(msg, isError) {
+        if (!msg) { status.hidden = true; status.textContent = ''; return; }
+        status.hidden = false;
+        status.textContent = msg;
+        status.classList.toggle('is-error', !!isError);
+    }
+
+    async function transform() {
+        const text = textInput.value.trim();
+        const prompt = promptInput.value.trim();
+        if (!text) { setStatus('Paste some selected text first.', true); return; }
+        if (!prompt) { setStatus('Tell the AI what to do.', true); return; }
+        goBtn.disabled = true;
+        goBtn.textContent = 'Working…';
+        setStatus('Asking Grok (5–30s)…');
+        output.hidden = true;
+        try {
+            const r = await fetch('/test/transform', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                body: JSON.stringify({ text, prompt, syllabus_id: {{ syllabus.id }} }),
+            });
+            if (!r.ok) {
+                let detail = `${r.status} ${r.statusText}`;
+                try { const j = await r.json(); if (j.detail) detail = j.detail; } catch (_) {}
+                throw new Error(detail);
+            }
+            const data = await r.json();
+            outputBody.innerHTML = data.html || '';
+            outputMd.textContent = data.markdown || '';
+            output.hidden = false;
+            const xref = data.cross_reference_used
+                ? 'Done — used pdfplumber tables as cross-reference.'
+                : 'Done — no structured tables to cross-reference for this syllabus.';
+            setStatus(xref);
+        } catch (err) {
+            setStatus('Error: ' + err.message, true);
+        } finally {
+            goBtn.disabled = false;
+            goBtn.textContent = 'Transform';
+        }
+    }
+
+    function clearAll() {
+        textInput.value = '';
+        promptInput.value = '';
+        output.hidden = true;
+        setStatus('');
+        textInput.focus();
+    }
+
+    goBtn.addEventListener('click', transform);
+    clearBtn.addEventListener('click', clearAll);
+    promptInput.addEventListener('keydown', (e) => {
+        if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+            e.preventDefault();
+            transform();
+        }
+    });
+})();
+</script>
+{% endif %}
+
+<script>
+// Floating tasks panel toggle.
 (function () {
     const fab = document.querySelector('[data-toggle-task-panel]');
     const panel = document.getElementById('task-fab-panel');
@@ -232,12 +260,11 @@
 
 <script>
 // Persist <details> open/closed state to localStorage so reloads don't
-// reset every card to "expanded".
+// reset every section.
 (function () {
     const STORAGE_KEY = 'studyflow-details';
     let states = {};
     try { states = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}') || {}; } catch (_) {}
-
     document.querySelectorAll('details[data-state-key]').forEach((d) => {
         const key = d.dataset.stateKey;
         if (key in states) d.open = states[key];
@@ -246,222 +273,6 @@
             try { localStorage.setItem(STORAGE_KEY, JSON.stringify(states)); } catch (_) {}
         });
     });
-})();
-
-// AJAX delete for cards. Both the big title-row button and the inside-edit
-// "Delete card" button route through the same fetch() call so the page never
-// reloads. The card LI fades out and is removed when the server confirms.
-(function () {
-    function deleteCard(cardId, cardLi) {
-        if (!confirm('Delete this card?')) return;
-        fetch(`/cards/${cardId}/delete`, {
-            method: 'POST',
-            headers: {
-                'Accept': 'application/json',
-                'X-Requested-With': 'fetch',
-            },
-        })
-            .then(async (r) => {
-                if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
-                // Server may return JSON (new AJAX branch) or HTML (legacy
-                // redirect that fetch silently followed). Either way, ok=true
-                // means the card was deleted — proceed to remove the LI.
-                const ct = r.headers.get('content-type') || '';
-                if (ct.includes('application/json')) {
-                    try { return await r.json(); } catch (_) { return null; }
-                }
-                return null;
-            })
-            .then(() => {
-                cardLi.style.transition = 'opacity 0.2s ease, max-height 0.25s ease, margin 0.25s ease, padding 0.25s ease';
-                cardLi.style.opacity = '0';
-                cardLi.style.maxHeight = cardLi.offsetHeight + 'px';
-                requestAnimationFrame(() => {
-                    cardLi.style.maxHeight = '0';
-                    cardLi.style.margin = '0';
-                    cardLi.style.padding = '0';
-                });
-                setTimeout(() => cardLi.remove(), 260);
-            })
-            .catch((err) => {
-                alert('Could not delete card: ' + err.message);
-            });
-    }
-
-    // Big delete button at the card title.
-    document.querySelectorAll('.card-delete-btn').forEach((btn) => {
-        btn.addEventListener('click', (e) => {
-            // Inside <summary>, prevent the toggle on click.
-            e.preventDefault();
-            e.stopPropagation();
-            const cardLi = btn.closest('.card-item');
-            deleteCard(btn.dataset.cardId, cardLi);
-        });
-    });
-
-    // Delete form inside the Edit panel.
-    document.querySelectorAll('.card-delete-form').forEach((form) => {
-        form.addEventListener('submit', (e) => {
-            e.preventDefault();
-            const cardLi = form.closest('.card-item');
-            deleteCard(form.dataset.cardId, cardLi);
-        });
-    });
-
-    // ---- Drag-and-drop reordering via burger handle ----
-    //
-    // Pointer-Events-based custom drag. Reliable across Chrome/Brave/Firefox/
-    // Safari/Edge plus touch devices. Reorders the DOM live as you drag, so
-    // there's no separate ghost element — the card you're moving floats
-    // semi-transparent and the surrounding cards shuffle around it. On
-    // pointerup we POST the new order to the server.
-    const cardList = document.querySelector('.card-list');
-    if (cardList) {
-        const classId = cardList.dataset.classId;
-        const MOVE_THRESHOLD = 5; // px before we count it as a real drag
-        let dragLi = null;
-        let dragHandle = null;
-        let pointerStart = null;
-        let isDragging = false;
-        let lastSentOrder = null;
-
-        // FLIP animation: smoothly slide every card (including the one being
-        // dragged) from its old position to its new position when the DOM
-        // order changes.
-        function reorderWithFlip(insertBefore) {
-            const currentNext = dragLi.nextSibling;
-            if (insertBefore === dragLi) return;
-            if (insertBefore && insertBefore === currentNext) return;
-            if (!insertBefore && currentNext === null) return;
-
-            const allCards = Array.from(cardList.querySelectorAll('.card-item'));
-            const firstRects = new Map();
-            allCards.forEach((c) => firstRects.set(c, c.getBoundingClientRect()));
-
-            if (insertBefore) cardList.insertBefore(dragLi, insertBefore);
-            else cardList.appendChild(dragLi);
-
-            allCards.forEach((c) => {
-                const first = firstRects.get(c);
-                const last = c.getBoundingClientRect();
-                const dy = first.top - last.top;
-                if (Math.abs(dy) < 1) return;
-                // The dragged card carries a slight lift + tilt through the
-                // animation, so it feels physical. Other cards smoothly slide.
-                const lift = (c === dragLi) ? ' scale(1.025)' : '';
-                c.style.transition = 'none';
-                c.style.transform = `translateY(${dy}px)${lift}`;
-                void c.offsetHeight;
-                // easeOutQuint — fast start, very gentle landing. Feels organic.
-                c.style.transition = 'transform 0.32s cubic-bezier(0.22, 1, 0.36, 1)';
-                c.style.transform = lift.trim();
-            });
-        }
-
-        function moveCardTowards(clientY) {
-            if (!dragLi) return;
-            const others = Array.from(cardList.querySelectorAll('.card-item:not(.dragging)'));
-            let insertBefore = null;
-            // Find the first card whose vertical midpoint is below the cursor —
-            // dragLi belongs immediately before it.
-            for (const target of others) {
-                const rect = target.getBoundingClientRect();
-                if (clientY < rect.top + rect.height / 2) {
-                    insertBefore = target;
-                    break;
-                }
-            }
-            // insertBefore=null means "after the last card"
-            reorderWithFlip(insertBefore);
-        }
-
-        function startDrag() {
-            if (isDragging) return;
-            isDragging = true;
-            dragLi.classList.add('dragging');
-            document.body.classList.add('cards-dragging');
-            // Pop up immediately. A touch of overshoot easing gives a
-            // tactile "snatch" feel rather than a clinical rise.
-            dragLi.style.transition = 'transform 0.36s cubic-bezier(0.34, 1.56, 0.64, 1)';
-            dragLi.style.transform = 'scale(1.025)';
-        }
-
-        function endDrag(commit) {
-            if (dragLi) {
-                dragLi.classList.remove('dragging');
-                // Settle back down with a soft, organic curve.
-                const settling = dragLi;
-                settling.style.transition = 'transform 0.44s cubic-bezier(0.22, 1, 0.36, 1)';
-                settling.style.transform = '';
-                setTimeout(() => {
-                    settling.style.transition = '';
-                    settling.style.transform = '';
-                }, 480);
-            }
-            document.body.classList.remove('cards-dragging');
-            cardList.querySelectorAll('.drop-above, .drop-below').forEach((el) => {
-                el.classList.remove('drop-above', 'drop-below');
-            });
-            if (commit && isDragging) persistOrder();
-            dragLi = null;
-            dragHandle = null;
-            pointerStart = null;
-            isDragging = false;
-        }
-
-        function persistOrder() {
-            const ids = Array.from(cardList.querySelectorAll('.card-item'))
-                .map((el) => parseInt(el.dataset.cardId, 10))
-                .filter((n) => !Number.isNaN(n));
-            const key = ids.join(',');
-            if (key === lastSentOrder) return;
-            lastSentOrder = key;
-            fetch(`/classes/${classId}/cards/reorder`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Accept': 'application/json',
-                },
-                body: JSON.stringify({ card_ids: ids }),
-            }).catch((err) => console.error('reorder failed:', err));
-        }
-
-        // pointerdown sits on the handle so we know a drag should start.
-        // pointermove + pointerup live on document so they keep firing even
-        // when the cursor leaves the handle (which it will, immediately).
-        cardList.querySelectorAll('.card-drag-handle').forEach((handle) => {
-            handle.addEventListener('pointerdown', (e) => {
-                if (e.button !== undefined && e.button !== 0) return;
-                const li = handle.closest('.card-item');
-                if (!li) return;
-                dragLi = li;
-                dragHandle = handle;
-                pointerStart = { x: e.clientX, y: e.clientY };
-                isDragging = false;
-                e.preventDefault();
-            });
-        });
-
-        document.addEventListener('pointermove', (e) => {
-            if (!dragLi || !pointerStart) return;
-            const dx = e.clientX - pointerStart.x;
-            const dy = e.clientY - pointerStart.y;
-            if (!isDragging && Math.hypot(dx, dy) < MOVE_THRESHOLD) return;
-            if (!isDragging) startDrag();
-            moveCardTowards(e.clientY);
-            // Prevent the page from auto-selecting text while we're dragging.
-            e.preventDefault();
-        });
-
-        document.addEventListener('pointerup', () => {
-            if (!dragLi) return;
-            endDrag(true);
-        });
-        document.addEventListener('pointercancel', () => {
-            if (!dragLi) return;
-            endDrag(false);
-        });
-    }
 })();
 </script>
 {% endblock %}

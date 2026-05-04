@@ -61,19 +61,11 @@ class Class(SQLModel, table=True):
         back_populates="cls",
         sa_relationship_kwargs={"cascade": "all, delete-orphan"},
     )
-    policies: List["Policy"] = Relationship(
-        back_populates="cls",
-        sa_relationship_kwargs={"cascade": "all, delete-orphan"},
-    )
     events: List["CalendarEvent"] = Relationship(
         back_populates="cls",
         sa_relationship_kwargs={"cascade": "all, delete-orphan"},
     )
     documents: List["Document"] = Relationship(
-        back_populates="cls",
-        sa_relationship_kwargs={"cascade": "all, delete-orphan"},
-    )
-    cards: List["Card"] = Relationship(
         back_populates="cls",
         sa_relationship_kwargs={"cascade": "all, delete-orphan"},
     )
@@ -92,15 +84,6 @@ class Syllabus(SQLModel, table=True):
     outline_json: Optional[str] = Field(default=None)  # cached Pass-1.5 outline
     tables_json: Optional[str] = Field(default=None)   # JSON list of {rows: [[cell,...],...]}
     cls: Optional[Class] = Relationship(back_populates="syllabi")
-
-
-class Policy(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-    class_id: int = Field(foreign_key="class.id")
-    kind: str  # late_policy | grading | office_hours | attendance_policy | instructor
-    content: str
-    source_text: Optional[str] = Field(default=None)
-    cls: Optional[Class] = Relationship(back_populates="policies")
 
 
 class CalendarEvent(SQLModel, table=True):
@@ -137,28 +120,6 @@ class Document(SQLModel, table=True):
     filename: str
     uploaded_at: datetime
     cls: Optional[Class] = Relationship(back_populates="documents")
-
-
-class Card(SQLModel, table=True):
-    """User-curated snippet from the syllabus. kind=quote keeps the verbatim
-    highlighted text; kind=summary stores Grok's summarized version with the
-    original passage retained in original_text for verification.
-
-    Both text fields may contain [TABLE:N] markers that index into tables_json
-    (a JSON list of {rows: [[cell,...],...]}). Each card snapshots only the
-    tables it actually references, with markers renumbered 0..M-1."""
-    id: Optional[int] = Field(default=None, primary_key=True)
-    class_id: int = Field(foreign_key="class.id")
-    kind: str  # "quote" | "summary" — aggregate (summary if any section was summarized)
-    label: Optional[str] = Field(default=None)
-    original_text: str
-    display_text: str
-    tables_json: Optional[str] = Field(default=None)
-    sections_meta_json: Optional[str] = Field(default=None)  # [{heading, kind}, ...]
-    tailor_prompt: Optional[str] = Field(default=None)  # user instructions for tailor sections
-    position: int = Field(default=0)  # user-defined order; ties broken by created_at
-    created_at: datetime
-    cls: Optional[Class] = Relationship(back_populates="cards")
 
 
 # ---- App setup ----
@@ -253,75 +214,6 @@ def _render_text_with_tables(text: str, tables_json: Optional[str]) -> "Markup":
 templates.env.filters["render_text_with_tables"] = _render_text_with_tables
 
 
-def _split_card_sections(display_text: Optional[str]) -> list[dict]:
-    """Split a card's display_text into a list of {heading, body} sections,
-    using line-start `## Heading` markers as boundaries. Text before the
-    first `## ` becomes a section with heading=None (preamble).
-
-    Used by the class page to render each section in its own collapsible
-    block instead of one undifferentiated blob."""
-    if not display_text:
-        return []
-    text = display_text.replace("\r\n", "\n")
-    parts = _re.split(r"(?:^|\n)## (.+?)(?:\n|$)", text)
-    out: list[dict] = []
-    if parts and parts[0].strip():
-        out.append({"heading": None, "body": parts[0].strip()})
-    for i in range(1, len(parts), 2):
-        heading = parts[i].strip()
-        body = parts[i + 1].strip() if i + 1 < len(parts) else ""
-        out.append({"heading": heading, "body": body})
-    return out
-
-
-templates.env.filters["split_card_sections"] = _split_card_sections
-
-
-def _section_kinds_for_card(card: "Card") -> dict:
-    """Return {heading: 'summary' | 'verbatim'} for each section in a card.
-
-    Prefer the stored sections_meta_json (deterministic, populated for all
-    cards created after this column was added). Fall back to comparing the
-    section body in display_text against original_text — if they're identical
-    (whitespace-normalized), the section was kept verbatim; else summarized.
-    Used by the class page to show a per-section badge."""
-    if card.sections_meta_json:
-        try:
-            meta = json.loads(card.sections_meta_json)
-            out = {}
-            for m in meta:
-                heading = m.get("heading")
-                kind = m.get("kind")
-                # Back-compat: old "summary" label is now "tailor"
-                if kind == "summary":
-                    kind = "tailor"
-                if heading and kind in ("tailor", "verbatim"):
-                    out[heading] = kind
-            return out
-        except (ValueError, TypeError):
-            pass
-
-    # Fallback: derive by comparing display vs original section bodies
-    def _norm(s: str) -> str:
-        return _re.sub(r"\s+", " ", (s or "").strip()).lower()
-
-    display_secs = {s["heading"]: _norm(s["body"]) for s in _split_card_sections(card.display_text) if s.get("heading")}
-    original_secs = {s["heading"]: _norm(s["body"]) for s in _split_card_sections(card.original_text) if s.get("heading")}
-    out: dict[str, str] = {}
-    for heading, dbody in display_secs.items():
-        obody = original_secs.get(heading)
-        if obody is None:
-            out[heading] = "tailor"  # only in display → must have been generated
-        elif dbody == obody:
-            out[heading] = "verbatim"
-        else:
-            out[heading] = "tailor"
-    return out
-
-
-templates.env.filters["section_kinds_for_card"] = _section_kinds_for_card
-
-
 def _static_v(path: str) -> str:
     """Cache-busting version stamp for a static file. Appends `?v=<mtime>` so
     Brave/Chrome reload the asset whenever it's changed on disk — keeps users
@@ -343,7 +235,6 @@ parse_jobs: dict[int, str] = {}  # syllabus_id -> "pending"|"running"|"done"|"er
 # Outline extraction (Pass 1.5) status, separate from upload-time parse_jobs so
 # users can re-trigger outline extraction without conflicting with the
 # upload-time events extraction. syllabus_id -> "running"|"done"|"error: ..."
-outline_jobs: dict[int, str] = {}
 
 
 # ---- Auth ----
@@ -788,208 +679,6 @@ def parse_syllabus_with_grok(text: str) -> dict:
     return parsed.model_dump()
 
 
-SUMMARIZE_SYSTEM_PROMPT = """You summarize highlighted syllabus passages for students. Your output renders as Markdown — use it.
-
-PRESERVE EXACTLY (never paraphrase): names, email addresses, phone numbers, room numbers, building names, dates, times, percentages, dollar amounts, URLs, deadlines.
-
-DROP: filler ("It is important to note that..."), restated obvious context, generic university policy boilerplate the student already knows.
-
-OUTPUT FORMAT — match the structural shape of the input:
-- If the input is bullet-listed, output as a bullet list (`- item`). Keep one item per concept; collapse repetitive items.
-- If the input has multiple paragraphs, output as multiple paragraphs separated by blank lines.
-- If the input has section sub-headings (e.g. `## Heading` from joined sections), keep the headings and summarize each subsection under its heading.
-- If the input is one short paragraph, output one paragraph.
-- For combined multi-section inputs: keep the `## Heading` between sections so they stay visually separated.
-
-Use `**bold**` for the most important terms (deadlines, dollar amounts, key contact info). Don't over-bold.
-
-If a passage is already short and concrete (under ~25 words), return it nearly verbatim — don't pad it.
-
-TABLE MARKERS: the input may contain bracketed tokens like `[TABLE:0]`, `[TABLE:3]`. These are placeholders for tables.
-- If the table is the substantive content (a grading breakdown, a rubric, a schedule), KEEP the marker on its own line with blank lines around it. The table will render there.
-- If the table is incidental (the prose already summarizes it), drop the marker.
-- Never rename, renumber, or describe the marker."""
-
-
-def summarize_passage(text: str) -> str:
-    """Call Grok to summarize a highlighted syllabus passage. Returns plain text."""
-    api_key = os.environ.get("XAI_API_KEY", "").strip()
-    if not api_key:
-        raise RuntimeError("XAI_API_KEY is not set.")
-    client = XAIClient(api_key=api_key)
-    chat = client.chat.create(
-        model=XAI_MODEL,
-        messages=[xai_system(SUMMARIZE_SYSTEM_PROMPT)],
-    )
-    chat.append(xai_user(text))
-    response = chat.sample()
-    out = (response.content or "").strip()
-    if not out:
-        raise RuntimeError("Grok returned empty summary")
-    return out
-
-
-def tailor_passage(text: str, user_prompt: str) -> str:
-    """Call Grok with the user's custom instructions to process a passage.
-    Used by the +Tailor button — lets the user ask for whatever shape they
-    want (simpler version, action items, contact-only, etc.)."""
-    api_key = os.environ.get("XAI_API_KEY", "").strip()
-    if not api_key:
-        raise RuntimeError("XAI_API_KEY is not set.")
-    user_prompt = (user_prompt or "").strip()
-    if not user_prompt:
-        raise RuntimeError("Tailor prompt is empty.")
-    client = XAIClient(api_key=api_key)
-    chat = client.chat.create(
-        model=XAI_MODEL,
-        messages=[xai_system(TAILOR_SYSTEM_PROMPT)],
-    )
-    chat.append(xai_user(f"Instructions: {user_prompt}\n\n---\n\n{text}"))
-    response = chat.sample()
-    out = (response.content or "").strip()
-    if not out:
-        raise RuntimeError("Grok returned empty tailor response")
-    return out
-
-
-TAILOR_SYSTEM_PROMPT = """You process a syllabus passage according to the user's instructions. The user is a college student curating their own study reference.
-
-THE USER'S INSTRUCTIONS will arrive in the user message, prefixed with "Instructions:". Follow them faithfully — that's the whole job. Examples of instructions you might see:
-- "What do I need to do to prepare for class?"
-- "Make this simpler"
-- "List only the most important points"
-- "Keep just the contact info and office hours"
-- "Pull out anything I should add to my calendar"
-
-CONSTRAINTS that always apply, regardless of the user's instructions:
-- PRESERVE EXACTLY (never paraphrase): names, email addresses, phone numbers, room numbers, building names, dates, times, percentages, dollar amounts, URLs, deadlines.
-- Output Markdown. Use bullet lists, paragraphs, and headings as appropriate to the content.
-- Use `**bold**` to highlight the most important terms (deadlines, dollar amounts, key contact info).
-- TABLE MARKERS like `[TABLE:0]`, `[TABLE:3]` in the passage are placeholders for tables. If the table contains substantive content the user would want, KEEP the marker on its own line (with blank lines around it). If the user's instructions clearly don't need the table, drop it. Never describe, rename, or renumber a marker.
-- If the passage starts with a `## Heading`, keep that heading at the top of your output so the section's identity is preserved.
-
-Plain text + Markdown only. No preamble like "Here's the tailored content:" — just the result."""
-
-
-EXTRACT_EVENT_SYSTEM_PROMPT = """Extract a single calendar event from the highlighted syllabus passage.
-
-Return: {title, kind, starts_at, ends_at}.
-- kind: one of `exam`, `assignment`, `project`, `milestone`.
-- title: short label (e.g. "Midterm Exam", "Project 2 Due").
-- starts_at: naive ISO 8601 datetime ("2026-09-15T18:00:00"). Date only → 23:59:00. If no explicit calendar date, return null.
-- ends_at: only when the passage gives an explicit end time; else null.
-- DO NOT INVENT DATES. If the passage references a week number with no calendar date, set starts_at: null.
-"""
-
-
-class SinglePassageEvent(BaseModel):
-    title: str
-    kind: EventKind
-    starts_at: Optional[str] = None
-    ends_at: Optional[str] = None
-
-
-OUTLINE_SYSTEM_PROMPT = """You parse a syllabus into a hierarchical outline of its sections.
-
-INPUT: the full text of a course syllabus (typically from a Simple Syllabus template — Course Description, Office Hours, Late Work, AI Policy, Schedule, etc.).
-
-OUTPUT: a flat list of sections in document order. Each section has:
-- heading: the literal heading text as it appears (e.g. "Course Description", "Late Work Policy", "Required Materials"). Strip trailing colons. Title-case if the original is ALL CAPS.
-- level: 1 for top-level headings, 2 for subheadings under a level-1, 3 for sub-subheadings.
-- body: the prose/content under that heading, up to but NOT including the next heading. Trim leading/trailing whitespace. If the section has only subheadings (no direct prose), set body to an empty string.
-
-RULES:
-- Identify ALL headings, even short ones. Headings are typically: short (≤ 80 chars), on their own line, often bold or all-caps in the original (you'll see them as plain text but the surrounding structure makes them obvious — short line surrounded by blank lines or followed by a colon, then prose).
-- Do NOT invent headings. If the document is one big paragraph with no structure, return a single section with heading="(Unstructured content)" and the full text as body.
-- KEEP every heading you see, including schedule-like headings such as "Schedule", "Canvas Schedule", "Course Calendar", "Schedule of Topics", "Important Dates". A user-relevant heading is a user-relevant heading; do not drop it because it sounds like a schedule.
-- For schedule sections specifically: do NOT enumerate individual dated events in the body (those are extracted separately into a calendar). Instead, keep the body terse — typically just the `[TABLE:N]` marker that represents the schedule's table, plus any introductory prose. If there is no table marker, leave the body empty (we'll skip rendering the body but still surface the heading).
-- Do NOT include filler page-number lines (e.g. "Page 9 of 1544"), headers/footers, or table-of-contents entries.
-- Preserve the document order in the returned list (don't reorder by importance).
-
-BODY FORMATTING — emit Markdown. The body will be rendered as HTML with bullet lists, paragraphs, and headings. Specifically:
-- If the source uses bullets (•, ▪, ◦, –, *, "○") convert them to `- ` at the start of each line. Each bullet on its own line.
-- If the source uses numbered lists ("1.", "2)") preserve those.
-- Separate paragraphs with one blank line.
-- Keep sub-headings inside the body (e.g. `**Required:**` or `### Recommended Texts`) — they help structure long sections.
-- Don't smash bullet lists into running prose. A 5-item bulleted list in the source must come out as 5 bullet lines in the body.
-
-TABLE MARKERS: the input may contain bracketed tokens like `[TABLE:0]`, `[TABLE:7]`. These are placeholders for tables that will be rendered as real HTML tables later.
-- Preserve them VERBATIM in the body of whichever section they belong to. Do not rename, renumber, omit, or describe them.
-- Place each marker on its OWN LINE with a blank line before and after, so the rendered table appears as its own block (not glued into a paragraph).
-- CRITICAL: every `[TABLE:N]` marker that appears in the input MUST appear in exactly one section's body in your output. If you're unsure which section, attach it to the nearest preceding heading. Never drop a marker — even on schedule sections.
-
-EXAMPLE INPUT (excerpt):
-"COURSE DESCRIPTION
-This course introduces students to...
-
-INSTRUCTOR INFORMATION
-Dr. Jane Doe
-Office: Room 207
-Email: jane@uni.edu
-
-  Office Hours
-  Tuesday 2-4pm
-
-GRADING
-- Homework: 30%
-- Midterm: 30%
-- Final: 40%"
-
-EXAMPLE OUTPUT (sections):
-[
-  {"heading": "Course Description", "level": 1, "body": "This course introduces students to..."},
-  {"heading": "Instructor Information", "level": 1, "body": "**Dr. Jane Doe**\\n\\n- Office: Room 207\\n- Email: jane@uni.edu\\n- Phone: 555-1234"},
-  {"heading": "Office Hours", "level": 2, "body": "Tuesday 2-4pm"},
-  {"heading": "Grading", "level": 1, "body": "Course grades follow the breakdown below.\\n\\n[TABLE:3]\\n\\nLetter grades use the standard FIU scale.\\n\\n[TABLE:4]"}
-]
-"""
-
-
-class OutlineSection(BaseModel):
-    heading: str
-    level: Literal[1, 2, 3]
-    body: str
-
-
-class Outline(BaseModel):
-    sections: List[OutlineSection] = PydanticField(default_factory=list)
-
-
-def extract_outline(text: str) -> Outline:
-    """Pass 1.5: ask Grok for the syllabus outline (headings + bodies). Cached
-    on the Syllabus row so subsequent /sections visits don't re-call."""
-    api_key = os.environ.get("XAI_API_KEY", "").strip()
-    if not api_key:
-        raise RuntimeError("XAI_API_KEY is not set.")
-    client = XAIClient(api_key=api_key)
-    chat = client.chat.create(
-        model=XAI_MODEL,
-        messages=[xai_system(OUTLINE_SYSTEM_PROMPT)],
-    )
-    chat.append(xai_user(text))
-    response, parsed = chat.parse(Outline)
-    if parsed is None:
-        raise RuntimeError("Grok returned no outline")
-    return parsed
-
-
-def extract_event_from_passage(text: str) -> SinglePassageEvent:
-    """Call Grok to pull a single event out of a highlighted passage."""
-    api_key = os.environ.get("XAI_API_KEY", "").strip()
-    if not api_key:
-        raise RuntimeError("XAI_API_KEY is not set.")
-    client = XAIClient(api_key=api_key)
-    chat = client.chat.create(
-        model=XAI_MODEL,
-        messages=[xai_system(EXTRACT_EVENT_SYSTEM_PROMPT)],
-    )
-    chat.append(xai_user(text))
-    response, parsed = chat.parse(SinglePassageEvent)
-    if parsed is None:
-        raise RuntimeError("Grok returned no event")
-    return parsed
-
-
 def _grpc_error_message(e: "grpc.RpcError") -> str:
     """Translate a gRPC error into a user-readable status string."""
     code = e.code() if hasattr(e, "code") else None
@@ -1010,13 +699,9 @@ def _grpc_error_message(e: "grpc.RpcError") -> str:
 
 
 def process_syllabus(syllabus_id: int) -> None:
-    """Background task: run BOTH Grok extractions (events + section outline) in
-    parallel, then write everything to the DB. Pre-caching the outline here
-    means the /sections page is instant when the user clicks Continue.
-
-    The two calls are independent and run on separate threads — total wait
-    time is max(events, outline) instead of the sum."""
-    from concurrent.futures import ThreadPoolExecutor
+    """Background task: extract calendar events from the syllabus via Grok,
+    then write them to the DB. Outline/section parsing was removed — the
+    PDF viewer is the user's primary way to read syllabus content now."""
     parse_jobs[syllabus_id] = "running"
     try:
         with Session(engine) as session:
@@ -1026,33 +711,17 @@ def process_syllabus(syllabus_id: int) -> None:
                 return
             raw_text = syllabus.raw_text
 
-        # Both Grok calls happen WITHOUT a session held — sessions aren't
-        # thread-safe and the calls take 5-30s each.
-        with ThreadPoolExecutor(max_workers=2) as ex:
-            events_future = ex.submit(parse_syllabus_with_grok, raw_text)
-            outline_future = ex.submit(extract_outline, raw_text)
-
-            try:
-                data = events_future.result()
-            except grpc.RpcError as e:
-                parse_jobs[syllabus_id] = f"error: {_grpc_error_message(e)}"
-                return
-            except json.JSONDecodeError as e:
-                parse_jobs[syllabus_id] = f"error: Grok output was not valid JSON. {str(e)[:200]}"
-                return
-            except RuntimeError as e:
-                parse_jobs[syllabus_id] = f"error: {e}"
-                return
-
-            # Outline extraction failure is non-fatal — the lazy fallback in
-            # the /sections route will retry on first visit. We log but don't
-            # block "done".
-            outline_dump: Optional[list] = None
-            try:
-                outline = outline_future.result()
-                outline_dump = [s.model_dump() for s in outline.sections]
-            except Exception as oe:
-                log.warning("outline pre-extract failed for syllabus %d: %s", syllabus_id, oe)
+        try:
+            data = parse_syllabus_with_grok(raw_text)
+        except grpc.RpcError as e:
+            parse_jobs[syllabus_id] = f"error: {_grpc_error_message(e)}"
+            return
+        except json.JSONDecodeError as e:
+            parse_jobs[syllabus_id] = f"error: Grok output was not valid JSON. {str(e)[:200]}"
+            return
+        except RuntimeError as e:
+            parse_jobs[syllabus_id] = f"error: {e}"
+            return
 
         with Session(engine) as session:
             syllabus = session.get(Syllabus, syllabus_id)
@@ -1066,7 +735,6 @@ def process_syllabus(syllabus_id: int) -> None:
                 cls.name = str(data["course_name"]).strip()
 
             # Wipe prior auto-extracted events — re-upload replaces, doesn't accumulate.
-            # User-curated cards are preserved (the user owns those).
             session.exec(delete(CalendarEvent).where(CalendarEvent.class_id == cls.id))
             session.flush()
 
@@ -1082,10 +750,6 @@ def process_syllabus(syllabus_id: int) -> None:
                     kind=str(ev.get("kind") or "milestone"),
                     source_text=ev.get("source_text") or None,
                 ))
-
-            if outline_dump is not None:
-                syllabus.outline_json = json.dumps(outline_dump)
-                session.add(syllabus)
 
             session.commit()
         parse_jobs[syllabus_id] = "done"
@@ -1166,10 +830,9 @@ def class_detail(request: Request, class_id: int):
             raise HTTPException(404, "Class not found")
         events = sorted(cls.events, key=event_sort_key)
         documents = sorted(cls.documents, key=lambda d: d.uploaded_at, reverse=True)
-        cards = sorted(cls.cards, key=lambda c: ((c.position or 0), c.created_at))
         latest_syllabus = max(cls.syllabi, key=lambda s: s.parsed_at) if cls.syllabi else None
-    # Sidebar shows TODAY's tasks across ALL classes, identical to the home
-    # page's todo list. Add-task form defaults to the current class.
+    # Floating tasks panel reuses the home page's today list. Add-task form
+    # defaults to the current class.
     today_start = _today_local()
     today_end = today_start + timedelta(days=1)
     today_items = _collect_items_in_range(today_start, today_end)
@@ -1180,7 +843,6 @@ def class_detail(request: Request, class_id: int):
         "cls": cls,
         "events": events,
         "documents": documents,
-        "cards": cards,
         "syllabus": latest_syllabus,
         "today": today_start,
         "today_items": today_items,
@@ -1287,7 +949,7 @@ def syllabus_status_json(syllabus_id: int):
         return JSONResponse({"status": status, "class_id": syllabus.class_id})
 
 
-# ---- Routes: Event + Policy edit/delete ----
+# ---- Routes: Event edit/delete ----
 
 @app.post("/events/{event_id}/edit", dependencies=[Depends(require_token)])
 def edit_event(
@@ -1323,477 +985,139 @@ def delete_event(event_id: int):
     return RedirectResponse(f"/classes/{cls_id}", status_code=303)
 
 
-@app.post("/policies/{policy_id}/edit", dependencies=[Depends(require_token)])
-def edit_policy(policy_id: int, content: str = Form(...)):
-    with Session(engine) as session:
-        p = session.get(Policy, policy_id)
-        if not p:
-            raise HTTPException(404)
-        p.content = content
-        cls_id = p.class_id
-        session.add(p)
-        session.commit()
-    return RedirectResponse(f"/classes/{cls_id}", status_code=303)
+# ---- Helpers shared by PDF table marker rendering ----
 
-
-@app.post("/policies/{policy_id}/delete", dependencies=[Depends(require_token)])
-def delete_policy(policy_id: int):
-    with Session(engine) as session:
-        p = session.get(Policy, policy_id)
-        if not p:
-            raise HTTPException(404)
-        cls_id = p.class_id
-        session.delete(p)
-        session.commit()
-    return RedirectResponse(f"/classes/{cls_id}", status_code=303)
-
-
-# ---- Routes: Sections picker + Cards ----
-
-MAX_PASSAGE_CHARS = 16000  # rough cap on what we send to Grok per card
+MAX_PASSAGE_CHARS = 16000  # rough cap on what we send to Grok per request
 
 import re as _re
 
 _TABLE_MARKER_RE = _re.compile(r"\[TABLE:(\d+)\]")
 
 
-def _snapshot_tables(text: str, source_tables: list) -> tuple[str, list]:
-    """Find every [TABLE:N] in text. Build a renumbered subset of source_tables
-    containing only the referenced ones, and rewrite the markers in text to
-    point at the new compact indices. Returns (new_text, snapshot_list).
-
-    Cards store this snapshot so they survive even if the parent syllabus is
-    deleted or its tables_json shifts."""
-    if not source_tables:
-        return text, []
-    seen: dict[int, int] = {}
-    snapshot: list = []
-
-    def _remap(m: "_re.Match[str]") -> str:
-        old = int(m.group(1))
-        if old < 0 or old >= len(source_tables):
-            return m.group(0)  # leave broken marker as-is
-        if old not in seen:
-            seen[old] = len(snapshot)
-            snapshot.append(source_tables[old])
-        return f"[TABLE:{seen[old]}]"
-
-    new_text = _TABLE_MARKER_RE.sub(_remap, text)
-    return new_text, snapshot
+# ---- Routes: PDF viewer + AI transform sandbox ----
 
 
-def _extract_outline_into_syllabus(syllabus_id: int) -> None:
-    """Background task: run extract_outline + persist to the Syllabus row.
-    Updates outline_jobs so the polling page knows when to reload."""
-    outline_jobs[syllabus_id] = "running"
+def _format_tables_for_cross_reference(tables_json: Optional[str]) -> str:
+    """Render a syllabus's pdfplumber-detected tables as markdown blocks
+    suitable for inclusion in a Grok prompt. Returns empty string if
+    there are no tables. Capped so very large syllabi don't blow the
+    context window."""
+    if not tables_json:
+        return ""
     try:
-        with Session(engine) as session:
-            syllabus = session.get(Syllabus, syllabus_id)
-            if not syllabus:
-                outline_jobs[syllabus_id] = "error: syllabus not found"
-                return
-            raw_text = syllabus.raw_text
-        outline = extract_outline(raw_text)
-        with Session(engine) as session:
-            syllabus = session.get(Syllabus, syllabus_id)
-            if not syllabus:
-                outline_jobs[syllabus_id] = "error: syllabus deleted during extraction"
-                return
-            syllabus.outline_json = json.dumps([s.model_dump() for s in outline.sections])
-            session.add(syllabus)
-            session.commit()
-        outline_jobs[syllabus_id] = "done"
+        tables = json.loads(tables_json)
+    except (ValueError, TypeError):
+        return ""
+    if not isinstance(tables, list) or not tables:
+        return ""
+    blocks: list[str] = []
+    budget = MAX_PASSAGE_CHARS // 2  # leave room for user's highlight
+    used = 0
+    for i, t in enumerate(tables):
+        rows = (t or {}).get("rows") if isinstance(t, dict) else None
+        if not rows:
+            continue
+        block_lines = [f"\nTable {i}:"]
+        for r in rows:
+            cells = [(c or "").strip().replace("\n", " ") for c in r]
+            block_lines.append("| " + " | ".join(cells) + " |")
+        block = "\n".join(block_lines)
+        if used + len(block) > budget:
+            break
+        blocks.append(block)
+        used += len(block)
+    if not blocks:
+        return ""
+    return ("\n\nSTRUCTURED TABLES (cross-reference, detected by automated parser):"
+            + "".join(blocks))
+
+
+TEST_TRANSFORM_SYSTEM_PROMPT = """You transform a snippet of text the user highlighted from their syllabus, following their instruction.
+
+OUTPUT: markdown only. No preamble like "Here's the transformed text:".
+
+==============================================================
+CRITICAL — STRUCTURED TABLES ARE AUTHORITATIVE
+==============================================================
+The user message may include a section labelled "STRUCTURED TABLES (cross-reference)". These were extracted from the same PDF by a deterministic table parser. When one of them matches the user's highlight, it IS the answer — your job is to print it, not to rebuild it.
+
+BEFORE responding, do this check:
+1. Scan each structured table.
+2. Does any structured table share content with the highlighted text? (matching column headers, or row labels appearing in both)
+3. If YES — that table IS the answer the user wants. Output it as-is in markdown pipe-table form:
+   - SAME column count. Do not merge or split columns.
+   - SAME column names, in the SAME order.
+   - EVERY row from the structured table, in the SAME order, no rows added or dropped.
+   - EVERY cell value character-for-character. Do not abbreviate ("< 95" stays "< 95"), do not round, do not "clean up" punctuation.
+   - The user's instruction ("clean", "no colors", "simple", "make a table") is satisfied automatically by markdown format. They want different APPEARANCE, not different DATA.
+4. If NO structured table matches — ignore the cross-reference entirely and work only from the highlighted text below.
+
+==============================================================
+GENERAL RULES (apply when no structured table matches)
+==============================================================
+- Follow the user's instruction faithfully. Examples: "simplify this", "make a clean table", "bullet list", "summarize in 3 lines".
+- DO NOT invent content. If the snippet doesn't contain what the user asks about, say so in one sentence.
+- For tables, use markdown pipe-table syntax (`| col | col |\n|---|---|`).
+- Preserve EXACTLY: names, emails, phone numbers, room numbers, dates, times, percentages, dollar amounts, URLs.
+- Strip noise like "Page X of Y", repeated headers, or copy-paste artifacts.
+- Output the transformed content only — no commentary.
+"""
+
+
+@app.post("/test/transform", dependencies=[Depends(require_token)])
+async def test_transform(request: Request):
+    """Sandbox endpoint: take user-selected text + an instruction,
+    return markdown. No persistence. If `syllabus_id` is provided, the
+    syllabus's pdfplumber-detected tables are sent as cross-reference
+    so Grok can fill in cells the browser's copy missed."""
+    payload = await request.json()
+    text = (payload.get("text") or "").strip()
+    prompt = (payload.get("prompt") or "").strip()
+    raw_sid = payload.get("syllabus_id")
+    if not text:
+        raise HTTPException(400, "Selected text is empty")
+    if not prompt:
+        raise HTTPException(400, "Instruction is required")
+    if len(text) > MAX_PASSAGE_CHARS:
+        text = text[:MAX_PASSAGE_CHARS]
+
+    cross_ref = ""
+    if raw_sid is not None:
+        try:
+            sid = int(raw_sid)
+        except (TypeError, ValueError):
+            sid = None
+        if sid is not None:
+            with Session(engine) as session:
+                syllabus = session.get(Syllabus, sid)
+                if syllabus:
+                    cross_ref = _format_tables_for_cross_reference(syllabus.tables_json)
+
+    api_key = os.environ.get("XAI_API_KEY", "").strip()
+    if not api_key:
+        raise HTTPException(500, "XAI_API_KEY is not set")
+    try:
+        client = XAIClient(api_key=api_key)
+        chat = client.chat.create(
+            model=XAI_MODEL,
+            messages=[xai_system(TEST_TRANSFORM_SYSTEM_PROMPT)],
+        )
+        chat.append(xai_user(
+            f"Instruction: {prompt}\n\n---\n\nHighlighted text:\n{text}{cross_ref}"
+        ))
+        response = chat.sample()
+        out = (response.content or "").strip()
+        if not out:
+            raise HTTPException(502, "Grok returned an empty response")
     except grpc.RpcError as e:
-        outline_jobs[syllabus_id] = f"error: {_grpc_error_message(e)}"
-    except Exception as e:
-        outline_jobs[syllabus_id] = f"error: {type(e).__name__}: {str(e)[:240]}"
+        raise HTTPException(502, f"Grok call failed: {_grpc_error_message(e)}")
 
-
-@app.get("/syllabus/{syllabus_id}/sections", response_class=HTMLResponse)
-def sections_page(request: Request, syllabus_id: int, background_tasks: BackgroundTasks):
-    """Show the section picker. If the outline isn't cached yet, render a
-    loading state that triggers extraction in the background and polls for
-    completion — keeps the user informed instead of hanging on a blank page."""
-    if STUDYFLOW_TOKEN and not has_valid_cookie(request):
-        return RedirectResponse("/setup-token", status_code=303)
-    with Session(engine, expire_on_commit=False) as session:
-        syllabus = session.get(Syllabus, syllabus_id)
-        if not syllabus:
-            raise HTTPException(404, "Syllabus not found")
-        cls = session.get(Class, syllabus.class_id)
-        sections: list[dict] = []
-        if syllabus.outline_json:
-            try:
-                sections = json.loads(syllabus.outline_json)
-            except (ValueError, TypeError):
-                sections = []
-        existing_cards = sorted(cls.cards, key=lambda c: c.created_at)
-
-    if not sections:
-        # Kick off background extraction if not already running, then render
-        # the loading template that polls /outline-status.json.
-        if outline_jobs.get(syllabus_id) != "running":
-            outline_jobs[syllabus_id] = "running"
-            background_tasks.add_task(_extract_outline_into_syllabus, syllabus_id)
-        return templates.TemplateResponse(request, "sections.html", {
-            "cls": cls,
-            "syllabus": syllabus,
-            "sections": [],
-            "existing_cards": existing_cards,
-            "extracting": True,
-        })
-
-    return templates.TemplateResponse(request, "sections.html", {
-        "cls": cls,
-        "syllabus": syllabus,
-        "sections": sections,
-        "existing_cards": existing_cards,
-        "extracting": False,
+    rendered = _render_text_with_tables(out, None)
+    return JSONResponse({
+        "markdown": out,
+        "html": str(rendered),
+        "cross_reference_used": bool(cross_ref),
     })
-
-
-@app.get("/syllabus/{syllabus_id}/outline-status.json")
-def outline_status_json(syllabus_id: int):
-    """Polled by the loading state of the section picker. Returns whether the
-    outline is ready (or what error fired)."""
-    with Session(engine) as session:
-        syllabus = session.get(Syllabus, syllabus_id)
-        if not syllabus:
-            outline_jobs.pop(syllabus_id, None)
-            return JSONResponse({"status": "missing"})
-        if syllabus.outline_json:
-            outline_jobs.pop(syllabus_id, None)
-            return JSONResponse({"status": "done"})
-    return JSONResponse({"status": outline_jobs.get(syllabus_id, "running")})
-
-
-@app.post("/syllabus/{syllabus_id}/sections", dependencies=[Depends(require_token)])
-async def sections_create_cards(syllabus_id: int, request: Request):
-    """Create cards from the user's picked groups. Body shape:
-    {"groups": [{"sections": [{"index": 0, "kind": "summary"}, {"index": 5, "kind": "verbatim"}]}, ...]}
-
-    Each group becomes ONE card. Within a card, each section can be either
-    'summary' (run through Grok) or 'verbatim' (used as-is). Sections are
-    rendered in document order. card.kind is 'summary' if any section is
-    summarized, else 'quote'."""
-    payload = await request.json()
-    groups = payload.get("groups") or []
-    if not isinstance(groups, list) or not groups:
-        raise HTTPException(400, "groups must be a non-empty list")
-
-    with Session(engine) as session:
-        syllabus = session.get(Syllabus, syllabus_id)
-        if not syllabus:
-            raise HTTPException(404, "Syllabus not found")
-        try:
-            sections = json.loads(syllabus.outline_json or "[]")
-        except (ValueError, TypeError):
-            sections = []
-        if not sections:
-            raise HTTPException(400, "No outline available — re-visit the picker page first")
-        try:
-            syllabus_tables = json.loads(syllabus.tables_json or "[]")
-        except (ValueError, TypeError):
-            syllabus_tables = []
-
-        created_cards = []
-        for g in groups:
-            raw_picks = g.get("sections")
-            # Back-compat: old client format was {section_indices, kind} per group.
-            if raw_picks is None and "section_indices" in g:
-                fallback_kind = g.get("kind", "tailor")
-                raw_picks = [{"index": i, "kind": fallback_kind} for i in g.get("section_indices", [])]
-            if not raw_picks:
-                continue
-
-            tailor_prompt = (g.get("prompt") or "").strip() or None
-
-            # Normalize, validate, sort by index for document order
-            picks = []
-            for p in raw_picks:
-                try:
-                    idx = int(p.get("index"))
-                except (TypeError, ValueError):
-                    continue
-                if not (0 <= idx < len(sections)):
-                    continue
-                kind = p.get("kind") or "verbatim"
-                # Back-compat: 'summary' was the old name; treat as tailor with default prompt
-                if kind == "summary":
-                    kind = "tailor"
-                if kind not in ("tailor", "verbatim"):
-                    raise HTTPException(400, f"invalid kind '{kind}' (must be tailor|verbatim)")
-                picks.append({"index": idx, "kind": kind})
-
-            if any(p["kind"] == "tailor" for p in picks) and not tailor_prompt:
-                raise HTTPException(400, "Tailor card needs a prompt — tell us what you want from the section.")
-            # Dedupe by index, keep last kind seen
-            by_idx: dict[int, dict] = {}
-            for p in picks:
-                by_idx[p["index"]] = p
-            picks = sorted(by_idx.values(), key=lambda p: p["index"])
-            if not picks:
-                continue
-
-            # Build the card body section-by-section. Each section's verbatim
-            # body is sent to Grok individually if marked summary. Original
-            # text always keeps the verbatim joined form so the user can verify.
-            display_parts: list[str] = []
-            original_parts: list[str] = []
-            for p in picks:
-                sec = sections[p["index"]]
-                heading = (sec.get("heading") or "").strip()
-                body = (sec.get("body") or "").strip()
-                section_passage_parts = []
-                if heading:
-                    section_passage_parts.append(f"## {heading}")
-                if body:
-                    section_passage_parts.append(body)
-                section_passage = "\n".join(section_passage_parts).strip()
-                if not section_passage:
-                    continue
-                original_parts.append(section_passage)
-
-                if p["kind"] == "tailor" and body:
-                    try:
-                        section_tailored = tailor_passage(section_passage, tailor_prompt or "")
-                    except grpc.RpcError as e:
-                        raise HTTPException(502, f"Grok tailor failed: {e.details() if hasattr(e, 'details') else e}")
-                    except RuntimeError as e:
-                        raise HTTPException(500, str(e))
-                    if heading and f"## {heading}" not in section_tailored:
-                        section_tailored = f"## {heading}\n\n{section_tailored.strip()}"
-                    display_parts.append(section_tailored.strip())
-                else:
-                    display_parts.append(section_passage)
-
-            if not display_parts:
-                continue
-
-            display_raw = "\n\n".join(display_parts).strip()
-            joined_original = "\n\n".join(original_parts).strip()
-            if len(joined_original) > MAX_PASSAGE_CHARS:
-                joined_original = joined_original[:MAX_PASSAGE_CHARS]
-            if len(display_raw) > MAX_PASSAGE_CHARS:
-                display_raw = display_raw[:MAX_PASSAGE_CHARS]
-
-            # Card title = all section headings joined. Lets the user see at
-            # a glance everything that's inside without expanding the card.
-            picked_headings = [
-                (sections[p["index"]].get("heading") or "").strip()
-                for p in picks
-            ]
-            picked_headings = [h for h in picked_headings if h]
-            label = " · ".join(picked_headings) if picked_headings else None
-
-            stored_kind = "tailor" if any(p["kind"] == "tailor" for p in picks) else "quote"
-            sections_meta = [
-                {
-                    "heading": (sections[p["index"]].get("heading") or "").strip() or None,
-                    "kind": p["kind"],
-                }
-                for p in picks
-            ]
-
-            # Snapshot referenced tables, renumber markers
-            combined_for_scan = joined_original + "\n\n" + display_raw
-            seen_old: dict[int, int] = {}
-            snapshot: list = []
-            for m in _TABLE_MARKER_RE.finditer(combined_for_scan):
-                old = int(m.group(1))
-                if 0 <= old < len(syllabus_tables) and old not in seen_old:
-                    seen_old[old] = len(snapshot)
-                    snapshot.append(syllabus_tables[old])
-            def _remap(m: "_re.Match[str]") -> str:
-                old = int(m.group(1))
-                return f"[TABLE:{seen_old[old]}]" if old in seen_old else m.group(0)
-            original_text = _TABLE_MARKER_RE.sub(_remap, joined_original)
-            display_text = _TABLE_MARKER_RE.sub(_remap, display_raw)
-
-            card = Card(
-                class_id=syllabus.class_id,
-                kind=stored_kind,
-                label=label,
-                original_text=original_text,
-                display_text=display_text,
-                tables_json=(json.dumps(snapshot) if snapshot else None),
-                sections_meta_json=json.dumps(sections_meta),
-                tailor_prompt=tailor_prompt,
-                created_at=datetime.now(timezone.utc),
-            )
-            session.add(card)
-            session.flush()
-            created_cards.append(card.id)
-        session.commit()
-        return JSONResponse({
-            "created": created_cards,
-            "redirect_to": f"/classes/{syllabus.class_id}",
-        })
-
-
-@app.post("/classes/{class_id}/cards", dependencies=[Depends(require_token)])
-def create_card(
-    class_id: int,
-    kind: str = Form(...),
-    original_text: str = Form(...),
-    label: str = Form(""),
-):
-    """Create a card from a highlighted passage. kind=quote saves verbatim;
-    kind=summary calls Grok to summarize, keeping original for verification."""
-    if kind not in ("quote", "summary"):
-        raise HTTPException(400, "kind must be 'quote' or 'summary'")
-    text = original_text.strip()
-    if not text:
-        raise HTTPException(400, "original_text is empty")
-    if len(text) > MAX_PASSAGE_CHARS:
-        raise HTTPException(400, f"passage too long (max {MAX_PASSAGE_CHARS} chars)")
-
-    with Session(engine) as session:
-        cls = session.get(Class, class_id)
-        if not cls:
-            raise HTTPException(404, "Class not found")
-
-        if kind == "summary":
-            try:
-                display = summarize_passage(text)
-            except grpc.RpcError as e:
-                raise HTTPException(502, f"Grok summarization failed: {e.details() if hasattr(e, 'details') else e}")
-            except RuntimeError as e:
-                raise HTTPException(500, str(e))
-        else:
-            display = text
-
-        card = Card(
-            class_id=class_id,
-            kind=kind,
-            label=(label.strip() or None),
-            original_text=text,
-            display_text=display,
-            created_at=datetime.now(timezone.utc),
-        )
-        session.add(card)
-        session.commit()
-        session.refresh(card)
-        return JSONResponse({
-            "id": card.id,
-            "kind": card.kind,
-            "label": card.label,
-            "original_text": card.original_text,
-            "display_text": card.display_text,
-            "created_at": card.created_at.isoformat(),
-        })
-
-
-@app.post("/classes/{class_id}/cards/event", dependencies=[Depends(require_token)])
-def create_event_from_passage(
-    class_id: int,
-    original_text: str = Form(...),
-):
-    """Highlight → Save as event. Sends the passage to Grok for structured event
-    extraction and writes it to the calendar."""
-    text = original_text.strip()
-    if not text:
-        raise HTTPException(400, "original_text is empty")
-    if len(text) > MAX_PASSAGE_CHARS:
-        raise HTTPException(400, f"passage too long (max {MAX_PASSAGE_CHARS} chars)")
-
-    with Session(engine) as session:
-        cls = session.get(Class, class_id)
-        if not cls:
-            raise HTTPException(404, "Class not found")
-        try:
-            ev = extract_event_from_passage(text)
-        except grpc.RpcError as e:
-            raise HTTPException(502, f"Grok event extraction failed: {e.details() if hasattr(e, 'details') else e}")
-        except RuntimeError as e:
-            raise HTTPException(500, str(e))
-
-        new_event = CalendarEvent(
-            class_id=class_id,
-            class_code=cls.code,
-            title=ev.title or "Untitled",
-            kind=ev.kind,
-            starts_at=parse_iso_dt(ev.starts_at) if ev.starts_at else None,
-            ends_at=parse_iso_dt(ev.ends_at) if ev.ends_at else None,
-            source_text=text[:240],
-        )
-        session.add(new_event)
-        session.commit()
-        session.refresh(new_event)
-        return JSONResponse({
-            "id": new_event.id,
-            "title": new_event.title,
-            "kind": new_event.kind,
-            "starts_at": new_event.starts_at.isoformat() if new_event.starts_at else None,
-            "ends_at": new_event.ends_at.isoformat() if new_event.ends_at else None,
-        })
-
-
-@app.post("/classes/{class_id}/cards/reorder", dependencies=[Depends(require_token)])
-async def reorder_cards(class_id: int, request: Request):
-    """Persist card drag-and-drop ordering. Body: {card_ids: [id, id, ...]}.
-    Cards are written with position = their index in the list. IDs that don't
-    belong to this class are silently ignored."""
-    payload = await request.json()
-    raw_ids = payload.get("card_ids") or []
-    if not isinstance(raw_ids, list):
-        raise HTTPException(400, "card_ids must be a list")
-    try:
-        card_ids = [int(i) for i in raw_ids]
-    except (TypeError, ValueError):
-        raise HTTPException(400, "card_ids entries must be integers")
-
-    with Session(engine) as session:
-        cls = session.get(Class, class_id)
-        if not cls:
-            raise HTTPException(404, "Class not found")
-        valid = {c.id for c in cls.cards}
-        updated = 0
-        for pos, cid in enumerate(card_ids):
-            if cid not in valid:
-                continue
-            card = session.get(Card, cid)
-            if card is None:
-                continue
-            card.position = pos
-            session.add(card)
-            updated += 1
-        session.commit()
-    return JSONResponse({"reordered": updated})
-
-
-@app.post("/cards/{card_id}/edit", dependencies=[Depends(require_token)])
-def edit_card(
-    card_id: int,
-    label: str = Form(""),
-    display_text: str = Form(...),
-):
-    with Session(engine) as session:
-        c = session.get(Card, card_id)
-        if not c:
-            raise HTTPException(404)
-        c.label = label.strip() or None
-        c.display_text = display_text.strip() or c.display_text
-        cls_id = c.class_id
-        session.add(c)
-        session.commit()
-    return RedirectResponse(f"/classes/{cls_id}", status_code=303)
-
-
-@app.post("/cards/{card_id}/delete", dependencies=[Depends(require_token)])
-def delete_card(card_id: int, request: Request):
-    with Session(engine) as session:
-        c = session.get(Card, card_id)
-        if not c:
-            raise HTTPException(404)
-        cls_id = c.class_id
-        session.delete(c)
-        session.commit()
-    # AJAX requests get JSON so the page can fade out the card without a
-    # full reload. Form posts (no JS) still get the redirect.
-    if "application/json" in request.headers.get("accept", ""):
-        return JSONResponse({"deleted": card_id, "class_id": cls_id})
-    return RedirectResponse(f"/classes/{cls_id}", status_code=303)
 
 
 # ---- Routes: Tasks ----

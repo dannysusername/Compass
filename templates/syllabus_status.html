@@ -16,7 +16,7 @@
     <p class="hint">This usually takes 10-40 seconds. Don't close this tab.</p>
     <div class="spinner" id="status-spinner"></div>
     <p id="continue-row" style="display:none; margin-top: 16px;">
-        <a id="continue-link" class="primary-link" href="/syllabus/{{ syllabus_id }}/sections">Continue → pick sections</a>
+        <a id="continue-link" class="primary-link" href="/classes/{{ class_id }}">Continue → open class</a>
     </p>
     <p id="missing-row" style="display:none; margin-top: 16px;">
         <a class="primary-link" href="/">← Back to home (this syllabus was removed)</a>
@@ -38,7 +38,7 @@
         if (goingTo === url) return;
         goingTo = url;
         continueLink.href = url;
-        continueLink.textContent = 'Loading section picker…';
+        continueLink.textContent = 'Loading…';
         continueLink.classList.add('disabled');
         continueRow.style.display = '';
         spinner.style.display = '';  // keep spinning while the next page loads
@@ -53,7 +53,7 @@
             return;
         }
         continueLink.classList.add('disabled');
-        continueLink.textContent = 'Loading section picker…';
+        continueLink.textContent = 'Loading…';
         spinner.style.display = '';
     });
 
@@ -74,7 +74,7 @@
                 }
                 line.textContent = 'Status: ' + j.status;
                 if (j.status === 'done') {
-                    go(`/syllabus/${sid}/sections`);
+                    go(`/classes/${card.dataset.classId}`);
                 } else if (j.status && j.status.startsWith('error')) {
                     card.classList.add('error');
                     spinner.style.display = 'none';
@@ -86,7 +86,7 @@
     }
 
     if (card.dataset.status === 'done') {
-        go(`/syllabus/${sid}/sections`);
+        go(`/classes/${card.dataset.classId}`);
     } else {
         setTimeout(tick, 1000);
     }
