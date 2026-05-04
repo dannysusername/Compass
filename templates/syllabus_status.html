@@ -3,43 +3,95 @@
 {% block content %}
 <a href="/" class="back">← Cancel</a>
 
+{% if status == "missing" %}
+<div class="status-card error">
+    <h1>This syllabus was removed</h1>
+    <p class="subtle">It looks like the class for syllabus #{{ syllabus_id }} was deleted from another tab. Head back home and pick or upload one.</p>
+    <p style="margin-top: 16px;"><a class="primary-link" href="/">← Back to home</a></p>
+</div>
+{% else %}
 <div class="status-card" id="status-card" data-syllabus-id="{{ syllabus_id }}" data-class-id="{{ class_id }}" data-status="{{ status }}">
     <h1>Parsing syllabus…</h1>
     <p class="subtle" id="status-line">Status: {{ status }}</p>
-    <p class="hint">This usually takes 5-15 seconds. Don't close this tab.</p>
-    <div class="spinner"></div>
+    <p class="hint">This usually takes 10-40 seconds. Don't close this tab.</p>
+    <div class="spinner" id="status-spinner"></div>
+    <p id="continue-row" style="display:none; margin-top: 16px;">
+        <a id="continue-link" class="primary-link" href="/syllabus/{{ syllabus_id }}/sections">Continue → pick sections</a>
+    </p>
+    <p id="missing-row" style="display:none; margin-top: 16px;">
+        <a class="primary-link" href="/">← Back to home (this syllabus was removed)</a>
+    </p>
 </div>
 
 <script>
-(async function poll() {
+(function poll() {
     const card = document.getElementById('status-card');
     const line = document.getElementById('status-line');
+    const spinner = document.getElementById('status-spinner');
+    const continueRow = document.getElementById('continue-row');
+    const continueLink = document.getElementById('continue-link');
+    const missingRow = document.getElementById('missing-row');
     const sid = card.dataset.syllabusId;
-    const cid = card.dataset.classId;
+    let goingTo = null;
+
+    function go(url) {
+        if (goingTo === url) return;
+        goingTo = url;
+        continueLink.href = url;
+        continueLink.textContent = 'Loading section picker…';
+        continueLink.classList.add('disabled');
+        continueRow.style.display = '';
+        spinner.style.display = '';  // keep spinning while the next page loads
+        try { window.location.assign(url); }
+        catch (e) { /* fallback link is already visible */ }
+    }
+
+    // Block double-clicks and re-show spinner once user has clicked Continue
+    continueLink.addEventListener('click', (e) => {
+        if (continueLink.classList.contains('disabled')) {
+            e.preventDefault();
+            return;
+        }
+        continueLink.classList.add('disabled');
+        continueLink.textContent = 'Loading section picker…';
+        spinner.style.display = '';
+    });
+
+    function showMissing() {
+        line.textContent = 'This syllabus was removed.';
+        card.classList.add('error');
+        spinner.style.display = 'none';
+        missingRow.style.display = '';
+    }
 
     function tick() {
-        fetch(`/syllabus/${sid}/status.json`)
+        fetch(`/syllabus/${sid}/status.json`, { cache: 'no-store' })
             .then(r => r.json())
             .then(j => {
+                if (j.status === 'missing') {
+                    showMissing();
+                    return;  // stop polling
+                }
                 line.textContent = 'Status: ' + j.status;
                 if (j.status === 'done') {
-                    window.location.href = `/classes/${cid}`;
+                    go(`/syllabus/${sid}/sections`);
                 } else if (j.status && j.status.startsWith('error')) {
                     card.classList.add('error');
-                    document.querySelector('.spinner').style.display = 'none';
+                    spinner.style.display = 'none';
                 } else {
-                    setTimeout(tick, 3000);
+                    setTimeout(tick, 2000);
                 }
             })
-            .catch(() => setTimeout(tick, 5000));
+            .catch(() => setTimeout(tick, 4000));
     }
 
     if (card.dataset.status === 'done') {
-        window.location.href = `/classes/${cid}`;
+        go(`/syllabus/${sid}/sections`);
     } else {
-        setTimeout(tick, 2000);
+        setTimeout(tick, 1000);
     }
 })();
 </script>
+{% endif %}
 
 {% endblock %}

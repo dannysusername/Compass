@@ -1,0 +1,132 @@
+{# Shared today-todo list. Rendered on home and class pages so both look identical.
+
+   Required context:
+     today_items   — dict {class_id: {cls, items}} from _collect_items_in_range
+     overdue       — same shape, items with due dates in the past
+     all_classes   — list of Class for the add-task class picker
+     default_class_id — pre-selected class in the add-task form
+#}
+
+<section class="today-list-block">
+    <div class="today-list-head">
+        <h2>Today <span class="subtle">{{ today.strftime('%a %b %d') }}</span></h2>
+    </div>
+
+    {% if all_classes %}
+    <button type="button" class="add-task-btn" data-open-modal="add-task-modal">+ Add task</button>
+    {% endif %}
+
+    {% macro render_item(it) -%}
+    <li class="todo-row {% if it.completed %}done{% endif %}"
+        data-kind="{{ it.kind }}" data-id="{{ it.id }}" data-class-id="{{ it.class_id }}"
+        data-title="{{ it.title }}"
+        data-due-date="{{ it.due_at.strftime('%Y-%m-%d') if it.due_at else '' }}">
+        <span class="todo-drag-handle" title="Drag to reorder priority" aria-label="Drag">
+            <span class="todo-burger" aria-hidden="true"></span>
+        </span>
+        <button type="button" class="todo-toggle" aria-pressed="{{ 'true' if it.completed else 'false' }}" aria-label="Toggle done">
+            <span class="todo-circle"></span>
+        </button>
+        <span class="todo-title">{{ it.title }}</span>
+        {% if it.sub_kind %}<span class="todo-sub-kind">{{ it.sub_kind }}</span>{% endif %}
+        {% if it.due_at and (it.due_at.hour or it.due_at.minute) %}<span class="todo-when">{{ it.due_at.strftime('%H:%M') }}</span>{% endif %}
+        {% if it.kind == 'task' %}
+        <button type="button" class="todo-edit" data-id="{{ it.id }}" aria-label="Edit task" title="Edit">
+            <span class="todo-edit-icon" aria-hidden="true">✎</span>
+        </button>
+        <button type="button" class="todo-del" data-id="{{ it.id }}" aria-label="Delete task">×</button>
+        {% endif %}
+    </li>
+    {%- endmacro %}
+
+    {% if overdue %}
+    <div class="todo-section overdue-section">
+        <h3 class="todo-section-head">Overdue</h3>
+        {% for slot in overdue.values() %}
+        <div class="class-block">
+            <a href="/classes/{{ slot.cls.id }}" class="class-block-head">
+                <span class="class-code">{{ slot.cls.code }}</span>
+                <span class="class-name">{{ slot.cls.name }}</span>
+            </a>
+            <ul class="todo-list todo-list-draggable">
+                {% for it in slot["items"] %}{{ render_item(it) }}{% endfor %}
+            </ul>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    {% if today_items %}
+        {% for slot in today_items.values() %}
+        <div class="class-block">
+            <a href="/classes/{{ slot.cls.id }}" class="class-block-head">
+                <span class="class-code">{{ slot.cls.code }}</span>
+                <span class="class-name">{{ slot.cls.name }}</span>
+            </a>
+            <ul class="todo-list todo-list-draggable">
+                {% for it in slot["items"] %}{{ render_item(it) }}{% endfor %}
+            </ul>
+        </div>
+        {% endfor %}
+    {% else %}
+        {% if not overdue %}<p class="empty">Nothing for today. Click <strong>+ Add task</strong> to add one.</p>{% endif %}
+    {% endif %}
+</section>
+
+{% if all_classes %}
+<!-- Edit task modal — populated dynamically by todo.js when the pencil button is clicked. -->
+<div class="modal-overlay" id="edit-task-modal" hidden>
+    <div class="modal-dialog" role="dialog" aria-labelledby="edit-task-modal-title">
+        <div class="modal-head">
+            <h2 id="edit-task-modal-title">Edit task</h2>
+            <button type="button" class="modal-close" data-close-modal aria-label="Close">×</button>
+        </div>
+        <form method="post" class="add-task-form" data-edit-task>
+            <input type="hidden" name="task_id" value="">
+            <label class="add-task-title">
+                <span class="add-task-label">Task</span>
+                <input type="text" name="title" required>
+            </label>
+            <label class="add-task-due">
+                <span class="add-task-label">Due date (optional)</span>
+                <input type="date" name="due_at">
+            </label>
+            <div class="modal-actions">
+                <button type="submit">Save</button>
+                <button type="button" class="secondary" data-close-modal>Cancel</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<div class="modal-overlay" id="add-task-modal" hidden>
+    <div class="modal-dialog" role="dialog" aria-labelledby="add-task-modal-title">
+        <div class="modal-head">
+            <h2 id="add-task-modal-title">Add a task</h2>
+            <button type="button" class="modal-close" data-close-modal aria-label="Close">×</button>
+        </div>
+        <form method="post" action="/classes/0/tasks" class="add-task-form" data-add-task>
+            <label class="add-task-title">
+                <span class="add-task-label">Task</span>
+                <input type="text" name="title" placeholder="e.g. Read chapter 4" required autofocus>
+            </label>
+            <label class="add-task-due">
+                <span class="add-task-label">Due date (optional)</span>
+                <input type="date" name="due_at">
+            </label>
+            <label class="add-task-class">
+                <span class="add-task-label">Class</span>
+                <select name="class_id" data-add-task-class>
+                    {% for c in all_classes %}
+                    <option value="{{ c.id }}" {% if c.id == default_class_id %}selected{% endif %}>{{ c.code }} — {{ c.name }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <div class="modal-actions">
+                <button type="submit">Add task</button>
+                <button type="button" class="secondary" data-close-modal>Cancel</button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endif %}

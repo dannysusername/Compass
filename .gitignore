@@ -10,6 +10,8 @@ uploads/
 .env
 .studyflow_token
 .anthropic_key
+.xai_key
+.xai_model
 .DS_Store
 Thumbs.db
 .idea/

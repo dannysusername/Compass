@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:docs.x.ai)",
+      "Bash(powershell *)",
+      "Bash(.venv/Scripts/python.exe -m uvicorn main:app --host 127.0.0.1 --port 8011 --no-access-log)"
+    ]
+  }
+}

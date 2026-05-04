@@ -3,7 +3,7 @@
 Personal school task tracker that:
 
 - Syncs your Canvas calendar + your Apple Calendar + StudyFlow's own exam-date calendar into one overlaid Apple Calendar view.
-- Auto-extracts late-grade policy, grading breakdown, office hours, and exam dates from syllabus PDFs (Claude API — Sonnet 4.6).
+- Auto-extracts late-grade policy, grading breakdown, office hours, and exam dates from syllabus PDFs (xAI Grok API — grok-4).
 - Holds a curated list of "important" docs per class so you don't have to dig through Canvas.
 
 Designed for one user, runs locally on a Windows laptop, accessed from your iPhone over home WiFi.
@@ -16,23 +16,35 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-### Anthropic API key
+### xAI API key
 
-Get a key from https://console.anthropic.com/settings/keys, then either:
+Get a key from https://console.x.ai/, then either:
 
 **Option A — file (recommended; the desktop launcher loads it automatically):**
 
 ```powershell
-"sk-ant-...your-key..." | Out-File -Encoding ascii -NoNewline .anthropic_key
+"xai-...your-key..." | Out-File -Encoding ascii -NoNewline .xai_key
 ```
 
 **Option B — env var (per-shell):**
 
 ```powershell
-$env:ANTHROPIC_API_KEY = "sk-ant-...your-key..."
+$env:XAI_API_KEY = "xai-...your-key..."
 ```
 
-`.anthropic_key` is gitignored.
+`.xai_key` is gitignored.
+
+### Model selection (optional)
+
+Default model is `grok-4-fast-reasoning` — fast enough for the live picker (~10–30s per syllabus, ~5–10s per summary card). To override:
+
+- **Per-shell:** `$env:XAI_MODEL = "grok-4-latest"`
+- **File (the launcher loads it on Restart):** `"grok-4-latest" | Out-File -Encoding ascii -NoNewline .xai_model`
+
+Common picks:
+- `grok-4-fast-reasoning` — current default. Best speed/quality balance.
+- `grok-4-fast-non-reasoning` — fastest, slightly less accurate on tricky syllabi.
+- `grok-4-latest` — slowest, deepest reasoning. Use if `fast-reasoning` is splitting headings or dropping table markers.
 
 ## Run
 
@@ -50,9 +62,8 @@ Set `STUDYFLOW_TOKEN` env var (or write to `.studyflow_token`) to gate mutating 
 
 ## Cost
 
-- Sonnet 4.6 input: $3 / 1M tokens, output: $15 / 1M tokens.
-- Typical syllabus parse: ~10K tokens input + ~2K output ≈ **$0.06 per syllabus**, dropping to ~$0.005 with prompt caching after the first call.
-- ~5 syllabi per semester ≈ **$0.30 / semester** total.
+- See https://docs.x.ai/docs/models for current Grok pricing.
+- A typical syllabus parse runs ~10K input + ~2K output tokens, so a few syllabi per semester is well under a dollar at current rates.
 
 ## Architecture
 

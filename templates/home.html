@@ -2,62 +2,84 @@
 {% block title %}StudyFlow{% endblock %}
 {% block content %}
 
-<section>
-    <h2>Your courses</h2>
-    {% if classes %}
-    <ul class="class-list">
-        {% for c in classes %}
-        <li>
-            <a href="/classes/{{ c.id }}" class="class-card">
-                <span class="code">{{ c.code }}</span>
-                <span class="name">{{ c.name }}</span>
-            </a>
-        </li>
-        {% endfor %}
-    </ul>
-    {% else %}
-    <p class="empty">No courses yet. Upload a syllabus below to add one.</p>
-    {% endif %}
-</section>
+<div class="home-layout">
+<main class="home-main-col">
+    <section>
+        <h2>
+            Your courses
+            <button type="button" class="add-syllabus-btn" data-open-modal="syllabus-modal" aria-label="Add a syllabus">+</button>
+        </h2>
+        {% if classes %}
+        <ul class="class-list">
+            {% for c in classes %}
+            <li>
+                <a href="/classes/{{ c.id }}" class="class-card">
+                    <span class="code">{{ c.code }}</span>
+                    <span class="name">{{ c.name }}</span>
+                </a>
+            </li>
+            {% endfor %}
+        </ul>
+        {% else %}
+        <p class="empty">No courses yet. Click <strong>+</strong> to upload your first syllabus.</p>
+        {% endif %}
+    </section>
 
-<section class="upload-card">
-    <h2>Add a syllabus</h2>
-    <p class="subtle">StudyFlow auto-creates the class, extracts policies, and pulls exam dates from the PDF.</p>
-    <form method="post" action="/syllabus" enctype="multipart/form-data">
-        <div class="drop-zone" data-upload-zone>
-            <input type="file" name="file" accept="application/pdf,.pdf" required>
-            <div class="drop-prompt">
-                <div class="drop-glyph">. . .</div>
-                <p class="drop-line">
-                    Drop a PDF here<span class="or">or</span><span class="underline">choose a file</span>
-                </p>
-                <div class="drop-hint">PDF &middot; up to 25&nbsp;MB</div>
+    <details class="manual-add">
+        <summary>No syllabus yet? Add a class manually</summary>
+        <form method="post" action="/classes" class="add-class">
+            <label>
+                Code
+                <input type="text" name="code" placeholder="MATH 250" required>
+            </label>
+            <label>
+                Name
+                <input type="text" name="name" placeholder="Calculus II" required>
+            </label>
+            <button type="submit">Add class</button>
+        </form>
+    </details>
+
+    <footer class="cal-link">
+        <p>Calendar feed: <code>/calendar.ics</code> &mdash; subscribe in Apple Calendar.</p>
+    </footer>
+</main>
+
+<aside class="home-todo-col">
+    {% with all_classes = classes %}
+    {% include "_today_list.html" %}
+    {% endwith %}
+</aside>
+</div>
+
+<!-- Modal: Add a syllabus -->
+<div class="modal-overlay" id="syllabus-modal" hidden>
+    <div class="modal-dialog" role="dialog" aria-labelledby="syllabus-modal-title">
+        <div class="modal-head">
+            <h2 id="syllabus-modal-title">Add a syllabus</h2>
+            <button type="button" class="modal-close" data-close-modal aria-label="Close">×</button>
+        </div>
+        <p class="subtle">StudyFlow auto-creates the class, extracts policies, and pulls exam dates from the PDF.</p>
+        <form method="post" action="/syllabus" enctype="multipart/form-data">
+            <div class="drop-zone" data-upload-zone>
+                <input type="file" name="file" accept="application/pdf,.pdf" required>
+                <div class="drop-prompt">
+                    <div class="drop-glyph">. . .</div>
+                    <p class="drop-line">
+                        Drop a PDF here<span class="or">or</span><span class="underline">choose a file</span>
+                    </p>
+                    <div class="drop-hint">PDF &middot; up to 25&nbsp;MB</div>
+                </div>
+                <div class="drop-picked"></div>
             </div>
-            <div class="drop-picked"></div>
-        </div>
-        <div class="actions">
-            <button type="submit">Upload syllabus</button>
-        </div>
-    </form>
-</section>
+            <div class="actions">
+                <button type="submit">Upload syllabus</button>
+            </div>
+        </form>
+    </div>
+</div>
 
-<details class="manual-add">
-    <summary>No syllabus yet? Add a class manually</summary>
-    <form method="post" action="/classes" class="add-class">
-        <label>
-            Code
-            <input type="text" name="code" placeholder="MATH 250" required>
-        </label>
-        <label>
-            Name
-            <input type="text" name="name" placeholder="Calculus II" required>
-        </label>
-        <button type="submit">Add class</button>
-    </form>
-</details>
-
-<footer class="cal-link">
-    <p>Calendar feed: <code>/calendar.ics</code> &mdash; subscribe in Apple Calendar.</p>
-</footer>
+<script src="{{ '/static/todo.js' | static_v }}" defer></script>
+<script src="{{ '/static/modal.js' | static_v }}" defer></script>
 
 {% endblock %}

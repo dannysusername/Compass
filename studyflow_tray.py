@@ -304,11 +304,12 @@ class ServerController:
         return "Stopped"
 
     def reload_env(self) -> None:
-        """Re-read .anthropic_key and .studyflow_token so a Restart picks up
-        any edits the user made since the launcher started."""
+        """Re-read .xai_key, .xai_model, and .studyflow_token so a Restart
+        picks up any edits the user made since the launcher started."""
         for fname, var in (
             (".studyflow_token", "STUDYFLOW_TOKEN"),
-            (".anthropic_key", "ANTHROPIC_API_KEY"),
+            (".xai_key", "XAI_API_KEY"),
+            (".xai_model", "XAI_MODEL"),
         ):
             f = ROOT / fname
             if f.is_file():

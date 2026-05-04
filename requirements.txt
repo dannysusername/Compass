@@ -1,10 +1,11 @@
 fastapi>=0.110
 uvicorn[standard]>=0.27
 sqlmodel>=0.0.16
-anthropic>=0.40
+xai-sdk>=1.0
 pdfplumber>=0.10
 icalendar>=5.0
 jinja2>=3.1
+markdown>=3.5
 python-multipart>=0.0.7
 aiofiles>=23.2
 pystray>=0.19

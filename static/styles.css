@@ -115,7 +115,6 @@ header {
 .theme-toggle:active { transform: none; box-shadow: none; }
 
 main {
-    max-width: 720px;
     margin: 0 auto;
     padding: 40px 24px 100px;
 }
@@ -513,6 +512,85 @@ code {
     margin-top: 4px;
 }
 
+/* ---- Syllabus link section (top of class page) ---- */
+
+.syllabus-link {
+    margin-top: 8px;
+}
+.syllabus-link p {
+    margin: 0 0 8px;
+    font-family: var(--serif);
+}
+.syllabus-link a {
+    color: var(--ink);
+    text-decoration: underline;
+    text-decoration-color: var(--rust);
+    text-underline-offset: 3px;
+    text-decoration-thickness: 2px;
+    font-weight: 600;
+    font-style: italic;
+}
+.syllabus-link a:hover { color: var(--rust); }
+.syllabus-link p.hint {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    margin-top: 6px;
+}
+
+/* ---- Source-quote disclosure (verifying Grok's extractions) ---- */
+
+details.source {
+    margin-top: 6px;
+}
+details.source summary {
+    cursor: pointer;
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    list-style: none;
+    display: inline-block;
+}
+details.source summary::-webkit-details-marker { display: none; }
+details.source summary::before { content: "▸ "; color: var(--rust); }
+details.source[open] summary::before { content: "▾ "; }
+details.source summary:hover { color: var(--rust); }
+details.source blockquote {
+    margin: 6px 0 0;
+    padding: 8px 12px;
+    border-left: 2px solid var(--rust);
+    background: var(--paper);
+    font-family: var(--serif);
+    font-style: italic;
+    font-size: 13px;
+    color: var(--ink-3);
+    line-height: 1.45;
+}
+details.source.inline {
+    display: inline-block;
+    margin-left: 8px;
+}
+details.source.event-source {
+    grid-column: 1 / -1;
+    margin-top: 4px;
+}
+
+.policy-list table.grading td.source-cell {
+    width: auto;
+    text-align: left;
+    font-weight: normal;
+    font-family: var(--serif);
+    font-size: 13px;
+    padding-left: 12px;
+}
+.policy-list table.grading td.source-cell details.source {
+    margin-top: 0;
+}
+
 /* ---- Inline edit (collapsible) ---- */
 
 .row-actions summary {
@@ -621,7 +699,8 @@ input[type="text"], input[type="password"], select, textarea {
 input:focus, select:focus, textarea:focus {
     outline: 2px solid var(--ink);
     outline-offset: -1px;
-    background: #FFF;
+    /* Keep theme-driven background so dark mode stays dark on focus —
+       the ink-colored outline alone is enough focus indication. */
 }
 
 textarea { resize: vertical; min-height: 60px; }
@@ -735,6 +814,14 @@ form.danger button:hover {
     border-radius: 50%;
     animation: spin 0.8s linear infinite;
 }
+
+a.primary-link.disabled {
+    color: var(--muted);
+    text-decoration-color: var(--rule);
+    pointer-events: none;
+    cursor: wait;
+    opacity: 0.7;
+}
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* ---- Setup token card ---- */
@@ -779,7 +866,1670 @@ form.danger button:hover {
     font-size: 12px;
 }
 
+/* ---- Cards (user-curated highlights) ---- */
+
+.card-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+.card-item {
+    padding: 0;
+    background: var(--paper-2);
+    border-left: 3px solid var(--ink);
+    border-radius: 2px;
+    overflow: hidden;
+    display: flex;
+    align-items: stretch;
+    transition: opacity 0.12s ease, transform 0.12s ease, box-shadow 0.12s ease;
+    /* Top/bottom borders for drag drop indicators (default invisible) */
+    border-top: 3px solid transparent;
+    border-bottom: 3px solid transparent;
+}
+.card-item--summary { border-left-color: var(--rust); }
+.card-item--tailor  { border-left-color: var(--rust); }
+
+/* ---- Burger drag handle (left side of every card) ---- */
+
+.card-drag-handle {
+    flex-shrink: 0;
+    width: 36px;
+    background: transparent;
+    cursor: grab;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    user-select: none;
+    -webkit-user-select: none;
+    transition: background 0.1s ease;
+    /* Force the browser to treat this as a draggable block; some browsers
+       quirk on inline draggables. */
+    touch-action: none;
+}
+.card-drag-handle:hover { background: rgba(0, 0, 0, 0.04); }
+.card-drag-handle:active { cursor: grabbing; }
+:root.dark .card-drag-handle:hover { background: rgba(255, 255, 255, 0.04); }
+
+.burger-icon {
+    width: 18px;
+    height: 12px;
+    background-image: linear-gradient(to bottom,
+        var(--ink) 0, var(--ink) 2px,
+        transparent 2px, transparent 5px,
+        var(--ink) 5px, var(--ink) 7px,
+        transparent 7px, transparent 10px,
+        var(--ink) 10px, var(--ink) 12px);
+}
+
+/* The card-details should fill the remaining space next to the handle. */
+.card-item > details.card-details {
+    flex: 1;
+    min-width: 0;
+}
+
+/* Drag visual: card lifts off the page — solid (not translucent), slight
+   scale-up, dramatic shadow. The scale is also applied via inline transform
+   in JS so it survives the FLIP animation. */
+.card-item.dragging {
+    opacity: 1;
+    z-index: 5;
+    box-shadow: 0 14px 30px rgba(0, 0, 0, 0.22), 0 4px 8px rgba(0, 0, 0, 0.12);
+    cursor: grabbing;
+}
+:root.dark .card-item.dragging {
+    box-shadow: 0 14px 30px rgba(0, 0, 0, 0.55), 0 4px 8px rgba(0, 0, 0, 0.35);
+}
+.card-item.drop-above {
+    border-top-color: var(--rust);
+}
+.card-item.drop-below {
+    border-bottom-color: var(--rust);
+}
+
+/* While a drag is in progress, suppress text selection and tap highlight
+   everywhere on the page so the cursor doesn't accidentally start selecting
+   text mid-drag. */
+body.cards-dragging,
+body.cards-dragging * {
+    user-select: none !important;
+    -webkit-user-select: none !important;
+    cursor: grabbing !important;
+}
+
+/* ---- Card-level details (outer collapse) ---- */
+
+details.card-details > summary.card-summary {
+    list-style: none;
+    cursor: pointer;
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 14px 18px 12px;
+    border-bottom: 1.5px solid var(--ink);
+    background: var(--paper-2);
+    transition: background 0.1s;
+}
+details.card-details > summary.card-summary::-webkit-details-marker { display: none; }
+details.card-details > summary.card-summary::marker { content: ''; }
+details.card-details > summary.card-summary:hover { background: var(--paper-3); }
+
+.card-summary-text {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+}
+.card-kind {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--rust);
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    font-weight: 700;
+}
+.card-title {
+    font-family: var(--serif);
+    font-weight: 700;
+    color: var(--ink);
+    font-size: 19px;
+    line-height: 1.25;
+    letter-spacing: -0.005em;
+    word-wrap: break-word;
+}
+.card-tailor-prompt {
+    font-family: var(--serif);
+    font-style: italic;
+    font-size: 13px;
+    color: var(--muted);
+    line-height: 1.4;
+}
+.card-tailor-prompt-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--rust);
+    font-style: normal;
+    margin-right: 4px;
+}
+
+/* Card-summary right-side controls cluster (Delete + chevron). */
+.card-summary-controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-shrink: 0;
+}
+
+/* Big "Delete" button on the card title row. Always visible — primary path
+   for getting rid of a card. Inside <summary>, so its click handler must
+   stop propagation to avoid toggling the disclosure. */
+.card-delete-btn {
+    background: var(--paper);
+    color: var(--danger);
+    border: 1.5px solid var(--danger);
+    padding: 8px 18px;
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    cursor: pointer;
+    border-radius: 2px;
+    box-shadow: 2px 2px 0 var(--rust);
+    align-self: auto;
+    transition: background 0.1s, color 0.1s, transform 0.05s, box-shadow 0.05s;
+}
+.card-delete-btn:hover {
+    background: var(--danger);
+    color: var(--paper);
+    transform: translate(-1px, -1px);
+    box-shadow: 3px 3px 0 var(--rust);
+}
+.card-delete-btn:active {
+    transform: translate(1px, 1px);
+    box-shadow: 1px 1px 0 var(--rust);
+}
+
+/* Custom chevron — rotates with state. */
+.card-toggle-chevron,
+.section-toggle-chevron {
+    flex-shrink: 0;
+    width: 18px;
+    height: 18px;
+    margin-top: 4px;
+    background: none;
+    position: relative;
+    transition: transform 0.15s ease;
+}
+.card-toggle-chevron::before,
+.section-toggle-chevron::before {
+    content: '';
+    position: absolute;
+    top: 4px;
+    left: 4px;
+    width: 8px;
+    height: 8px;
+    border-right: 2px solid var(--ink);
+    border-bottom: 2px solid var(--ink);
+    transform: rotate(45deg);
+    transition: transform 0.15s ease;
+}
+details:not([open]) > summary .card-toggle-chevron::before,
+details:not([open]) > summary .section-toggle-chevron::before {
+    transform: rotate(-45deg);
+    top: 6px;
+}
+
+.card-content {
+    padding: 14px 18px;
+}
+
+/* ---- Per-section details (inner collapses) ---- */
+
+details.section-details {
+    margin-bottom: 14px;
+}
+details.section-details:last-of-type { margin-bottom: 0; }
+details.section-details > summary.section-summary {
+    list-style: none;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 4px 0;
+    margin-bottom: 6px;
+}
+details.section-details > summary.section-summary::-webkit-details-marker { display: none; }
+details.section-details > summary.section-summary::marker { content: ''; }
+
+.section-summary-text {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    min-width: 0;
+}
+.section-title {
+    font-family: var(--serif);
+    font-weight: 700;
+    color: var(--ink);
+    font-size: 15px;
+    line-height: 1.3;
+    /* The line under the section heading, only as wide as the text. */
+    border-bottom: 1.5px solid var(--rust);
+    padding-bottom: 2px;
+    display: inline-block;
+}
+.section-title--unnamed {
+    color: var(--muted);
+    font-style: italic;
+    font-weight: 600;
+}
+
+/* Per-section kind badge (summary / verbatim) shown next to the section title. */
+.section-kind {
+    font-family: var(--mono);
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    padding: 2px 7px;
+    border-radius: 10px;
+    display: inline-block;
+    line-height: 1.3;
+    border: 1px solid transparent;
+}
+.section-kind--tailor {
+    background: var(--rust);
+    color: var(--paper);
+}
+/* Old summary-class fallback for any cards still labeled "summary" in the DOM. */
+.section-kind--summary {
+    background: var(--rust);
+    color: var(--paper);
+}
+.section-kind--verbatim {
+    background: var(--paper);
+    color: var(--ink);
+    border-color: var(--ink);
+}
+.single-section-kind {
+    margin: 0 0 10px;
+}
+.section-content {
+    /* Shifted slightly to make the content visually nested under the section title. */
+    padding-left: 2px;
+}
+
+.card-body {
+    margin: 0;
+    font-family: var(--serif);
+    font-size: 15px;
+    color: var(--ink-2);
+    line-height: 1.55;
+}
+
+/* ---- Section picker (two-column on desktop, stacked on mobile) ---- */
+
+.sections-page {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 340px;
+    gap: 28px;
+    align-items: start;
+    margin-top: 8px;
+    /* Break out of the 720px main width so the side panel has room */
+    width: min(1100px, calc(100vw - 48px));
+    margin-left: calc(-1 * (min(1100px, calc(100vw - 48px)) - 100%) / 2);
+}
+.sections-page > .hint {
+    grid-column: 1 / -1;
+    font-family: var(--serif);
+    font-style: italic;
+    font-size: 14px;
+    color: var(--muted);
+    margin: 0 0 8px;
+    line-height: 1.55;
+}
+.sections-page > .hint strong {
+    color: var(--ink);
+    font-style: normal;
+    font-weight: 700;
+    background: var(--paper-2);
+    padding: 1px 6px;
+    border-radius: 2px;
+    font-family: var(--mono);
+    font-size: 12px;
+}
+
+.sections-text {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.section-article {
+    background: var(--paper-2);
+    border-left: 3px solid var(--rule);
+    border-radius: 2px;
+    padding: 14px 18px;
+    transition: border-color 0.1s, background 0.1s;
+}
+.section-article--lvl2 {
+    margin-left: 20px;
+    background: var(--paper);
+    border-left-color: var(--rule);
+}
+.section-article--lvl3 {
+    margin-left: 40px;
+    background: var(--paper);
+}
+.section-article:hover { border-left-color: var(--ink); }
+.section-article.picked { border-left-color: var(--ink); background: var(--paper-3); }
+.section-article.active-group {
+    box-shadow: inset 0 0 0 1px var(--ink);
+}
+
+.section-article-head {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    margin-bottom: 8px;
+    flex-wrap: wrap;
+}
+.section-article-heading {
+    flex: 1 1 200px;
+    margin: 0;
+    font-family: var(--serif);
+    font-weight: 700;
+    color: var(--ink);
+    font-size: 18px;
+    line-height: 1.3;
+    min-width: 0;
+}
+.section-article--lvl2 .section-article-heading { font-size: 16px; font-style: italic; }
+.section-article--lvl3 .section-article-heading {
+    font-size: 14px;
+    font-style: italic;
+    color: var(--ink-2);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+.section-marker {
+    flex-shrink: 0;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    border: 1.5px solid var(--rule);
+    background: var(--paper);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+    color: white;
+    line-height: 1;
+    margin-top: 2px;
+}
+
+.section-article-actions {
+    display: flex;
+    gap: 6px;
+    flex-shrink: 0;
+}
+.add-btn {
+    background: var(--paper);
+    color: var(--ink);
+    border: 1px solid var(--ink);
+    padding: 5px 12px;
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    cursor: pointer;
+    border-radius: 2px;
+    box-shadow: none;
+    align-self: auto;
+    transition: background 0.1s, color 0.1s;
+}
+.add-btn:hover {
+    background: var(--ink);
+    color: var(--paper);
+    transform: none;
+    box-shadow: none;
+}
+.add-btn--tailor:hover { background: var(--rust); border-color: var(--rust); }
+.remove-pick {
+    background: transparent;
+    color: var(--muted);
+    border: 1px solid var(--rule);
+    padding: 4px 10px;
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1;
+    cursor: pointer;
+    border-radius: 2px;
+    box-shadow: none;
+    align-self: auto;
+}
+.remove-pick:hover {
+    color: var(--danger);
+    border-color: var(--danger);
+    background: var(--paper);
+    transform: none;
+    box-shadow: none;
+}
+
+.section-article-body {
+    font-family: var(--serif);
+    font-size: 14px;
+    color: var(--ink-2);
+    line-height: 1.6;
+    word-wrap: break-word;
+    margin: 0;
+}
+
+/* Markdown elements rendered inside section bodies, cards, and blockquotes. */
+.section-article-body > *:first-child,
+.card-body > *:first-child,
+.mini-card-body > *:first-child,
+details.source blockquote > *:first-child { margin-top: 0; }
+.section-article-body > *:last-child,
+.card-body > *:last-child,
+.mini-card-body > *:last-child,
+details.source blockquote > *:last-child { margin-bottom: 0; }
+
+.section-article-body p,
+.card-body p,
+.mini-card-body p,
+details.source blockquote p {
+    margin: 0 0 10px;
+    line-height: 1.55;
+}
+.section-article-body ul,
+.section-article-body ol,
+.card-body ul,
+.card-body ol,
+.mini-card-body ul,
+.mini-card-body ol,
+details.source blockquote ul,
+details.source blockquote ol {
+    margin: 0 0 10px;
+    padding-left: 22px;
+}
+.section-article-body li,
+.card-body li,
+.mini-card-body li,
+details.source blockquote li {
+    margin: 2px 0;
+    line-height: 1.5;
+}
+.section-article-body h1, .section-article-body h2, .section-article-body h3,
+.card-body h1, .card-body h2, .card-body h3,
+.mini-card-body h1, .mini-card-body h2, .mini-card-body h3,
+details.source blockquote h1, details.source blockquote h2, details.source blockquote h3 {
+    /* Inline section headings inside a body — used for joined cards and for
+       sub-headings inside sections. Smaller and tighter than top-level h2s. */
+    font-family: var(--serif);
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--ink);
+    margin: 16px 0 6px;
+    text-transform: none;
+    letter-spacing: 0;
+    background: none;
+    padding: 0;
+    display: block;
+}
+.section-article-body h2,
+.card-body h2,
+.mini-card-body h2,
+details.source blockquote h2 {
+    font-size: 15px;
+    border-bottom: 1px solid var(--rule);
+    padding-bottom: 2px;
+}
+.section-article-body strong,
+.card-body strong,
+.mini-card-body strong,
+details.source blockquote strong { color: var(--ink); }
+.section-article-body code,
+.card-body code,
+.mini-card-body code,
+details.source blockquote code {
+    font-family: var(--mono);
+    background: var(--paper-3);
+    padding: 1px 5px;
+    border-radius: 2px;
+    font-size: 0.92em;
+}
+
+/* ---- Rendered syllabus tables ---- */
+
+.syllabus-table {
+    border-collapse: collapse;
+    margin: 12px 0;
+    background: var(--paper);
+    width: 100%;
+    max-width: 100%;
+    font-family: var(--serif);
+    font-size: 13px;
+    color: var(--ink-2);
+    line-height: 1.45;
+    border: 1px solid var(--rule);
+    /* preserve normal whitespace inside cells (parent uses pre-wrap) */
+    white-space: normal;
+}
+.syllabus-table th,
+.syllabus-table td {
+    padding: 6px 10px;
+    border: 1px solid var(--rule);
+    text-align: left;
+    vertical-align: top;
+    font-weight: 400;
+}
+.syllabus-table th {
+    background: var(--paper-2);
+    font-weight: 700;
+    color: var(--ink);
+    font-family: var(--serif);
+    font-size: 12px;
+    text-transform: none;
+    letter-spacing: 0;
+}
+.syllabus-table tbody tr:nth-child(even) td {
+    background: rgba(0, 0, 0, 0.015);
+}
+
+/* Long tables on small screens — let them scroll horizontally inside their
+   container instead of overflowing the page. */
+.section-article-body,
+.card-body,
+.mini-card-body,
+details.source blockquote {
+    overflow-x: auto;
+}
+.syllabus-table { min-width: 0; }
+@media (max-width: 480px) {
+    .syllabus-table { font-size: 12px; }
+    .syllabus-table th,
+    .syllabus-table td { padding: 5px 7px; }
+}
+
+/* ---- Card builder side panel ---- */
+
+.card-builder {
+    position: sticky;
+    top: 76px;
+    max-height: calc(100vh - 100px);
+    overflow-y: auto;
+    background: var(--paper-2);
+    border-left: 3px solid var(--ink);
+    padding: 16px 18px;
+    border-radius: 2px;
+}
+.card-builder h3 { margin: 0 0 12px; display: flex; align-items: center; gap: 8px; }
+.card-count {
+    background: var(--ink);
+    color: var(--paper);
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-weight: 700;
+    font-style: normal;
+}
+
+.builder-groups {
+    list-style: none;
+    padding: 0;
+    margin: 0 0 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+.builder-group {
+    background: var(--paper);
+    padding: 10px 12px;
+    border-radius: 2px;
+    border-left: 3px solid var(--rule);
+    cursor: pointer;
+}
+.builder-group.active { box-shadow: inset 0 0 0 1px var(--ink); }
+.builder-group-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+.builder-group-num {
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+    flex-shrink: 0;
+}
+.builder-group-label {
+    flex: 1;
+    font-family: var(--serif);
+    font-size: 13px;
+    color: var(--ink-2);
+    line-height: 1.35;
+    word-wrap: break-word;
+    min-width: 0;
+}
+.remove-group {
+    background: transparent;
+    border: 1px solid var(--rule);
+    color: var(--muted);
+    padding: 2px 8px;
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+    border-radius: 2px;
+    box-shadow: none;
+    align-self: auto;
+}
+.remove-group:hover {
+    color: var(--danger);
+    border-color: var(--danger);
+    background: var(--paper);
+    transform: none;
+    box-shadow: none;
+}
+.builder-group-kind {
+    display: flex;
+    gap: 14px;
+    font-family: var(--mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+}
+.builder-group-kind label {
+    flex-direction: row;
+    align-items: center;
+    gap: 4px;
+    text-transform: uppercase;
+    cursor: pointer;
+}
+.builder-group-kind input[type="radio"] { margin: 0; }
+
+/* ---- Per-section rows inside a card group ---- */
+
+.builder-section-list {
+    list-style: none;
+    padding: 0;
+    margin: 6px 0 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.builder-section {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 0;
+    border-top: 1px dotted var(--rule);
+    flex-wrap: wrap;
+}
+.builder-section-list li:first-child { border-top: none; }
+.builder-section-name {
+    flex: 1 1 60%;
+    font-family: var(--serif);
+    font-size: 12px;
+    color: var(--ink-2);
+    line-height: 1.3;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+.builder-section-toggle {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+}
+.kind-pill {
+    font-family: var(--mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    padding: 2px 7px;
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    cursor: pointer;
+    color: var(--muted);
+    flex-direction: row;
+    gap: 3px;
+    align-items: center;
+    background: var(--paper);
+    transition: background 0.1s, color 0.1s, border-color 0.1s;
+}
+.kind-pill:has(input:checked) {
+    color: var(--paper);
+    border-color: var(--ink);
+    background: var(--ink);
+}
+.kind-pill--tailor:has(input:checked) {
+    background: var(--rust);
+    border-color: var(--rust);
+}
+.kind-pill input[type="radio"] {
+    /* Hide the actual radio, the pill itself is the visual */
+    position: absolute;
+    opacity: 0;
+    width: 0;
+    height: 0;
+    margin: 0;
+}
+.builder-section-remove {
+    background: transparent;
+    border: 1px solid var(--rule);
+    color: var(--muted);
+    padding: 0 6px;
+    font-size: 12px;
+    line-height: 1.4;
+    cursor: pointer;
+    border-radius: 2px;
+    box-shadow: none;
+    align-self: auto;
+}
+
+/* ---- Per-card tailor prompt ---- */
+
+.builder-prompt {
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px dotted var(--rule);
+}
+.builder-prompt label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.builder-prompt-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--rust);
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    font-weight: 700;
+}
+.builder-prompt-input {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid var(--rule);
+    border-radius: 2px;
+    background: var(--paper);
+    color: var(--ink-2);
+    font-family: var(--serif);
+    font-size: 14px;
+    line-height: 1.5;
+    resize: vertical;
+    min-height: 88px;
+}
+.builder-section-remove:hover {
+    color: var(--danger);
+    border-color: var(--danger);
+    background: var(--paper);
+    transform: none;
+    box-shadow: none;
+}
+
+.builder-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 12px;
+}
+.builder-actions button.primary {
+    background: var(--ink);
+    color: var(--paper);
+    flex: 1;
+    padding: 10px 16px;
+    font-size: 14px;
+    align-self: auto;
+}
+.builder-actions button.secondary {
+    background: var(--paper);
+    color: var(--ink);
+    border: 1px solid var(--ink);
+    box-shadow: none;
+    padding: 10px 14px;
+    font-size: 13px;
+    align-self: auto;
+}
+.builder-actions button.secondary:hover {
+    background: var(--ink);
+    color: var(--paper);
+    transform: none;
+    box-shadow: none;
+}
+
+#submit-status {
+    margin: 10px 0 0;
+    font-size: 13px;
+}
+#submit-status.error { color: var(--danger); font-style: normal; font-family: var(--mono); font-size: 12px; }
+
+.existing-cards { margin-top: 48px; }
+
+.mini-card-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+.mini-card {
+    position: relative;
+    padding: 10px 28px 10px 12px;
+    background: var(--paper-2);
+    border-left: 3px solid var(--ink);
+    border-radius: 2px;
+    font-family: var(--serif);
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--ink-2);
+}
+.mini-card--summary { border-left-color: var(--rust); }
+.mini-card-head {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 4px;
+    flex-wrap: wrap;
+}
+.mini-card-kind {
+    font-family: var(--mono);
+    font-size: 9px;
+    color: var(--rust);
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    font-weight: 700;
+}
+.mini-card-label {
+    font-style: italic;
+    font-weight: 600;
+    color: var(--ink);
+    font-size: 12px;
+}
+.mini-card-body {
+    margin: 0;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+}
+.mini-card-del {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    margin: 0;
+}
+.mini-card-del button {
+    box-shadow: none;
+    padding: 2px 8px;
+    font-size: 12px;
+    line-height: 1;
+}
+.mini-card-list .empty {
+    background: transparent;
+    border: 1px dashed var(--rule);
+    padding: 16px;
+    text-align: center;
+    color: var(--muted);
+    font-style: italic;
+    border-radius: 2px;
+}
+
+/* ---- Home page two-column layout ---- */
+
+.home-layout {
+    display: grid;
+    /* Left column sizes to its content (the class cards), right column is
+       a fixed 400. No more 1fr stretching empty space between them. */
+    grid-template-columns: minmax(420px, max-content) 400px;
+    gap: 20px;
+    align-items: start;
+    /* Sit centered in the viewport. The natural width of the layout is just
+       widest-class-card + 340 + 20, so it stays compact. */
+    width: fit-content;
+    max-width: calc(100vw - 48px);
+    margin-left: auto;
+    margin-right: auto;
+}
+.home-main-col { min-width: 0; }
+.home-todo-col {
+    position: sticky;
+    top: 76px;
+    max-height: calc(100vh - 100px);
+    overflow-y: auto;
+}
+
+/* "+ Add a syllabus" button next to the Your courses heading */
+section h2 .add-syllabus-btn,
+.add-syllabus-btn {
+    margin-left: 10px;
+    background: var(--paper-2);
+    color: var(--ink);
+    border: 1.5px solid var(--ink);
+    padding: 0;
+    width: 28px;
+    height: 28px;
+    font-family: var(--serif);
+    font-size: 18px;
+    font-weight: 700;
+    line-height: 1;
+    cursor: pointer;
+    border-radius: 50%;
+    box-shadow: 1px 1px 0 var(--rust);
+    align-self: auto;
+    text-transform: none;
+    letter-spacing: 0;
+    vertical-align: middle;
+}
+.add-syllabus-btn:hover {
+    background: var(--ink);
+    color: var(--paper);
+    transform: translate(-1px, -1px);
+    box-shadow: 2px 2px 0 var(--rust);
+}
+.add-syllabus-btn:active {
+    transform: translate(1px, 1px);
+    box-shadow: 0 0 0 var(--rust);
+}
+
+/* ---- Modal (syllabus upload) ---- */
+
+.modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.45);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+    padding: 24px;
+}
+.modal-overlay[hidden] { display: none; }
+body.modal-open { overflow: hidden; }
+.modal-dialog {
+    background: var(--paper);
+    color: var(--ink-2);
+    max-width: 560px;
+    width: 100%;
+    max-height: calc(100vh - 48px);
+    overflow-y: auto;
+    border-radius: 4px;
+    border-left: 3px solid var(--ink);
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+    padding: 24px 28px 28px;
+}
+.modal-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 8px;
+}
+.modal-head h2 {
+    margin: 0;
+    background: none;
+    padding: 0;
+}
+.modal-close {
+    background: transparent;
+    color: var(--muted);
+    border: 1px solid var(--rule);
+    padding: 4px 12px;
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+    border-radius: 2px;
+    box-shadow: none;
+    align-self: flex-start;
+    transition: color 0.1s, border-color 0.1s;
+}
+.modal-close:hover {
+    color: var(--danger);
+    border-color: var(--danger);
+    transform: none;
+    box-shadow: none;
+}
+
+/* ---- Today-list block (shared partial styling) ---- */
+
+.today-list-block {
+    background: var(--paper-2);
+    border-left: 3px solid var(--ink);
+    border-radius: 2px;
+    padding: 18px 22px;
+}
+.today-list-head {
+    margin-bottom: 14px;
+}
+.today-list-head h2 {
+    margin: 0;
+    display: inline-block;
+}
+.today-list-head .subtle { font-size: 13px; }
+
+.todo-section { margin-top: 18px; }
+.todo-section-head {
+    margin: 14px 0 8px;
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--rust);
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    font-style: normal;
+}
+.overdue-section .todo-section-head { color: var(--danger); }
+
+/* Add-task form with class picker (shared, both views).
+   Stacked single-column layout so it fits snugly inside the ~360px sidebar
+   regardless of input intrinsic widths. min-width:0 on labels prevents the
+   text input's internal default size (~20em) from forcing column overflow. */
+.add-task-form {
+    background: var(--paper);
+    padding: 12px;
+    border-radius: 2px;
+    border: 1px dashed var(--rule);
+    margin: 0 0 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    box-sizing: border-box;
+    max-width: 100%;
+}
+.add-task-form label {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+    width: 100%;
+}
+.add-task-form .add-task-label {
+    font-family: var(--mono);
+    font-size: 9px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+.add-task-form input[type="text"],
+.add-task-form input[type="date"],
+.add-task-form select {
+    padding: 7px 9px;
+    font-size: 13px;
+    font-family: var(--serif);
+    background: var(--paper-2);
+    color: var(--ink-2);
+    border: 1px solid var(--rule);
+    border-radius: 2px;
+    width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+}
+.add-task-form button {
+    padding: 7px 14px;
+    font-size: 12px;
+    box-shadow: 1px 1px 0 var(--rust);
+    align-self: flex-start;
+}
+
+/* "+ Add task" button that opens the modal — replaces the old inline form
+   in the today-list-block to save vertical space. */
+.add-task-btn {
+    background: var(--paper);
+    color: var(--ink);
+    border: 1.5px dashed var(--rule);
+    padding: 10px 16px;
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    cursor: pointer;
+    border-radius: 2px;
+    box-shadow: none;
+    width: 100%;
+    align-self: stretch;
+    margin-bottom: 14px;
+    transition: border-color 0.1s, color 0.1s, background 0.1s;
+}
+.add-task-btn:hover {
+    border-color: var(--ink);
+    border-style: solid;
+    color: var(--rust);
+    background: var(--paper-3);
+    transform: none;
+    box-shadow: 1px 1px 0 var(--rust);
+}
+
+/* Modal-specific tweaks for the add-task form */
+.modal-dialog .add-task-form {
+    background: transparent;
+    border: none;
+    padding: 0;
+    margin-top: 12px;
+}
+.modal-dialog .add-task-form input[type="text"],
+.modal-dialog .add-task-form input[type="date"],
+.modal-dialog .add-task-form select {
+    background: var(--paper);
+    border: 1px solid var(--rule);
+    font-size: 14px;
+    padding: 9px 11px;
+}
+.modal-actions {
+    display: flex;
+    gap: 10px;
+    margin-top: 6px;
+    align-items: center;
+}
+.modal-actions button {
+    align-self: auto;
+    padding: 9px 18px;
+    font-size: 13px;
+}
+.modal-actions button.secondary {
+    background: var(--paper);
+    color: var(--ink);
+    border: 1px solid var(--ink);
+    box-shadow: none;
+    font-family: var(--serif);
+    font-weight: 500;
+}
+.modal-actions button.secondary:hover {
+    background: var(--ink);
+    color: var(--paper);
+    transform: none;
+    box-shadow: none;
+}
+
+/* Drag handle on todo rows (small burger on the left) */
+.todo-drag-handle {
+    flex-shrink: 0;
+    width: 18px;
+    height: 18px;
+    cursor: grab;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: none;
+    opacity: 0.45;
+    transition: opacity 0.1s;
+}
+.todo-row:hover .todo-drag-handle { opacity: 0.85; }
+.todo-drag-handle:active { cursor: grabbing; }
+.todo-burger {
+    width: 12px;
+    height: 9px;
+    background-image: linear-gradient(to bottom,
+        var(--ink) 0, var(--ink) 1.5px,
+        transparent 1.5px, transparent 4px,
+        var(--ink) 4px, var(--ink) 5.5px,
+        transparent 5.5px, transparent 8px,
+        var(--ink) 8px, var(--ink) 9px);
+}
+
+/* Inline title edit input */
+.todo-edit-wrapper { flex: 1; min-width: 0; }
+.todo-title-input {
+    width: 100%;
+    padding: 4px 8px;
+    font-size: 14px;
+    font-family: var(--serif);
+    background: var(--paper);
+    color: var(--ink-2);
+    border: 1px solid var(--ink);
+    border-radius: 2px;
+}
+.todo-row.editing { background: var(--paper-3); }
+.todo-row .todo-title[data-editable="true"] {
+    border-bottom: 1px dotted transparent;
+}
+.todo-row:hover .todo-title[data-editable="true"] {
+    border-bottom-color: var(--rule);
+}
+
+/* Dragging state for todo rows */
+.todo-row.dragging {
+    opacity: 0.5;
+    background: var(--paper);
+    box-shadow: 0 8px 16px rgba(0, 0, 0, 0.18);
+}
+
+/* ---- Top nav ---- */
+
+.top-nav {
+    display: flex;
+    gap: 18px;
+    margin: 0 auto 0 24px;
+    flex: 1;
+}
+.top-nav a {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink);
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    text-decoration: none;
+    font-weight: 600;
+    padding: 4px 0;
+    border-bottom: 1.5px solid transparent;
+}
+.top-nav a:hover {
+    border-bottom-color: var(--rust);
+    color: var(--rust);
+}
+
+/* ---- Class page layout ---- */
+
+/* Class page is single-column now; the task list lives in a floating
+   panel triggered by .task-fab so it doesn't take a fixed sidebar slot. */
+body:has(.class-page) main {
+    max-width: 900px;
+}
+.class-page { min-width: 0; }
+
+/* Whole-section collapse for Cards / Events on a class page. The h2 stays
+   visible when collapsed so the user can still see the heading + chevron. */
+details.class-section { margin-top: 32px; }
+details.class-section > summary.class-section-summary {
+    list-style: none;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+details.class-section > summary.class-section-summary::-webkit-details-marker { display: none; }
+details.class-section > summary.class-section-summary::marker { content: ''; }
+details.class-section > summary.class-section-summary h2 { margin: 0; }
+details.class-section > summary.class-section-summary .section-toggle-chevron {
+    margin-top: 0;
+}
+.class-section-body { margin-top: 12px; }
+
+/* ---- Floating task FAB + panel ---- */
+
+.task-fab {
+    position: fixed;
+    right: 24px;
+    bottom: 24px;
+    z-index: 40;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 18px;
+    background: var(--paper-2);
+    color: var(--ink);
+    border: 1.5px solid var(--ink);
+    border-radius: 999px;
+    font-family: var(--serif);
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    cursor: pointer;
+    box-shadow: 2px 3px 0 var(--ink);
+    transition: transform 0.12s ease, box-shadow 0.12s ease, background 0.12s ease;
+}
+.task-fab:hover { background: var(--paper-3); }
+.task-fab:active {
+    transform: translate(2px, 3px);
+    box-shadow: 0 0 0 var(--ink);
+}
+.task-fab-icon {
+    color: var(--rust);
+    font-size: 16px;
+    line-height: 1;
+}
+.task-fab.is-open .task-fab-icon { color: var(--ink); }
+
+.task-fab-panel {
+    position: fixed;
+    right: 24px;
+    bottom: 80px;
+    z-index: 39;
+    width: min(420px, calc(100vw - 48px));
+    max-height: calc(100vh - 120px);
+    overflow-y: auto;
+    background: var(--paper);
+    border: 1.5px solid var(--ink);
+    border-radius: 6px;
+    box-shadow: 4px 6px 0 var(--ink);
+    padding: 18px 18px 22px;
+}
+.task-fab-panel[hidden] { display: none; }
+.task-sidebar-title {
+    margin: 0 0 12px;
+    font-family: var(--serif);
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--ink);
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    background-image: linear-gradient(transparent calc(100% - 2px),
+                                       var(--rust) calc(100% - 2px));
+    background-repeat: no-repeat;
+    display: inline-block;
+    padding-bottom: 4px;
+}
+.task-sidebar-subhead {
+    margin: 18px 0 8px;
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--rust);
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    font-style: normal;
+}
+.add-task-form {
+    background: var(--paper);
+    padding: 12px;
+    border-radius: 2px;
+    border: 1px dashed var(--rule);
+    margin: 0 0 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.add-task-form label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+.add-task-form input[type="text"],
+.add-task-form input[type="date"] {
+    padding: 7px 9px;
+    font-size: 13px;
+    font-family: var(--serif);
+    background: var(--paper-2);
+    color: var(--ink-2);
+    border: 1px solid var(--rule);
+    border-radius: 2px;
+}
+.add-task-form button {
+    padding: 7px 16px;
+    font-size: 12px;
+    align-self: flex-start;
+    box-shadow: 1px 1px 0 var(--rust);
+}
+
+/* ---- Todo rows: circular toggle + title ---- */
+
+.todo-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.todo-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 4px;
+    border-bottom: 1px dotted var(--rule);
+    font-family: var(--serif);
+    font-size: 14px;
+    color: var(--ink-2);
+    line-height: 1.35;
+}
+.todo-row:last-child { border-bottom: none; }
+.todo-toggle {
+    flex-shrink: 0;
+    width: 22px;
+    height: 22px;
+    background: transparent;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    box-shadow: none;
+    align-self: center;
+    transition: none;
+}
+.todo-toggle:hover { transform: none; box-shadow: none; }
+.todo-circle {
+    display: block;
+    width: 18px;
+    height: 18px;
+    border: 1.8px solid var(--ink);
+    border-radius: 50%;
+    background: transparent;
+    transition: background 0.12s, border-color 0.12s;
+    margin: 0 auto;
+}
+.todo-toggle:hover .todo-circle { border-color: var(--rust); }
+.todo-row.done .todo-circle {
+    background: var(--rust);
+    border-color: var(--rust);
+    box-shadow: inset 0 0 0 3px var(--paper-2);
+}
+.todo-row.done .todo-title {
+    text-decoration: line-through;
+    color: var(--muted);
+    font-style: italic;
+}
+.todo-title {
+    flex: 1;
+    min-width: 0;
+    word-wrap: break-word;
+}
+.todo-sub-kind {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--rust);
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    flex-shrink: 0;
+}
+.todo-when {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    flex-shrink: 0;
+    white-space: nowrap;
+}
+.todo-del,
+.todo-edit {
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--muted);
+    padding: 0 6px;
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+    border-radius: 2px;
+    box-shadow: none;
+    align-self: center;
+    flex-shrink: 0;
+}
+.todo-del:hover {
+    color: var(--danger);
+    border-color: var(--danger);
+    transform: none;
+    box-shadow: none;
+}
+.todo-edit:hover {
+    color: var(--ink);
+    border-color: var(--ink);
+    transform: none;
+    box-shadow: none;
+}
+.todo-edit-icon {
+    display: inline-block;
+    line-height: 1;
+    font-size: 13px;
+}
+
+/* ---- Today view ---- */
+
+.todo-section { margin-top: 24px; }
+.todo-section h2 {
+    margin-bottom: 12px;
+}
+.overdue-section h2 {
+    color: var(--danger);
+    background-image: linear-gradient(transparent calc(100% - 2px),
+                                       var(--danger) calc(100% - 2px));
+}
+.class-block {
+    margin-bottom: 18px;
+}
+.class-block-head {
+    display: flex;
+    gap: 12px;
+    align-items: baseline;
+    text-decoration: none;
+    color: inherit;
+    margin-bottom: 6px;
+    padding: 6px 0;
+    border-bottom: 1.5px solid var(--ink);
+}
+.class-block-head:hover .class-code,
+.class-block-head:hover .class-name {
+    color: var(--rust);
+}
+.class-block-head .class-code {
+    font-family: var(--serif);
+    font-weight: 700;
+    color: var(--ink);
+    font-size: 14px;
+    letter-spacing: -0.01em;
+}
+.class-block-head .class-name {
+    font-family: var(--serif);
+    font-style: italic;
+    font-size: 13px;
+    color: var(--muted);
+}
+
+/* ---- Week view: 7 columns on desktop, stack on mobile ---- */
+
+.week-grid {
+    display: grid;
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+    gap: 12px;
+    margin-top: 16px;
+}
+.day-block {
+    background: var(--paper-2);
+    border-left: 3px solid var(--rule);
+    border-radius: 2px;
+    padding: 10px 12px;
+    min-width: 0;
+    cursor: pointer;
+    will-change: transform;
+    transition: transform 0.2s cubic-bezier(0.22, 1, 0.36, 1),
+                box-shadow 0.2s cubic-bezier(0.22, 1, 0.36, 1),
+                background 0.2s ease;
+}
+.day-block.is-hover,
+.day-block:hover,
+.day-block:focus-visible {
+    background: var(--paper-3);
+    transform: translateY(-4px);
+    box-shadow: 4px 6px 0 var(--ink);
+    outline: none;
+}
+.day-block:active {
+    transform: translateY(-1px);
+    box-shadow: 1px 2px 0 var(--ink);
+    transition: transform 0.06s ease, box-shadow 0.06s ease;
+}
+.day-block.is-today { border-left-color: var(--rust); background: var(--paper-3); }
+.day-block.is-today.is-hover,
+.day-block.is-today:hover,
+.day-block.is-today:focus-visible { background: var(--paper-2); }
+.day-block template { display: none; }
+.day-head {
+    margin: 0 0 8px;
+    font-family: var(--serif);
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--ink);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    background: none;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.day-head .day-name { font-size: 11px; }
+.day-head .day-date { font-family: var(--mono); font-size: 10px; color: var(--muted); font-weight: 400; }
+.day-head .day-today-tag {
+    display: inline-block;
+    background: var(--rust);
+    color: var(--paper);
+    font-family: var(--mono);
+    font-size: 9px;
+    padding: 1px 6px;
+    border-radius: 8px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    width: fit-content;
+}
+.day-empty { font-size: 11px; }
+.day-block .class-block { margin-bottom: 10px; }
+.day-block .class-block-head { padding: 4px 0; margin-bottom: 4px; border-bottom: 1px solid var(--rule); }
+.day-block .class-block-head .class-code { font-size: 11px; }
+.day-block .class-block-head .class-name { display: none; }
+.day-block .todo-row {
+    font-size: 12px;
+    padding: 4px 2px;
+}
+.day-block .todo-circle { width: 14px; height: 14px; }
+.day-block .todo-toggle { width: 16px; height: 16px; }
+
+/* ---- Responsive: stack class layout + collapse week grid on small screens ---- */
+
+@media (max-width: 900px) {
+    .home-layout { grid-template-columns: 1fr; }
+    .home-todo-col { position: static; max-height: none; margin-top: 24px; }
+    .task-fab { right: 16px; bottom: 16px; padding: 9px 14px; font-size: 13px; }
+    .task-fab-panel { right: 16px; bottom: 70px; }
+    .week-grid { grid-template-columns: 1fr; }
+    .day-block { border-left-width: 3px; }
+    .day-block .class-block-head .class-name { display: inline; }
+}
+
 /* ---- Mobile fine-tuning ---- */
+
+@media (max-width: 900px) {
+    .sections-page { grid-template-columns: 1fr; }
+    .card-builder {
+        position: static;
+        max-height: none;
+        margin-top: 24px;
+    }
+}
 
 @media (max-width: 480px) {
     main { padding: 28px 18px 80px; }
@@ -788,4 +2538,8 @@ form.danger button:hover {
     .class-card { grid-template-columns: 1fr; gap: 4px; }
     .event-list li { grid-template-columns: 80px 1fr; gap: 10px; }
     .event-list .when { grid-column: 1 / -1; }
+    .section-article--lvl2 { margin-left: 8px; }
+    .section-article--lvl3 { margin-left: 16px; }
+    .section-article-heading { font-size: 16px !important; }
+    .section-article-actions { width: 100%; margin-top: 6px; }
 }

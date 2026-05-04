@@ -1,0 +1,35 @@
+im creating a program that reads a pdf and extracts it to a web app into sections based on like the title, sections and the text under it. Its fed into AI, but the AI somtimes gets the titles and sections processed wrong and sometimes puts titles into a table cause i told it to when it sees table to actually output the table to the web app. Why does this happen, is there a better way to make this? Im sure theres like a program that can easily tell whats a title and section and table since PDF code is concrete
+
+6:39 PM
+Claude responded: Good question, and you're right to be suspicious — you're fighting the wrong tool for the job.
+Good question, and you're right to be suspicious — you're fighting the wrong tool for the job.
+
+Why the AI gets it wrong
+PDFs are not structurally concrete in the way you're thinking. This is the core misconception. A PDF is essentially a list of drawing instructions: "put this glyph at x=243, y=556 in font Helvetica-Bold size 14." There's no <h1> tag, no <table> element, no semantic structure. A "title" is just text that happens to be bigger and bolder. A "table" is just text positioned in a grid — often with no actual table object behind it, just lines drawn separately and text placed in columns.
+
+So when you dump PDF text into an LLM and ask it to identify titles/sections/tables, you're asking it to infer structure from a flat stream of text that already lost most of its visual layout cues during extraction. The model guesses based on capitalization, line breaks, and context — and guesses inconsistently. That's why a heading sometimes gets shoved into a table: the model sees "row-like" patterns and over-applies your table rule.
+
+The other problem is your prompt. "When you see a table, output a table" is ambiguous to the model — it has no reliable signal for what is a table in a flat text stream, so it false-positives.
+
+The better approach: layout-aware extraction first, AI second
+Use a library that actually parses the PDF's visual structure (font sizes, positions, bounding boxes, ruling lines) and emits semantic blocks. Then the AI only handles the fuzzy stuff.
+
+Solid options, roughly in order of power:
+
+PyMuPDF (fitz) — fast, gives you per-span font size, font name, bold/italic flags, and bounding boxes. You can detect headings by clustering font sizes (the largest ~5% are H1, next tier H2, etc.). Great baseline.
+
+pdfplumber — best-in-class table detection. It finds ruled tables and even "lattice-less" tables by analyzing text alignment. Use this specifically for tables.
+
+Unstructured.io (unstructured Python lib) — does exactly what you're building. It outputs typed elements: Title, NarrativeText, Table, ListItem, Header, Footer. You can literally iterate for el in elements: if el.category == "Table": .... This is probably the fastest path for you.
+
+Docling (IBM, open source) — newer, very strong. Outputs structured JSON with sections, tables (as HTML or markdown), and reading order. Handles multi-column layouts well.
+
+LlamaParse / Reducto / AWS Textract — hosted services, excellent quality, cost money.
+
+Suggested architecture
+Parse the PDF deterministically with Unstructured or Docling. You get a typed list of blocks: titles, paragraphs, tables (already as structured data), lists.
+Render to your web app directly from those typed blocks — titles become headings, tables become real <table> elements. No AI needed for structure.
+Use the AI only for what it's good at: summarization, semantic tagging, Q&A, generating section descriptions, cleaning up OCR artifacts, etc. Pass it the already-structured blocks as context.
+The mental shift: stop asking the AI to recover structure that a parser can extract for free, and start using the AI for genuinely fuzzy reasoning on top of clean structured input.
+
+One caveat — if your PDFs are scanned (images, not text), none of this works directly and you need OCR first (Tesseract, or the OCR mode in Unstructured/Docling). Worth checking what kind of PDFs you're dealing with before picking a stack.

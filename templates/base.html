@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="theme-color" content="#F4F1E8">
     <title>{% block title %}StudyFlow{% endblock %}</title>
-    <link rel="stylesheet" href="/static/styles.css">
+    <link rel="stylesheet" href="{{ '/static/styles.css' | static_v }}">
     <script>
       // Apply saved theme before paint to avoid a flash of light mode.
       (function () {
@@ -19,11 +19,16 @@
 <body>
     <header>
         <a href="/" class="logo"><em>Study</em>flow<span class="dot">.</span></a>
+        <nav class="top-nav">
+            <a href="/">Classes</a>
+            <a href="/today">Today</a>
+            <a href="/week">Week</a>
+        </nav>
         <button type="button" class="theme-toggle" data-theme-toggle aria-label="Toggle dark mode">Dark</button>
     </header>
     <main>
         {% block content %}{% endblock %}
     </main>
-    <script src="/static/upload.js" defer></script>
+    <script src="{{ '/static/upload.js' | static_v }}" defer></script>
 </body>
 </html>

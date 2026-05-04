@@ -1,0 +1,146 @@
+{% extends "base.html" %}
+{% block title %}Next two weeks — StudyFlow{% endblock %}
+{% block content %}
+<h1>Next two weeks <span class="subtle">starting {{ monday.strftime('%a %b %d') }}</span></h1>
+
+{% macro render_item(it, with_actions=False) -%}
+<li class="todo-row {% if it.completed %}done{% endif %}"
+    data-kind="{{ it.kind }}" data-id="{{ it.id }}" data-class-id="{{ it.class_id }}"
+    data-title="{{ it.title }}"
+    data-due-date="{{ it.due_at.strftime('%Y-%m-%d') if it.due_at else '' }}">
+    <button type="button" class="todo-toggle" aria-pressed="{{ 'true' if it.completed else 'false' }}" aria-label="Toggle done">
+        <span class="todo-circle"></span>
+    </button>
+    <span class="todo-title">{{ it.title }}</span>
+    {% if it.sub_kind %}<span class="todo-sub-kind">{{ it.sub_kind }}</span>{% endif %}
+    {% if it.due_at and (it.due_at.hour or it.due_at.minute) %}<span class="todo-when">{{ it.due_at.strftime('%H:%M') }}</span>{% endif %}
+    {% if with_actions and it.kind == 'task' %}
+    <button type="button" class="todo-edit" data-id="{{ it.id }}" aria-label="Edit task" title="Edit">
+        <span class="todo-edit-icon" aria-hidden="true">✎</span>
+    </button>
+    <button type="button" class="todo-del" data-id="{{ it.id }}" aria-label="Delete task">×</button>
+    {% endif %}
+</li>
+{%- endmacro %}
+
+<div class="week-grid">
+{% for day in days %}
+    <section class="day-block {% if day.is_today %}is-today{% endif %}"
+             role="button" tabindex="0"
+             data-open-day-modal="day-{{ loop.index0 }}"
+             aria-label="View tasks for {{ day.date.strftime('%A %b %d') }}">
+        <h2 class="day-head">
+            <span class="day-name">{{ day.date.strftime('%A') }}</span>
+            <span class="day-date">{{ day.date.strftime('%b %d') }}</span>
+            {% if day.is_today %}<span class="day-today-tag">today</span>{% endif %}
+        </h2>
+        {% if day.items_by_class %}
+            {% for slot in day.items_by_class.values() %}
+            <div class="class-block">
+                <a href="/classes/{{ slot.cls.id }}" class="class-block-head">
+                    <span class="class-code">{{ slot.cls.code }}</span>
+                </a>
+                <ul class="todo-list">
+                    {% for it in slot["items"] %}{{ render_item(it) }}{% endfor %}
+                </ul>
+            </div>
+            {% endfor %}
+        {% else %}
+            <p class="empty day-empty">Nothing.</p>
+        {% endif %}
+        <template data-day-modal-content="day-{{ loop.index0 }}"
+                  data-day-label="{{ day.date.strftime('%A, %b %d') }}">
+            {% if day.items_by_class %}
+                {% for slot in day.items_by_class.values() %}
+                <div class="class-block">
+                    <a href="/classes/{{ slot.cls.id }}" class="class-block-head">
+                        <span class="class-code">{{ slot.cls.code }}</span>
+                        <span class="class-name">{{ slot.cls.name }}</span>
+                    </a>
+                    <ul class="todo-list">
+                        {% for it in slot["items"] %}{{ render_item(it, with_actions=True) }}{% endfor %}
+                    </ul>
+                </div>
+                {% endfor %}
+            {% else %}
+                <p class="empty">Nothing scheduled this day.</p>
+            {% endif %}
+        </template>
+    </section>
+{% endfor %}
+</div>
+
+<div class="modal-overlay" id="day-modal" hidden>
+    <div class="modal-dialog" role="dialog" aria-labelledby="day-modal-title">
+        <div class="modal-head">
+            <h2 id="day-modal-title">Day</h2>
+            <button type="button" class="modal-close" data-close-modal aria-label="Close">×</button>
+        </div>
+        <div class="modal-body" id="day-modal-body"></div>
+    </div>
+</div>
+
+<div class="modal-overlay" id="edit-task-modal" hidden>
+    <div class="modal-dialog" role="dialog" aria-labelledby="edit-task-modal-title">
+        <div class="modal-head">
+            <h2 id="edit-task-modal-title">Edit task</h2>
+            <button type="button" class="modal-close" data-close-modal aria-label="Close">×</button>
+        </div>
+        <form method="post" class="add-task-form" data-edit-task>
+            <input type="hidden" name="task_id" value="">
+            <label class="add-task-title">
+                <span class="add-task-label">Task</span>
+                <input type="text" name="title" required>
+            </label>
+            <label class="add-task-due">
+                <span class="add-task-label">Due date (optional)</span>
+                <input type="date" name="due_at">
+            </label>
+            <div class="modal-actions">
+                <button type="submit">Save</button>
+                <button type="button" class="secondary" data-close-modal>Cancel</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<script src="{{ '/static/todo.js' | static_v }}" defer></script>
+<script src="{{ '/static/modal.js' | static_v }}" defer></script>
+<script>
+// Open the day modal when a .day-block is clicked / Enter / Space.
+// Inner interactive elements (the toggle button, the class link) handle
+// their own clicks first via stopPropagation below, so they don't bubble
+// up and accidentally pop the modal.
+(function () {
+    const modal = document.getElementById('day-modal');
+    const body = document.getElementById('day-modal-body');
+    const title = document.getElementById('day-modal-title');
+    if (!modal || !body || !title) return;
+
+    function openDay(blockEl) {
+        const id = blockEl.getAttribute('data-open-day-modal');
+        const tpl = blockEl.querySelector(`template[data-day-modal-content="${id}"]`);
+        if (!tpl) return;
+        title.textContent = tpl.dataset.dayLabel || 'Day';
+        body.replaceChildren(tpl.content.cloneNode(true));
+        modal.hidden = false;
+        document.body.classList.add('modal-open');
+        if (typeof window.bindTodoToggles === 'function') window.bindTodoToggles();
+    }
+
+    document.querySelectorAll('.day-block[data-open-day-modal]').forEach((block) => {
+        block.addEventListener('click', (e) => {
+            // Ignore clicks that originated on inner interactive elements.
+            if (e.target.closest('.todo-toggle, .class-block-head, .todo-edit, .todo-del')) return;
+            openDay(block);
+        });
+        block.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                openDay(block);
+            }
+        });
+    });
+})();
+</script>
+{% endblock %}
