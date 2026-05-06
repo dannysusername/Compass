@@ -260,11 +260,17 @@ class User(SQLModel, table=True):
     email: str = Field(unique=True, index=True)
     password_hash: str
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    # User-supplied xAI API key. Falls back to the server-wide XAI_API_KEY
-    # env var when missing, so the demo still works for accounts that never
-    # configured one. Stored in cleartext — DB is private; rotation is
-    # manual via /settings.
+    # User-supplied xAI API key. Required for syllabus parsing — the
+    # /syllabus route blocks uploads from accounts without one.
     xai_api_key: Optional[str] = Field(default=None)
+    # Unguessable token embedded in the iCal subscription URL. Lets Apple
+    # Calendar (and other clients) poll the feed without sending a session
+    # cookie — cookies don't survive long-lived subscriptions. Regenerating
+    # the token revokes all existing subscriptions.
+    calendar_token: str = Field(
+        default_factory=lambda: secrets.token_urlsafe(32),
+        unique=True, index=True,
+    )
 
 
 # ---- App setup ----
@@ -327,6 +333,9 @@ async def lifespan(app: FastAPI):
             _add_column_if_missing(conn, "tag", "user_id", "INTEGER")
             # Phase 3: each user can supply their own xAI API key.
             _add_column_if_missing(conn, "user", "xai_api_key", "TEXT")
+            # Phase 4: per-user iCal subscription token (for Apple
+            # Calendar etc., which can't carry a session cookie).
+            _add_column_if_missing(conn, "user", "calendar_token", "TEXT")
             users = conn.exec_driver_sql('SELECT id FROM "user" ORDER BY id').fetchall()
             if users:
                 owner_id = users[0][0]
@@ -336,10 +345,15 @@ async def lifespan(app: FastAPI):
                     )
                 log.info("backfilled user_id=%s on existing class/task/tag rows", owner_id)
     # Make sure every user has the four default system tags (signup also
-    # calls this, but we re-run for the existing-data case).
+    # calls this, but we re-run for the existing-data case). Also backfill
+    # calendar_token for any user that pre-dates the iCal-token column.
     with Session(engine) as session:
         for u in session.exec(select(User)).all():
             _seed_system_tags_for_user(u.id)
+            if not (u.calendar_token or "").strip():
+                u.calendar_token = secrets.token_urlsafe(32)
+                session.add(u)
+        session.commit()
         # Dedupe system tags within each user: pre-Phase-2 data may have
         # ended up with multiple tags sharing a system_key after the
         # backfill. Keep the oldest, repoint any tasks at the duplicates,
@@ -883,6 +897,21 @@ def _mask_key(key: Optional[str]) -> Optional[str]:
     return f"{key[:6]}…{key[-4:]}"
 
 
+def _calendar_urls(request: Request, token: str) -> dict:
+    """Build the subscribe URLs shown on /settings. `webcal_url` triggers
+    Apple Calendar (and other clients that register the scheme) to pop up
+    a 'subscribe?' dialog when clicked."""
+    base = str(request.base_url).rstrip("/")
+    https_url = f"{base}/calendar/{token}.ics"
+    # Strip any scheme from the base, then prefix with webcal:// so Apple
+    # Calendar etc. intercept the click.
+    no_scheme = https_url.split("://", 1)[-1]
+    return {
+        "https_url": https_url,
+        "webcal_url": f"webcal://{no_scheme}",
+    }
+
+
 @app.get("/settings", response_class=HTMLResponse)
 def settings_page(
     request: Request,
@@ -896,7 +925,21 @@ def settings_page(
         "saved": bool(saved),
         "need_key": bool(need_key),
         "error": None,
+        "calendar_urls": _calendar_urls(request, user.calendar_token),
     })
+
+
+@app.post("/settings/calendar/regenerate")
+def settings_regenerate_calendar_token(request: Request, user: User = Depends(require_login)):
+    """Rotate the iCal subscription token. Existing subscriptions break
+    immediately — anyone holding the old URL gets 404. User must
+    re-subscribe with the new URL."""
+    with Session(engine) as session:
+        u = session.get(User, user.id)
+        u.calendar_token = secrets.token_urlsafe(32)
+        session.add(u)
+        session.commit()
+    return RedirectResponse("/settings?saved=1", status_code=303)
 
 
 @app.post("/settings")
@@ -913,6 +956,7 @@ def settings_save(
             "saved": False,
             "need_key": False,
             "error": "xAI keys start with 'xai-'. Get one at https://console.x.ai/",
+            "calendar_urls": _calendar_urls(request, user.calendar_token),
         }, status_code=400)
     with Session(engine) as session:
         u = session.get(User, user.id)
@@ -1784,24 +1828,43 @@ def serve_upload(filename: str, user: User = Depends(require_login)):
 
 
 # ---- Routes: iCal feed ----
+# Two routes serve the same content with different auth:
+#   GET /calendar.ics                — requires session cookie (browser/tab use)
+#   GET /calendar/{token}.ics        — public-but-unguessable; for Apple
+#                                      Calendar / Google Calendar / etc. that
+#                                      can't carry a cookie across long-lived
+#                                      subscriptions. Token lives on the
+#                                      User row and can be rotated from /settings.
 
-@app.get("/calendar.ics")
-def ical_feed(user: User = Depends(require_login)):
+def _build_ical_for_user(user_id: int, request: Optional[Request] = None) -> bytes:
+    """Generate a full iCal feed (events + dated tasks) for one user.
+    Used by both the cookie-auth and token-auth routes."""
+    from icalendar import Alarm
+
     cal = Calendar()
-    cal.add("prodid", "-//Compass//Local//EN")
+    cal.add("prodid", "-//Compass//EN")
     cal.add("version", "2.0")
     cal.add("x-wr-calname", "Compass")
     cal.add("x-wr-timezone", str(LOCAL_TZ))
+    cal.add("x-published-ttl", "PT1H")  # hint to clients: poll hourly
+
+    def _attach_reminder(component, minutes_before: int = 15) -> None:
+        alarm = Alarm()
+        alarm.add("action", "DISPLAY")
+        alarm.add("description", "Compass reminder")
+        alarm.add("trigger", timedelta(minutes=-minutes_before))
+        component.add_component(alarm)
 
     with Session(engine) as session:
-        # Only include events from the user's own classes.
         owned_class_ids = [
             c.id for c in session.exec(
-                select(Class).where(Class.user_id == user.id)
+                select(Class).where(Class.user_id == user_id)
             ).all()
         ]
         if not owned_class_ids:
-            return Response(content=cal.to_ical(), media_type="text/calendar")
+            return cal.to_ical()
+
+        # Auto-extracted events from syllabi.
         events = session.exec(
             select(CalendarEvent).where(
                 CalendarEvent.class_id.in_(owned_class_ids),
@@ -1810,7 +1873,7 @@ def ical_feed(user: User = Depends(require_login)):
         ).all()
         for ev in events:
             ie = ICalEvent()
-            ie.add("uid", f"compass-event-{ev.id}@local")
+            ie.add("uid", f"compass-event-{ev.id}@compass")
             ie.add("summary", f"[{ev.class_code}] {ev.title}")
             starts = ev.starts_at if ev.starts_at.tzinfo else ev.starts_at.replace(tzinfo=LOCAL_TZ)
             ie.add("dtstart", starts)
@@ -1819,6 +1882,80 @@ def ical_feed(user: User = Depends(require_login)):
                 ie.add("dtend", ends)
             ie.add("dtstamp", datetime.now(timezone.utc))
             ie.add("description", f"{ev.kind.title()} for {ev.class_code}")
+            # Only remind for things the user actually has to act on. A
+            # lecture topic at 9am doesn't need a 8:45am ping.
+            if ev.actionable and not ev.completed_at:
+                _attach_reminder(ie)
             cal.add_component(ie)
 
-    return Response(content=cal.to_ical(), media_type="text/calendar")
+        # Manual tasks (only those with a due date — undated backlog tasks
+        # can't appear on a calendar, and completed tasks aren't worth
+        # cluttering the feed with).
+        tasks = session.exec(
+            select(Task).where(
+                Task.user_id == user_id,
+                Task.due_at != None,
+                Task.completed_at == None,
+            )
+        ).all()
+        # Build a class_id -> code map for the task summary prefix.
+        class_codes = {
+            c.id: c.code for c in session.exec(
+                select(Class).where(Class.id.in_(owned_class_ids))
+            ).all()
+        }
+        for t in tasks:
+            ie = ICalEvent()
+            ie.add("uid", f"compass-task-{t.id}@compass")
+            code = class_codes.get(t.class_id, "")
+            prefix = f"[{code}] " if code else ""
+            ie.add("summary", f"{prefix}{t.title}")
+            due = t.due_at if t.due_at.tzinfo else t.due_at.replace(tzinfo=LOCAL_TZ)
+            if t.starts_at is not None:
+                # Range task — render as a multi-day event.
+                starts = t.starts_at if t.starts_at.tzinfo else t.starts_at.replace(tzinfo=LOCAL_TZ)
+                ie.add("dtstart", starts)
+                ie.add("dtend", due)
+            else:
+                ie.add("dtstart", due)
+            ie.add("dtstamp", datetime.now(timezone.utc))
+            ie.add("description", "Compass task")
+            _attach_reminder(ie)
+            cal.add_component(ie)
+
+    return cal.to_ical()
+
+
+# Tell every cache layer (iOS Calendar, browsers, CDNs) not to serve a stale
+# copy. Without this, Apple Calendar can show events from a fetch that
+# happened an hour ago even when the user pulls-to-refresh.
+_ICAL_NO_CACHE_HEADERS = {
+    "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
+
+
+@app.get("/calendar.ics")
+def ical_feed(request: Request, user: User = Depends(require_login)):
+    return Response(
+        content=_build_ical_for_user(user.id, request),
+        media_type="text/calendar",
+        headers=_ICAL_NO_CACHE_HEADERS,
+    )
+
+
+@app.get("/calendar/{token}.ics")
+def ical_feed_by_token(token: str, request: Request):
+    """Token-authenticated feed for Apple Calendar etc. No login required —
+    the token itself is the secret. 404 (not 401) on invalid token so we
+    don't leak which tokens exist."""
+    with Session(engine) as session:
+        user = session.exec(select(User).where(User.calendar_token == token)).first()
+        if not user:
+            raise HTTPException(404)
+        return Response(
+            content=_build_ical_for_user(user.id, request),
+            media_type="text/calendar",
+            headers=_ICAL_NO_CACHE_HEADERS,
+        )

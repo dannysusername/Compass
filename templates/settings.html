@@ -26,7 +26,7 @@
     {% if masked_key %}
         <p class="hint">Currently saved: <code>{{ masked_key }}</code></p>
     {% else %}
-        <p class="hint">No key saved — using the demo fallback.</p>
+        <p class="hint">No key saved — uploads disabled until you add one.</p>
     {% endif %}
 
     <form method="post" action="/settings">
@@ -38,6 +38,37 @@
         <button type="submit" name="xai_api_key" value="" formnovalidate
                 style="margin-left: 8px; opacity: 0.7">Remove saved key</button>
     </form>
+
+    <h2 style="margin-top: 36px">Calendar subscription</h2>
+    <p class="subtle">
+        Subscribe to your Compass calendar in Apple Calendar, Google Calendar,
+        or any iCal-compatible app. Updates pull automatically — your real-life
+        calendar shows everything from your classes (events + tasks with due
+        dates) under a separate "Compass" group you can toggle on or off.
+    </p>
+
+    <p style="margin-top: 16px">
+        <a href="{{ calendar_urls.webcal_url }}" class="primary-link">
+            📅 Subscribe in Apple Calendar
+        </a>
+    </p>
+    <p class="hint" style="margin-top: 8px">
+        Or copy this URL into any other calendar app:
+    </p>
+    <p>
+        <code style="word-break: break-all; user-select: all">{{ calendar_urls.https_url }}</code>
+    </p>
+
+    <details style="margin-top: 20px">
+        <summary class="subtle" style="cursor: pointer">Regenerate subscription link</summary>
+        <p class="hint" style="margin-top: 8px">
+            Rotating the link breaks all existing subscriptions immediately.
+            You'll have to re-subscribe in Apple Calendar with the new URL.
+        </p>
+        <form method="post" action="/settings/calendar/regenerate">
+            <button type="submit" style="opacity: 0.7">Regenerate link</button>
+        </form>
+    </details>
 </div>
 
 {% endblock %}
