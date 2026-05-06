@@ -19,12 +19,21 @@
 <body>
     <header>
         <a href="/" class="logo"><em>Compass</em><span class="dot">.</span></a>
+        {% if request.session.get("user_id") %}
         <nav class="top-nav">
             <a href="/">Classes</a>
             <a href="/today">Today</a>
             <a href="/week">Week</a>
         </nav>
-        <button type="button" class="theme-toggle" data-theme-toggle aria-label="Toggle dark mode">Dark</button>
+        {% endif %}
+        <div class="header-actions">
+            <button type="button" class="theme-toggle" data-theme-toggle aria-label="Toggle dark mode">Dark</button>
+            {% if request.session.get("user_id") %}
+            <form action="/logout" method="post" class="logout-form">
+                <button type="submit" class="theme-toggle">Logout</button>
+            </form>
+            {% endif %}
+        </div>
     </header>
     <main>
         {% block content %}{% endblock %}

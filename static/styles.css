@@ -89,6 +89,20 @@ body > header {
 .logo em { font-style: italic; font-weight: 700; }
 .logo .dot { color: var(--rust); font-weight: 900; font-style: normal; }
 
+/* Right-aligned actions group (theme toggle + logout when signed in). */
+.header-actions { display: flex; gap: 8px; margin-left: auto; }
+.logout-form { margin: 0; display: inline; }
+
+/* Inline form error on login/signup pages. */
+.error-message {
+    background: var(--paper-2);
+    border-left: 3px solid var(--rust);
+    color: var(--rust);
+    padding: 10px 14px;
+    margin: 12px 0;
+    font-size: 14px;
+}
+
 /* Theme toggle: small mono pill on the right of the masthead. */
 .theme-toggle {
     background: transparent;

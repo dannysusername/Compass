@@ -8,7 +8,7 @@ compass.db-journal
 compass.log
 uploads/
 .env
-.compass_token
+.compass_secret_key
 .anthropic_key
 .xai_key
 .xai_model

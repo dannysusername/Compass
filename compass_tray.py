@@ -304,10 +304,10 @@ class ServerController:
         return "Stopped"
 
     def reload_env(self) -> None:
-        """Re-read .xai_key, .xai_model, and .compass_token so a Restart
+        """Re-read .xai_key, .xai_model, and .compass_secret_key so a Restart
         picks up any edits the user made since the launcher started."""
         for fname, var in (
-            (".compass_token", "COMPASS_TOKEN"),
+            (".compass_secret_key", "COMPASS_SECRET_KEY"),
             (".xai_key", "XAI_API_KEY"),
             (".xai_model", "XAI_MODEL"),
         ):

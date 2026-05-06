@@ -56,9 +56,18 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --no-reload
 
 Then visit `http://localhost:8000` on your laptop, or `http://<laptop-local-ip>:8000` on your iPhone (same WiFi).
 
-## Auth (optional)
+## Auth
 
-Set `COMPASS_TOKEN` env var (or write to `.compass_token`) to gate mutating routes against random devices on your home WiFi. Without it, dev mode = no auth.
+Compass uses email + password. Sign up at `/signup`; sessions are signed cookies.
+
+In **development**, sessions are signed with an ephemeral key generated at startup — they reset on every restart. Fine locally.
+
+In **production**, set both:
+
+- `COMPASS_ENV=production` — enables `Secure` cookies and rejects startup if no key is set.
+- `COMPASS_SECRET_KEY=<32+ random bytes>` — used to sign session cookies. Generate via `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Rotating this key logs everyone out.
+
+For a stable local dev key (so sessions survive restarts), write the key to `.compass_secret_key` (gitignored, picked up by the desktop launcher).
 
 ## Cost
 

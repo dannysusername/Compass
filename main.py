@@ -28,6 +28,8 @@ import grpc
 from xai_sdk import Client as XAIClient
 from xai_sdk.chat import system as xai_system, user as xai_user
 import pdfplumber
+import bcrypt
+from starlette.middleware.sessions import SessionMiddleware
 
 
 # ---- Config ----
@@ -35,8 +37,14 @@ import pdfplumber
 LOCAL_TZ = ZoneInfo("America/New_York")  # change to your timezone
 XAI_MODEL = os.environ.get("XAI_MODEL", "grok-4-fast-reasoning").strip()
 MAX_UPLOAD_MB = 25
-COMPASS_TOKEN = os.environ.get("COMPASS_TOKEN", "").strip()  # empty = dev mode (no auth)
-COOKIE_NAME = "compass_token"
+COMPASS_ENV = os.environ.get("COMPASS_ENV", "development").strip().lower()
+COMPASS_SECRET_KEY = os.environ.get("COMPASS_SECRET_KEY", "").strip()
+if not COMPASS_SECRET_KEY:
+    if COMPASS_ENV == "production":
+        raise RuntimeError("COMPASS_SECRET_KEY must be set in production")
+    # Dev fallback: ephemeral key. Sessions reset on restart, which is fine
+    # for local dev and prevents accidental "I forgot to set the key" deploys.
+    COMPASS_SECRET_KEY = secrets.token_urlsafe(32)
 
 
 # Logger that writes to the same compass.log the tray launcher uses.
@@ -55,6 +63,7 @@ if not log.handlers:
 
 class Class(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
     name: str
     code: str
     syllabi: List["Syllabus"] = Relationship(
@@ -105,6 +114,7 @@ class Task(SQLModel, table=True):
     on the today/week views — both can be marked done with the circular
     button. Tasks are entirely manual; no AI/syllabus auto-generation."""
     id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
     class_id: int = Field(foreign_key="class.id")
     title: str
     starts_at: Optional[datetime] = None  # range start; None = single-date task
@@ -130,6 +140,7 @@ class Tag(SQLModel, table=True):
     by this key — so renaming a system tag's user-facing `name` doesn't
     sever the link to all the events with that kind."""
     id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
     name: str
     color: str  # hex string like #a83232
     is_system: bool = Field(default=False)
@@ -173,10 +184,11 @@ def _pick_tag_color(kind: str) -> str:
     return TAG_PALETTE[h % len(TAG_PALETTE)]
 
 
-def _ensure_system_tag(session: "Session", kind: str) -> None:
-    """Make sure a system tag exists for `kind`. Idempotent. Re-uses an
-    existing tag (system or user) by name and backfills `system_key` so
-    the collector can resolve color/name for events with this kind."""
+def _ensure_system_tag(session: "Session", user_id: int, kind: str) -> None:
+    """Make sure a system tag exists for `kind` for the given user.
+    Idempotent. Re-uses an existing tag (system or user) by name and
+    backfills `system_key` so the collector can resolve color/name for
+    events with this kind."""
     if not kind:
         return
     kind = kind.lower().strip()
@@ -184,13 +196,17 @@ def _ensure_system_tag(session: "Session", kind: str) -> None:
         return
     existing = session.exec(
         select(Tag).where(
-            (Tag.system_key == kind) | (Tag.name == kind)
+            Tag.user_id == user_id,
+            (Tag.system_key == kind) | (Tag.name == kind),
         )
     ).first()
     if existing is None:
         seeded = dict(SYSTEM_TAGS)
         color = seeded.get(kind) or _pick_tag_color(kind)
-        session.add(Tag(name=kind, color=color, is_system=True, system_key=kind))
+        session.add(Tag(
+            user_id=user_id, name=kind, color=color,
+            is_system=True, system_key=kind,
+        ))
         return
     changed = False
     if not existing.is_system:
@@ -203,30 +219,21 @@ def _ensure_system_tag(session: "Session", kind: str) -> None:
         session.add(existing)
 
 
-def _seed_system_tags() -> None:
-    """Insert system tags on startup if they don't already exist. Once
-    a row exists, we leave its name alone so user edits stick. We:
-      • force-set `is_system`,
-      • backfill `system_key` (for rows created before that column existed),
-      • lowercase any uppercase hex color (HTML5 `<input type="color">`
-        rejects uppercase, falling back to a default — which made the
-        manage-tags color picker show the wrong swatch)."""
+def _seed_system_tags_for_user(user_id: int) -> None:
+    """Insert the four default system tags for a newly-created user.
+    Called once at signup, idempotent on re-call."""
     with Session(engine) as session:
-        # Heal uppercase hex on every row, system or not — this is a
-        # general data-quality fix, not a system-tag-specific one.
-        for tag in session.exec(select(Tag)).all():
-            if tag.color and tag.color != tag.color.lower():
-                tag.color = tag.color.lower()
-                session.add(tag)
         for name, color in SYSTEM_TAGS:
             existing = session.exec(
                 select(Tag).where(
-                    (Tag.system_key == name) | (Tag.name == name)
+                    Tag.user_id == user_id,
+                    (Tag.system_key == name) | (Tag.name == name),
                 )
             ).first()
             if existing is None:
                 session.add(Tag(
-                    name=name, color=color, is_system=True, system_key=name,
+                    user_id=user_id, name=name, color=color,
+                    is_system=True, system_key=name,
                 ))
             else:
                 existing.is_system = True
@@ -243,6 +250,13 @@ class Document(SQLModel, table=True):
     filename: str
     uploaded_at: datetime
     cls: Optional[Class] = Relationship(back_populates="documents")
+
+
+class User(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    email: str = Field(unique=True, index=True)
+    password_hash: str
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 # ---- App setup ----
@@ -281,11 +295,62 @@ async def lifespan(app: FastAPI):
         _add_column_if_missing(conn, "task", "starts_at", "TIMESTAMP")
         _add_column_if_missing(conn, "tag", "is_system", "INTEGER NOT NULL DEFAULT 0")
         _add_column_if_missing(conn, "tag", "system_key", "TEXT")
-    _seed_system_tags()
+        # Phase 2: per-user data scoping. Add user_id to top-level
+        # tables and backfill all orphan rows to the oldest user, so
+        # anyone upgrading keeps their data instead of losing it to
+        # the user_id=NULL filter.
+        _add_column_if_missing(conn, "class", "user_id", "INTEGER")
+        _add_column_if_missing(conn, "task", "user_id", "INTEGER")
+        _add_column_if_missing(conn, "tag", "user_id", "INTEGER")
+        users = conn.exec_driver_sql('SELECT id FROM "user" ORDER BY id').fetchall()
+        if users:
+            owner_id = users[0][0]
+            for tbl in ("class", "task", "tag"):
+                conn.exec_driver_sql(
+                    f"UPDATE {tbl} SET user_id = {owner_id} WHERE user_id IS NULL"
+                )
+            log.info("backfilled user_id=%s on existing class/task/tag rows", owner_id)
+    # Make sure every user has the four default system tags (signup also
+    # calls this, but we re-run for the existing-data case).
+    with Session(engine) as session:
+        for u in session.exec(select(User)).all():
+            _seed_system_tags_for_user(u.id)
+        # Dedupe system tags within each user: pre-Phase-2 data may have
+        # ended up with multiple tags sharing a system_key after the
+        # backfill. Keep the oldest, repoint any tasks at the duplicates,
+        # then delete the duplicates.
+        all_users = session.exec(select(User)).all()
+        for u in all_users:
+            seen: dict[str, int] = {}  # system_key -> kept tag id
+            for tag in session.exec(
+                select(Tag).where(Tag.user_id == u.id, Tag.system_key != None)
+                .order_by(Tag.id)
+            ).all():
+                key = tag.system_key
+                if key not in seen:
+                    seen[key] = tag.id
+                    continue
+                # Duplicate: repoint tasks pointing here to the kept one,
+                # then delete this row.
+                kept_id = seen[key]
+                for t in session.exec(
+                    select(Task).where(Task.tag_id == tag.id)
+                ).all():
+                    t.tag_id = kept_id
+                    session.add(t)
+                session.delete(tag)
+        session.commit()
     yield
 
 
 app = FastAPI(title="Compass", lifespan=lifespan)
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=COMPASS_SECRET_KEY,
+    same_site="lax",
+    https_only=(COMPASS_ENV == "production"),
+    max_age=60 * 60 * 24 * 30,  # 30 days
+)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
@@ -315,32 +380,103 @@ parse_jobs: dict[int, str] = {}  # syllabus_id -> "pending"|"running"|"done"|"er
 
 # ---- Auth ----
 
-def _token_matches(candidate: str) -> bool:
-    if not candidate or not COMPASS_TOKEN:
+# bcrypt has a 72-byte password limit. Signup enforces a max length below
+# this so the bcrypt call never has to truncate or raise.
+MAX_PASSWORD_LENGTH = 72
+
+
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def verify_password(password: str, hashed: str) -> bool:
+    try:
+        return bcrypt.checkpw(password.encode("utf-8"), hashed.encode("utf-8"))
+    except ValueError:
         return False
-    return secrets.compare_digest(candidate, COMPASS_TOKEN)
 
 
-def require_token(request: Request) -> None:
-    """Dependency: enforce auth on mutating routes if COMPASS_TOKEN is set."""
-    if not COMPASS_TOKEN:
-        return  # dev mode
-    header = request.headers.get("x-compass-token", "")
-    if _token_matches(header):
-        return
-    cookie = request.cookies.get(COOKIE_NAME, "")
-    if _token_matches(cookie):
-        return
-    qp = request.query_params.get("token", "")
-    if _token_matches(qp):
-        return
-    raise HTTPException(401, "Missing or invalid token. Set X-Compass-Token header or visit /setup-token in a browser.")
+class NotAuthenticatedError(Exception):
+    """Raised by require_login when a request has no valid session.
+    Centralized exception handler turns this into a redirect to /login."""
 
 
-def has_valid_cookie(request: Request) -> bool:
-    if not COMPASS_TOKEN:
-        return True
-    return _token_matches(request.cookies.get(COOKIE_NAME, ""))
+def current_user_optional(request: Request) -> Optional[User]:
+    user_id = request.session.get("user_id")
+    if not user_id:
+        return None
+    with Session(engine) as session:
+        return session.get(User, user_id)
+
+
+def require_login(request: Request) -> User:
+    user = current_user_optional(request)
+    if not user:
+        request.session.clear()
+        raise NotAuthenticatedError()
+    return user
+
+
+@app.exception_handler(NotAuthenticatedError)
+async def _redirect_to_login(request: Request, exc: NotAuthenticatedError):
+    return RedirectResponse("/login", status_code=303)
+
+
+# ---- Ownership helpers ----
+# Each loads a row by id and 404s if it doesn't belong to the given user.
+# Centralizes the per-user scoping so individual routes stay readable.
+
+def _own_class(session: "Session", class_id: int, user_id: int) -> "Class":
+    cls = session.get(Class, class_id)
+    if not cls or cls.user_id != user_id:
+        raise HTTPException(404, "Class not found")
+    return cls
+
+
+def _own_event(session: "Session", event_id: int, user_id: int) -> "CalendarEvent":
+    ev = session.get(CalendarEvent, event_id)
+    if not ev:
+        raise HTTPException(404, "Event not found")
+    cls = session.get(Class, ev.class_id)
+    if not cls or cls.user_id != user_id:
+        raise HTTPException(404, "Event not found")
+    return ev
+
+
+def _own_task(session: "Session", task_id: int, user_id: int) -> "Task":
+    t = session.get(Task, task_id)
+    if not t or t.user_id != user_id:
+        raise HTTPException(404, "Task not found")
+    return t
+
+
+def _own_tag(session: "Session", tag_id: int, user_id: int) -> "Tag":
+    tag = session.get(Tag, tag_id)
+    if not tag or tag.user_id != user_id:
+        raise HTTPException(404, "Tag not found")
+    return tag
+
+
+def _own_document(session: "Session", doc_id: int, user_id: int) -> "Document":
+    doc = session.get(Document, doc_id)
+    if not doc:
+        raise HTTPException(404, "Document not found")
+    cls = session.get(Class, doc.class_id)
+    if not cls or cls.user_id != user_id:
+        raise HTTPException(404, "Document not found")
+    return doc
+
+
+def _own_syllabus(session: "Session", syllabus_id: int, user_id: int) -> Optional["Syllabus"]:
+    """Returns None if not found or not owned — caller decides whether to
+    404 or render a 'missing' status page."""
+    syl = session.get(Syllabus, syllabus_id)
+    if not syl:
+        return None
+    cls = session.get(Class, syl.class_id)
+    if not cls or cls.user_id != user_id:
+        return None
+    return syl
 
 
 # ---- Helpers ----
@@ -576,6 +712,7 @@ def process_syllabus(syllabus_id: int) -> None:
                 parse_jobs[syllabus_id] = "error: syllabus deleted during processing"
                 return
             cls = session.get(Class, syllabus.class_id)
+            owner_id = cls.user_id  # tag-seeding scope follows the class owner
             if data.get("course_code"):
                 cls.code = str(data["course_code"]).upper().strip()
             if data.get("course_name"):
@@ -595,7 +732,7 @@ def process_syllabus(syllabus_id: int) -> None:
                 k = str(ev.get("kind") or "milestone").lower().strip() or "milestone"
                 kinds_seen.add(k)
             for k in kinds_seen:
-                _ensure_system_tag(session, k)
+                _ensure_system_tag(session, owner_id, k)
             session.flush()
 
             for ev in data.get("events", []) or []:
@@ -627,40 +764,92 @@ def process_syllabus(syllabus_id: int) -> None:
 
 # ---- Routes: Home & class CRUD ----
 
-@app.get("/setup-token", response_class=HTMLResponse)
-def setup_token_page(request: Request):
-    return templates.TemplateResponse(request, "setup_token.html", {
-        "auth_required": bool(COMPASS_TOKEN),
-        "already_set": has_valid_cookie(request),
-    })
+@app.get("/signup", response_class=HTMLResponse)
+def signup_page(request: Request):
+    if request.session.get("user_id"):
+        return RedirectResponse("/", status_code=303)
+    return templates.TemplateResponse(request, "signup.html", {"error": None, "email": ""})
 
 
-@app.post("/setup-token")
-def setup_token_submit(token: str = Form(...)):
-    if COMPASS_TOKEN and not _token_matches(token.strip()):
-        raise HTTPException(401, "Wrong token")
-    resp = RedirectResponse("/", status_code=303)
-    resp.set_cookie(
-        COOKIE_NAME,
-        token.strip() or "dev",
-        httponly=True,
-        samesite="lax",
-        max_age=60 * 60 * 24 * 365,
-    )
-    return resp
+@app.post("/signup")
+def signup_submit(request: Request, email: str = Form(...), password: str = Form(...)):
+    email = email.strip().lower()
+    if "@" not in email or "." not in email.split("@", 1)[-1]:
+        return templates.TemplateResponse(
+            request, "signup.html",
+            {"error": "Please enter a valid email address.", "email": email},
+            status_code=400,
+        )
+    if len(password) < 8:
+        return templates.TemplateResponse(
+            request, "signup.html",
+            {"error": "Password must be at least 8 characters.", "email": email},
+            status_code=400,
+        )
+    if len(password.encode("utf-8")) > MAX_PASSWORD_LENGTH:
+        return templates.TemplateResponse(
+            request, "signup.html",
+            {"error": f"Password must be at most {MAX_PASSWORD_LENGTH} characters.", "email": email},
+            status_code=400,
+        )
+    with Session(engine) as session:
+        existing = session.exec(select(User).where(User.email == email)).first()
+        if existing:
+            return templates.TemplateResponse(
+                request, "signup.html",
+                {"error": "That email is already registered. Try logging in.", "email": email},
+                status_code=400,
+            )
+        user = User(email=email, password_hash=hash_password(password))
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        request.session["user_id"] = user.id
+    _seed_system_tags_for_user(user.id)
+    return RedirectResponse("/", status_code=303)
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_page(request: Request):
+    if request.session.get("user_id"):
+        return RedirectResponse("/", status_code=303)
+    return templates.TemplateResponse(request, "login.html", {"error": None, "email": ""})
+
+
+@app.post("/login")
+def login_submit(request: Request, email: str = Form(...), password: str = Form(...)):
+    email = email.strip().lower()
+    with Session(engine) as session:
+        user = session.exec(select(User).where(User.email == email)).first()
+        if not user or not verify_password(password, user.password_hash):
+            return templates.TemplateResponse(
+                request, "login.html",
+                {"error": "Invalid email or password.", "email": email},
+                status_code=401,
+            )
+        request.session["user_id"] = user.id
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/logout")
+def logout(request: Request):
+    request.session.clear()
+    return RedirectResponse("/login", status_code=303)
 
 
 @app.get("/", response_class=HTMLResponse)
-def home(request: Request):
-    if COMPASS_TOKEN and not has_valid_cookie(request):
-        return RedirectResponse("/setup-token", status_code=303)
+def home(request: Request, user: User = Depends(require_login)):
     today_start = _today_local()
     today_end = today_start + timedelta(days=1)
-    today_items = _collect_items_in_range(today_start, today_end)
-    overdue = _collect_overdue()
+    today_items = _collect_items_in_range(today_start, today_end, user.id)
+    overdue = _collect_overdue(user.id)
     with Session(engine, expire_on_commit=False) as session:
-        classes = session.exec(select(Class).order_by(Class.code)).all()
-        all_tags = session.exec(select(Tag).order_by(Tag.name)).all()
+        classes = session.exec(
+            select(Class).where(Class.user_id == user.id).order_by(Class.code)
+        ).all()
+        all_tags = session.exec(
+            select(Tag).where(Tag.user_id == user.id).order_by(Tag.name)
+        ).all()
     return templates.TemplateResponse(request, "home.html", {
         "classes": classes,
         "today": today_start,
@@ -671,31 +860,35 @@ def home(request: Request):
     })
 
 
-@app.post("/classes", dependencies=[Depends(require_token)])
-def add_class(name: str = Form(...), code: str = Form(...)):
+@app.post("/classes")
+def add_class(
+    name: str = Form(...),
+    code: str = Form(...),
+    user: User = Depends(require_login),
+):
     with Session(engine) as session:
-        cls = Class(name=name.strip(), code=code.strip().upper())
+        cls = Class(user_id=user.id, name=name.strip(), code=code.strip().upper())
         session.add(cls)
         session.commit()
     return RedirectResponse(url="/", status_code=303)
 
 
-@app.get("/classes.json", dependencies=[Depends(require_token)])
-def classes_json():
+@app.get("/classes.json")
+def classes_json(user: User = Depends(require_login)):
     with Session(engine) as session:
-        classes = session.exec(select(Class).order_by(Class.code)).all()
+        classes = session.exec(
+            select(Class).where(Class.user_id == user.id).order_by(Class.code)
+        ).all()
         return JSONResponse([
             {"id": c.id, "code": c.code, "name": c.name} for c in classes
         ])
 
 
 @app.get("/classes/{class_id}", response_class=HTMLResponse)
-def class_detail(request: Request, class_id: int):
-    if COMPASS_TOKEN and not has_valid_cookie(request):
-        return RedirectResponse("/setup-token", status_code=303)
+def class_detail(request: Request, class_id: int, user: User = Depends(require_login)):
     with Session(engine) as session:
         cls = session.get(Class, class_id)
-        if not cls:
+        if not cls or cls.user_id != user.id:
             raise HTTPException(404, "Class not found")
         events = sorted(cls.events, key=event_sort_key)
         documents = sorted(cls.documents, key=lambda d: d.uploaded_at, reverse=True)
@@ -704,11 +897,15 @@ def class_detail(request: Request, class_id: int):
     # defaults to the current class.
     today_start = _today_local()
     today_end = today_start + timedelta(days=1)
-    today_items = _collect_items_in_range(today_start, today_end)
-    overdue = _collect_overdue()
+    today_items = _collect_items_in_range(today_start, today_end, user.id)
+    overdue = _collect_overdue(user.id)
     with Session(engine, expire_on_commit=False) as session:
-        all_classes = session.exec(select(Class).order_by(Class.code)).all()
-        all_tags = session.exec(select(Tag).order_by(Tag.name)).all()
+        all_classes = session.exec(
+            select(Class).where(Class.user_id == user.id).order_by(Class.code)
+        ).all()
+        all_tags = session.exec(
+            select(Tag).where(Tag.user_id == user.id).order_by(Tag.name)
+        ).all()
     return templates.TemplateResponse(request, "class.html", {
         "cls": cls,
         "events": events,
@@ -723,11 +920,11 @@ def class_detail(request: Request, class_id: int):
     })
 
 
-@app.post("/classes/{class_id}/delete", dependencies=[Depends(require_token)])
-def delete_class(class_id: int):
+@app.post("/classes/{class_id}/delete")
+def delete_class(class_id: int, user: User = Depends(require_login)):
     with Session(engine) as session:
         cls = session.get(Class, class_id)
-        if not cls:
+        if not cls or cls.user_id != user.id:
             raise HTTPException(404, "Class not found")
         # Remember syllabus IDs being cascade-deleted so we can clean up the
         # in-memory parse_jobs dict — otherwise stale "done" entries linger
@@ -742,10 +939,11 @@ def delete_class(class_id: int):
 
 # ---- Routes: Syllabus upload + parsing ----
 
-@app.post("/syllabus", dependencies=[Depends(require_token)])
+@app.post("/syllabus")
 async def syllabus_upload(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
+    user: User = Depends(require_login),
 ):
     content = await file.read()
     validate_pdf(content)
@@ -764,7 +962,7 @@ async def syllabus_upload(
         raise HTTPException(400, "PDF appears to have no extractable text (might be a scanned image)")
 
     with Session(engine) as session:
-        cls = Class(code="TBD", name="Parsing...")
+        cls = Class(user_id=user.id, code="TBD", name="Parsing...")
         session.add(cls)
         session.flush()
         syllabus = Syllabus(
@@ -784,12 +982,12 @@ async def syllabus_upload(
 
 
 @app.get("/syllabus/{syllabus_id}/status", response_class=HTMLResponse)
-def syllabus_status(request: Request, syllabus_id: int):
+def syllabus_status(request: Request, syllabus_id: int, user: User = Depends(require_login)):
     """Render the parsing status page. If the syllabus row is gone (the user
     deleted its class in another tab), render a friendly missing-state card
     with a Home link instead of 404'ing."""
     with Session(engine) as session:
-        syllabus = session.get(Syllabus, syllabus_id)
+        syllabus = _own_syllabus(session, syllabus_id, user.id)
         if not syllabus:
             return templates.TemplateResponse(request, "syllabus_status.html", {
                 "syllabus_id": syllabus_id,
@@ -806,9 +1004,9 @@ def syllabus_status(request: Request, syllabus_id: int):
 
 
 @app.get("/syllabus/{syllabus_id}/status.json")
-def syllabus_status_json(syllabus_id: int):
+def syllabus_status_json(syllabus_id: int, user: User = Depends(require_login)):
     with Session(engine) as session:
-        syllabus = session.get(Syllabus, syllabus_id)
+        syllabus = _own_syllabus(session, syllabus_id, user.id)
         if not syllabus:
             # Syllabus row deleted (e.g. user wiped its class in another tab).
             # Distinct from "unknown" so the polling page can stop and show a
@@ -821,25 +1019,24 @@ def syllabus_status_json(syllabus_id: int):
 
 # ---- Routes: Event edit/delete ----
 
-@app.post("/events/{event_id}/edit", dependencies=[Depends(require_token)])
+@app.post("/events/{event_id}/edit")
 def edit_event(
     event_id: int,
     title: str = Form(...),
     kind: str = Form(...),
     starts_at: str = Form(""),
     ends_at: str = Form(""),
+    user: User = Depends(require_login),
 ):
     with Session(engine) as session:
-        ev = session.get(CalendarEvent, event_id)
-        if not ev:
-            raise HTTPException(404)
+        ev = _own_event(session, event_id, user.id)
         ev.title = title.strip() or "Untitled"
         new_kind = (kind.strip() or "milestone").lower()
         ev.kind = new_kind
         # First-time use of a kind from manual edit auto-creates its tag,
         # same as Grok-extracted kinds. Without this the collector finds
         # no system tag and the pill renders uncolored.
-        _ensure_system_tag(session, new_kind)
+        _ensure_system_tag(session, user.id, new_kind)
         ev.starts_at = parse_iso_dt(starts_at) if starts_at else None
         ev.ends_at = parse_iso_dt(ends_at) if ends_at else None
         cls_id = ev.class_id
@@ -848,15 +1045,13 @@ def edit_event(
     return RedirectResponse(f"/classes/{cls_id}", status_code=303)
 
 
-@app.post("/events/{event_id}/clone", dependencies=[Depends(require_token)])
-def clone_event(event_id: int, request: Request):
+@app.post("/events/{event_id}/clone")
+def clone_event(event_id: int, request: Request, user: User = Depends(require_login)):
     """Duplicate an event so it shows on the calendar as a separate row.
     Same class, same title/kind/starts_at/ends_at — fresh id. If the
     user clicks twice and gets two copies, that's on them to clean up."""
     with Session(engine) as session:
-        ev = session.get(CalendarEvent, event_id)
-        if not ev:
-            raise HTTPException(404)
+        ev = _own_event(session, event_id, user.id)
         copy = CalendarEvent(
             class_id=ev.class_id,
             class_code=ev.class_code,
@@ -876,12 +1071,10 @@ def clone_event(event_id: int, request: Request):
     return RedirectResponse(f"/classes/{cls_id}", status_code=303)
 
 
-@app.post("/events/{event_id}/delete", dependencies=[Depends(require_token)])
-def delete_event(event_id: int, request: Request):
+@app.post("/events/{event_id}/delete")
+def delete_event(event_id: int, request: Request, user: User = Depends(require_login)):
     with Session(engine) as session:
-        ev = session.get(CalendarEvent, event_id)
-        if not ev:
-            raise HTTPException(404)
+        ev = _own_event(session, event_id, user.id)
         cls_id = ev.class_id
         session.delete(ev)
         session.commit()
@@ -928,10 +1121,11 @@ def _normalize_task_range(starts_at: str, due_at: str) -> tuple[Optional[datetim
     return starts_dt, due_dt
 
 
-@app.post("/classes/{class_id}/tasks", dependencies=[Depends(require_token)])
+@app.post("/classes/{class_id}/tasks")
 async def create_task(class_id: int, request: Request,
                       title: str = Form(...), due_at: str = Form(""),
-                      starts_at: str = Form(""), tag_id: str = Form("")):
+                      starts_at: str = Form(""), tag_id: str = Form(""),
+                      user: User = Depends(require_login)):
     """Create a manual task on a class. Form-post adds via the class sidebar;
     AJAX clients get JSON, plain forms get a redirect (preserves no-JS path)."""
     title = title.strip()
@@ -945,12 +1139,13 @@ async def create_task(class_id: int, request: Request,
         except ValueError:
             tag_pk = None
     with Session(engine) as session:
-        cls = session.get(Class, class_id)
-        if not cls:
-            raise HTTPException(404, "Class not found")
-        if tag_pk is not None and not session.get(Tag, tag_pk):
-            tag_pk = None  # silently drop bad tag id
+        _own_class(session, class_id, user.id)  # 404 if not the user's class
+        if tag_pk is not None:
+            tag = session.get(Tag, tag_pk)
+            if not tag or tag.user_id != user.id:
+                tag_pk = None  # silently drop bad/foreign tag id
         task = Task(
+            user_id=user.id,
             class_id=class_id,
             title=title,
             starts_at=starts_dt,
@@ -971,11 +1166,11 @@ async def create_task(class_id: int, request: Request,
     return RedirectResponse(f"/classes/{class_id}", status_code=303)
 
 
-@app.get("/tags.json", dependencies=[Depends(require_token)])
-def list_tags():
+@app.get("/tags.json")
+def list_tags(user: User = Depends(require_login)):
     with Session(engine) as session:
         tags = session.exec(
-            select(Tag).order_by(Tag.is_system.desc(), Tag.name)
+            select(Tag).where(Tag.user_id == user.id).order_by(Tag.is_system.desc(), Tag.name)
         ).all()
         return JSONResponse([
             {"id": t.id, "name": t.name, "color": t.color, "is_system": t.is_system}
@@ -986,8 +1181,12 @@ def list_tags():
 _HEX_COLOR_RE = _re.compile(r"^#[0-9a-fA-F]{6}$")
 
 
-@app.post("/tags", dependencies=[Depends(require_token)])
-async def create_tag(name: str = Form(...), color: str = Form(...)):
+@app.post("/tags")
+async def create_tag(
+    name: str = Form(...),
+    color: str = Form(...),
+    user: User = Depends(require_login),
+):
     name = name.strip()
     color = color.strip()
     if not name:
@@ -995,20 +1194,18 @@ async def create_tag(name: str = Form(...), color: str = Form(...)):
     if not _HEX_COLOR_RE.match(color):
         raise HTTPException(400, "Color must be #rrggbb hex")
     with Session(engine) as session:
-        tag = Tag(name=name, color=color)
+        tag = Tag(user_id=user.id, name=name, color=color)
         session.add(tag)
         session.commit()
         session.refresh(tag)
         return JSONResponse({"id": tag.id, "name": tag.name, "color": tag.color})
 
 
-@app.post("/tasks/{task_id}/toggle", dependencies=[Depends(require_token)])
-def toggle_task(task_id: int):
+@app.post("/tasks/{task_id}/toggle")
+def toggle_task(task_id: int, user: User = Depends(require_login)):
     """Flip a task between completed and pending. AJAX-only; returns JSON."""
     with Session(engine) as session:
-        t = session.get(Task, task_id)
-        if not t:
-            raise HTTPException(404)
+        t = _own_task(session, task_id, user.id)
         t.completed_at = None if t.completed_at else datetime.now(timezone.utc)
         completed = t.completed_at is not None
         session.add(t)
@@ -1016,13 +1213,11 @@ def toggle_task(task_id: int):
     return JSONResponse({"id": task_id, "completed": completed})
 
 
-@app.post("/events/{event_id}/toggle", dependencies=[Depends(require_token)])
-def toggle_event(event_id: int):
+@app.post("/events/{event_id}/toggle")
+def toggle_event(event_id: int, user: User = Depends(require_login)):
     """Same toggle for syllabus-extracted CalendarEvents."""
     with Session(engine) as session:
-        ev = session.get(CalendarEvent, event_id)
-        if not ev:
-            raise HTTPException(404)
+        ev = _own_event(session, event_id, user.id)
         ev.completed_at = None if ev.completed_at else datetime.now(timezone.utc)
         completed = ev.completed_at is not None
         session.add(ev)
@@ -1030,11 +1225,12 @@ def toggle_event(event_id: int):
     return JSONResponse({"id": event_id, "completed": completed})
 
 
-@app.post("/tasks/{task_id}/edit", dependencies=[Depends(require_token)])
+@app.post("/tasks/{task_id}/edit")
 async def edit_task(task_id: int, request: Request,
                     title: str = Form(...), due_at: str = Form(""),
                     starts_at: str = Form(""),
-                    tag_id: str = Form("__unset__")):
+                    tag_id: str = Form("__unset__"),
+                    user: User = Depends(require_login)):
     """Update title, due_at, and (optionally) tag_id on a task. The form
     sends tag_id as '' for 'no tag', or a numeric id. The sentinel
     '__unset__' (default) means 'don't touch the tag' — so an old client
@@ -1044,9 +1240,7 @@ async def edit_task(task_id: int, request: Request,
         raise HTTPException(400, "Title required")
     starts_dt, due_dt = _normalize_task_range(starts_at, due_at)
     with Session(engine) as session:
-        t = session.get(Task, task_id)
-        if not t:
-            raise HTTPException(404)
+        t = _own_task(session, task_id, user.id)
         t.title = title
         t.starts_at = starts_dt
         t.due_at = due_dt
@@ -1058,8 +1252,9 @@ async def edit_task(task_id: int, request: Request,
                     tpk = int(tag_id)
                 except ValueError:
                     tpk = None
-                if tpk is not None and session.get(Tag, tpk):
-                    t.tag_id = tpk
+                if tpk is not None:
+                    tag = session.get(Tag, tpk)
+                    t.tag_id = tpk if (tag and tag.user_id == user.id) else None
                 else:
                     t.tag_id = None
         session.add(t)
@@ -1075,8 +1270,13 @@ async def edit_task(task_id: int, request: Request,
     return RedirectResponse(f"/classes/{t.class_id}", status_code=303)
 
 
-@app.post("/tags/{tag_id}/edit", dependencies=[Depends(require_token)])
-async def edit_tag(tag_id: int, name: str = Form(...), color: str = Form(...)):
+@app.post("/tags/{tag_id}/edit")
+async def edit_tag(
+    tag_id: int,
+    name: str = Form(...),
+    color: str = Form(...),
+    user: User = Depends(require_login),
+):
     """Rename and/or recolor a tag. System tags can be edited (their
     `system_key` stays canonical so events keep matching), but cannot
     be deleted — see delete_tag."""
@@ -1087,9 +1287,7 @@ async def edit_tag(tag_id: int, name: str = Form(...), color: str = Form(...)):
     if not _HEX_COLOR_RE.match(color):
         raise HTTPException(400, "Color must be #rrggbb hex")
     with Session(engine) as session:
-        tag = session.get(Tag, tag_id)
-        if not tag:
-            raise HTTPException(404)
+        tag = _own_tag(session, tag_id, user.id)
         tag.name = name
         tag.color = color
         # system_key is intentionally NOT touched — that's the key the
@@ -1100,16 +1298,16 @@ async def edit_tag(tag_id: int, name: str = Form(...), color: str = Form(...)):
         return JSONResponse({"id": tag.id, "name": tag.name, "color": tag.color})
 
 
-@app.post("/tags/{tag_id}/delete", dependencies=[Depends(require_token)])
-async def delete_tag(tag_id: int):
+@app.post("/tags/{tag_id}/delete")
+async def delete_tag(tag_id: int, user: User = Depends(require_login)):
     with Session(engine) as session:
-        tag = session.get(Tag, tag_id)
-        if not tag:
-            raise HTTPException(404)
+        tag = _own_tag(session, tag_id, user.id)
         if tag.is_system:
             raise HTTPException(400, "System tags cannot be deleted")
-        # Null out tag_id on any tasks that reference this tag.
-        for t in session.exec(select(Task).where(Task.tag_id == tag_id)).all():
+        # Null out tag_id on any of the user's tasks that reference this tag.
+        for t in session.exec(
+            select(Task).where(Task.tag_id == tag_id, Task.user_id == user.id)
+        ).all():
             t.tag_id = None
             session.add(t)
         session.delete(tag)
@@ -1117,13 +1315,14 @@ async def delete_tag(tag_id: int):
         return JSONResponse({"deleted": tag_id})
 
 
-@app.post("/tasks/reorder", dependencies=[Depends(require_token)])
-async def reorder_tasks(request: Request):
+@app.post("/tasks/reorder")
+async def reorder_tasks(request: Request, user: User = Depends(require_login)):
     """Persist drag-to-reorder priority across tasks AND events. Body shape:
        {items: [{kind:'task'|'event', id:int}, ...]}
        Older clients may still send {task_ids:[...]}; we treat that as
        all-tasks for backwards compat. Position 0..N-1 is assigned in the
-       order received; non-listed rows are left alone."""
+       order received; non-listed rows are left alone. Skips any row that
+       isn't owned by the current user (defense-in-depth)."""
     payload = await request.json()
     raw_items = payload.get("items")
     if raw_items is None:
@@ -1149,11 +1348,16 @@ async def reorder_tasks(request: Request):
                 continue
             if kind == "task":
                 row = session.get(Task, eid)
+                if row is None or row.user_id != user.id:
+                    continue
             elif kind == "event":
                 row = session.get(CalendarEvent, eid)
+                if row is None:
+                    continue
+                cls = session.get(Class, row.class_id)
+                if not cls or cls.user_id != user.id:
+                    continue
             else:
-                continue
-            if row is None:
                 continue
             row.position = pos
             session.add(row)
@@ -1162,12 +1366,10 @@ async def reorder_tasks(request: Request):
     return JSONResponse({"reordered": updated})
 
 
-@app.post("/tasks/{task_id}/delete", dependencies=[Depends(require_token)])
-def delete_task(task_id: int, request: Request):
+@app.post("/tasks/{task_id}/delete")
+def delete_task(task_id: int, request: Request, user: User = Depends(require_login)):
     with Session(engine) as session:
-        t = session.get(Task, task_id)
-        if not t:
-            raise HTTPException(404)
+        t = _own_task(session, task_id, user.id)
         cls_id = t.class_id
         session.delete(t)
         session.commit()
@@ -1178,10 +1380,11 @@ def delete_task(task_id: int, request: Request):
 
 # ---- Routes: Today + Week views ----
 
-def _collect_items_in_range(start: datetime, end: datetime) -> dict:
+def _collect_items_in_range(start: datetime, end: datetime, user_id: int) -> dict:
     """Return {class_id: {class, items: [{kind, id, title, due_at, completed}]}}
-    for tasks + events whose due/start datetime falls in [start, end). Both
-    open and completed items are included; the template decides display."""
+    for tasks + events whose due/start datetime falls in [start, end). Scoped
+    to the given user. Both open and completed items are included; the
+    template decides display."""
     out: dict[int, dict] = {}
 
     def _add(cls: "Class", kind: str, item_id: int, title: str,
@@ -1219,10 +1422,12 @@ def _collect_items_in_range(start: datetime, end: datetime) -> dict:
     with Session(engine, expire_on_commit=False) as session:
         sys_tag_by_key = {
             t.system_key: t
-            for t in session.exec(select(Tag).where(Tag.is_system == True)).all()
+            for t in session.exec(
+                select(Tag).where(Tag.is_system == True, Tag.user_id == user_id)
+            ).all()
             if t.system_key
         }
-        for cls in session.exec(select(Class)).all():
+        for cls in session.exec(select(Class).where(Class.user_id == user_id)).all():
             for t in cls.tasks:
                 tcolor = t.tag.color if t.tag else None
                 tname = t.tag.name if t.tag else None
@@ -1284,17 +1489,20 @@ def _collect_items_in_range(start: datetime, end: datetime) -> dict:
     return out
 
 
-def _collect_overdue() -> dict:
-    """All non-completed tasks/events with due dates in the past."""
+def _collect_overdue(user_id: int) -> dict:
+    """All non-completed tasks/events with due dates in the past, scoped to
+    the given user."""
     now = datetime.now(LOCAL_TZ)
     out: dict[int, dict] = {}
     with Session(engine, expire_on_commit=False) as session:
         sys_tag_by_key = {
             t.system_key: t
-            for t in session.exec(select(Tag).where(Tag.is_system == True)).all()
+            for t in session.exec(
+                select(Tag).where(Tag.is_system == True, Tag.user_id == user_id)
+            ).all()
             if t.system_key
         }
-        for cls in session.exec(select(Class)).all():
+        for cls in session.exec(select(Class).where(Class.user_id == user_id)).all():
             for t in cls.tasks:
                 if t.completed_at:
                     continue
@@ -1352,14 +1560,12 @@ def _collect_overdue() -> dict:
 
 
 @app.get("/today", response_class=HTMLResponse)
-def today_view(request: Request):
+def today_view(request: Request, user: User = Depends(require_login)):
     """Tasks and events due today, plus anything overdue."""
-    if COMPASS_TOKEN and not has_valid_cookie(request):
-        return RedirectResponse("/setup-token", status_code=303)
     today_start = _today_local()
     today_end = today_start + timedelta(days=1)
-    today_items = _collect_items_in_range(today_start, today_end)
-    overdue = _collect_overdue()
+    today_items = _collect_items_in_range(today_start, today_end, user.id)
+    overdue = _collect_overdue(user.id)
     return templates.TemplateResponse(request, "today.html", {
         "today": today_start,
         "today_items": today_items,
@@ -1368,11 +1574,9 @@ def today_view(request: Request):
 
 
 @app.get("/week", response_class=HTMLResponse)
-def week_view(request: Request, month: Optional[str] = None):
+def week_view(request: Request, user: User = Depends(require_login), month: Optional[str] = None):
     """Month-grid view (Mon-Sun, 6 weeks) for the requested YYYY-MM.
     Defaults to the current month."""
-    if COMPASS_TOKEN and not has_valid_cookie(request):
-        return RedirectResponse("/setup-token", status_code=303)
     today_start = _today_local()
     # Parse the requested month; fall back to today's month on bad input.
     target_year, target_month = today_start.year, today_start.month
@@ -1391,7 +1595,7 @@ def week_view(request: Request, month: Optional[str] = None):
     for i in range(42):  # 6 weeks × 7 days
         day_start = grid_start + timedelta(days=i)
         day_end = day_start + timedelta(days=1)
-        items_by_class = _collect_items_in_range(day_start, day_end)
+        items_by_class = _collect_items_in_range(day_start, day_end, user.id)
         days.append({
             "date": day_start,
             "in_month": day_start.month == target_month,
@@ -1408,8 +1612,12 @@ def week_view(request: Request, month: Optional[str] = None):
     else:
         next_y, next_m = target_year, target_month + 1
     with Session(engine, expire_on_commit=False) as session:
-        all_classes = session.exec(select(Class).order_by(Class.code)).all()
-        all_tags = session.exec(select(Tag).order_by(Tag.name)).all()
+        all_classes = session.exec(
+            select(Class).where(Class.user_id == user.id).order_by(Class.code)
+        ).all()
+        all_tags = session.exec(
+            select(Tag).where(Tag.user_id == user.id).order_by(Tag.name)
+        ).all()
     return templates.TemplateResponse(request, "week.html", {
         "first_of_month": first_of_month,
         "days": days,
@@ -1423,11 +1631,12 @@ def week_view(request: Request, month: Optional[str] = None):
 
 # ---- Routes: Document upload ----
 
-@app.post("/classes/{class_id}/docs", dependencies=[Depends(require_token)])
+@app.post("/classes/{class_id}/docs")
 async def upload_doc(
     class_id: int,
     file: UploadFile = File(...),
     title: str = Form(""),
+    user: User = Depends(require_login),
 ):
     content = await file.read()
     validate_upload(content)
@@ -1436,9 +1645,7 @@ async def upload_doc(
     (UPLOAD_DIR / filename).write_bytes(content)
 
     with Session(engine) as session:
-        cls = session.get(Class, class_id)
-        if not cls:
-            raise HTTPException(404)
+        _own_class(session, class_id, user.id)
         doc = Document(
             class_id=class_id,
             title=(title.strip() or safe_name),
@@ -1450,12 +1657,10 @@ async def upload_doc(
     return RedirectResponse(f"/classes/{class_id}", status_code=303)
 
 
-@app.post("/docs/{doc_id}/delete", dependencies=[Depends(require_token)])
-def delete_doc(doc_id: int):
+@app.post("/docs/{doc_id}/delete")
+def delete_doc(doc_id: int, user: User = Depends(require_login)):
     with Session(engine) as session:
-        d = session.get(Document, doc_id)
-        if not d:
-            raise HTTPException(404)
+        d = _own_document(session, doc_id, user.id)
         cls_id = d.class_id
         # remove file from disk too (best-effort)
         try:
@@ -1468,18 +1673,35 @@ def delete_doc(doc_id: int):
 
 
 @app.get("/uploads/{filename}")
-def serve_upload(filename: str):
+def serve_upload(filename: str, user: User = Depends(require_login)):
+    """Serve an uploaded file (syllabus PDF or attached doc) only if it
+    belongs to a class owned by the requesting user. Filename uniqueness
+    is enforced at upload time so we can match by filename alone."""
     safe = safe_filename(filename)
     path = UPLOAD_DIR / safe
     if not path.exists():
         raise HTTPException(404)
+    with Session(engine) as session:
+        # File could be either a Document attachment or a Syllabus upload.
+        owned = False
+        doc = session.exec(select(Document).where(Document.filename == safe)).first()
+        if doc:
+            cls = session.get(Class, doc.class_id)
+            owned = bool(cls and cls.user_id == user.id)
+        if not owned:
+            syl = session.exec(select(Syllabus).where(Syllabus.filename == safe)).first()
+            if syl:
+                cls = session.get(Class, syl.class_id)
+                owned = bool(cls and cls.user_id == user.id)
+        if not owned:
+            raise HTTPException(404)
     return FileResponse(path)
 
 
 # ---- Routes: iCal feed ----
 
 @app.get("/calendar.ics")
-def ical_feed():
+def ical_feed(user: User = Depends(require_login)):
     cal = Calendar()
     cal.add("prodid", "-//Compass//Local//EN")
     cal.add("version", "2.0")
@@ -1487,8 +1709,19 @@ def ical_feed():
     cal.add("x-wr-timezone", str(LOCAL_TZ))
 
     with Session(engine) as session:
+        # Only include events from the user's own classes.
+        owned_class_ids = [
+            c.id for c in session.exec(
+                select(Class).where(Class.user_id == user.id)
+            ).all()
+        ]
+        if not owned_class_ids:
+            return Response(content=cal.to_ical(), media_type="text/calendar")
         events = session.exec(
-            select(CalendarEvent).where(CalendarEvent.starts_at != None)
+            select(CalendarEvent).where(
+                CalendarEvent.class_id.in_(owned_class_ids),
+                CalendarEvent.starts_at != None,
+            )
         ).all()
         for ev in events:
             ie = ICalEvent()
