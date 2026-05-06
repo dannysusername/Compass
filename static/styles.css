@@ -1,4 +1,4 @@
-/* StudyFlow — Bullet Journal aesthetic
+/* Compass — Bullet Journal aesthetic
    Cream paper, ink blue, rust accents, serif body, mono for tech labels.
    Mobile-first. Light by default, dark = midnight-ink mode (toggle in header). */
 
@@ -63,7 +63,7 @@ body {
 
 /* ---- Header / masthead ---- */
 
-header {
+body > header {
     padding: 18px 24px;
     border-bottom: 1.5px solid var(--ink);
     background: var(--paper);
@@ -482,9 +482,35 @@ code {
     border-left: 3px solid var(--ink);
     border-radius: 2px;
     display: grid;
-    grid-template-columns: 90px 1fr auto;
+    grid-template-columns: 90px 1fr auto auto;
     gap: 14px;
     align-items: baseline;
+}
+.event-list .event-add-cal-form {
+    margin: 0;
+    padding: 0;
+}
+.event-list .event-add-cal {
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--rust);
+    background: transparent;
+    border: 1px solid var(--rust);
+    padding: 3px 8px;
+    border-radius: 2px;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background 0.1s, color 0.1s;
+    box-shadow: none;
+}
+.event-list .event-add-cal:hover {
+    background: var(--rust);
+    color: var(--paper);
+    transform: none;
+    box-shadow: none;
 }
 .event-list .kind {
     font-family: var(--mono);
@@ -1434,69 +1460,7 @@ details.source blockquote code {
     font-size: 0.92em;
 }
 
-/* ---- Rendered syllabus tables ---- */
-
-.syllabus-table,
-.section-article-body table,
-.card-body table,
-.mini-card-body table {
-    border-collapse: collapse;
-    margin: 12px 0;
-    background: var(--paper);
-    width: 100%;
-    max-width: 100%;
-    font-family: var(--serif);
-    font-size: 13px;
-    color: var(--ink-2);
-    line-height: 1.45;
-    border: 1px solid var(--rule);
-    /* preserve normal whitespace inside cells (parent uses pre-wrap) */
-    white-space: normal;
-}
-.syllabus-table th,
-.syllabus-table td,
-.section-article-body table th,
-.section-article-body table td,
-.card-body table th,
-.card-body table td,
-.mini-card-body table th,
-.mini-card-body table td {
-    padding: 6px 10px;
-    border: 1px solid var(--rule);
-    text-align: left;
-    vertical-align: top;
-    font-weight: 400;
-}
-.syllabus-table th,
-.section-article-body table th,
-.card-body table th,
-.mini-card-body table th {
-    background: var(--paper-2);
-    font-weight: 700;
-    color: var(--ink);
-    font-family: var(--serif);
-    font-size: 12px;
-    text-transform: none;
-    letter-spacing: 0;
-}
-.syllabus-table tbody tr:nth-child(even) td {
-    background: rgba(0, 0, 0, 0.015);
-}
-
-/* Long tables on small screens — let them scroll horizontally inside their
-   container instead of overflowing the page. */
-.section-article-body,
-.card-body,
-.mini-card-body,
-details.source blockquote {
-    overflow-x: auto;
-}
-.syllabus-table { min-width: 0; }
-@media (max-width: 480px) {
-    .syllabus-table { font-size: 12px; }
-    .syllabus-table th,
-    .syllabus-table td { padding: 5px 7px; }
-}
+details.source blockquote { overflow-x: auto; }
 
 /* ---- Card builder side panel ---- */
 
@@ -1998,6 +1962,22 @@ body.modal-open { overflow: hidden; }
     min-width: 0;
     width: 100%;
 }
+.add-task-form label[hidden] { display: none; }
+.add-task-form .add-task-range-toggle {
+    align-self: flex-start;
+    margin-top: -2px;
+    box-shadow: none;
+    padding: 0;
+}
+/* Form-wide button styling adds a paper-aesthetic box; opt link-btns
+   (Manage tags, range toggle) back out so they read as inline links. */
+.add-task-form .link-btn {
+    box-shadow: none;
+    padding: 0;
+    background: none;
+    border: 0;
+    align-self: flex-start;
+}
 .add-task-form .add-task-label {
     font-family: var(--mono);
     font-size: 9px;
@@ -2007,6 +1987,7 @@ body.modal-open { overflow: hidden; }
 }
 .add-task-form input[type="text"],
 .add-task-form input[type="date"],
+.add-task-form input[type="datetime-local"],
 .add-task-form select {
     padding: 7px 9px;
     font-size: 13px;
@@ -2064,6 +2045,7 @@ body.modal-open { overflow: hidden; }
 }
 .modal-dialog .add-task-form input[type="text"],
 .modal-dialog .add-task-form input[type="date"],
+.modal-dialog .add-task-form input[type="datetime-local"],
 .modal-dialog .add-task-form select {
     background: var(--paper);
     border: 1px solid var(--rule);
@@ -2297,8 +2279,10 @@ details.class-section > summary.class-section-summary .section-toggle-chevron {
     text-transform: uppercase;
     letter-spacing: 0.08em;
 }
+.add-task-form label[hidden] { display: none; }
 .add-task-form input[type="text"],
-.add-task-form input[type="date"] {
+.add-task-form input[type="date"],
+.add-task-form input[type="datetime-local"] {
     padding: 7px 9px;
     font-size: 13px;
     font-family: var(--serif);
@@ -2378,9 +2362,152 @@ details.class-section > summary.class-section-summary .section-toggle-chevron {
 .todo-sub-kind {
     font-family: var(--mono);
     font-size: 10px;
-    color: var(--rust);
+    color: var(--sub-kind-color, var(--rust));
     text-transform: uppercase;
     letter-spacing: 0.12em;
+    flex-shrink: 0;
+}
+
+/* Tag swatch + colored row indicator (user-defined Tag on a Task). */
+.todo-row.has-tag {
+    border-left: 3px solid var(--tag-color);
+    padding-left: 8px;
+}
+.todo-tag {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    padding: 1px 6px;
+    border-radius: 8px;
+    background: var(--tag-color, var(--rust));
+    color: var(--paper);
+    flex-shrink: 0;
+    line-height: 1.4;
+}
+.day-cell-item.has-tag { border-left-color: var(--tag-color); border-left-width: 3px; }
+
+/* Range-day fade: a task spanning multiple days renders one row/cell per
+   day. Non-deadline days get a softened look so the deadline still pops.
+   Same treatment for non-actionable context items (lecture topics,
+   holidays) so submission deadlines stay loud. */
+.todo-row.is-range-day,
+.todo-row.is-context,
+.day-cell-item.is-range-day,
+.day-cell-item.is-context { opacity: 0.55; }
+.todo-row.is-range-day .todo-title { font-style: italic; }
+.todo-range {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--muted);
+    flex-shrink: 0;
+    white-space: nowrap;
+}
+
+.new-tag-form {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-top: -4px;
+}
+.new-tag-form[hidden] { display: none; }
+.new-tag-form input[type="text"] {
+    flex: 1;
+    min-width: 0;
+}
+.new-tag-form input[type="color"] {
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    border: 1.5px solid var(--ink);
+    border-radius: 2px;
+    background: transparent;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+.secondary.small {
+    font-size: 11px;
+    padding: 6px 10px;
+}
+
+.link-btn {
+    background: none;
+    border: 0;
+    padding: 0;
+    margin: 0;
+    color: var(--rust);
+    font: inherit;
+    font-size: 11px;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    cursor: pointer;
+}
+.link-btn:hover { color: var(--ink); }
+.link-btn.danger { color: var(--rust); }
+.link-btn.danger:hover { color: var(--ink); }
+
+.tag-manage-list {
+    list-style: none;
+    margin: 12px 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.tag-manage-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 8px;
+    border: 1px solid var(--rule);
+    border-radius: 2px;
+    background: var(--paper);
+}
+.tag-manage-row.is-system { background: var(--paper-2); }
+.tag-manage-row .tag-swatch {
+    display: inline-block;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    border: 1px solid var(--ink);
+    flex-shrink: 0;
+}
+.tag-manage-name {
+    flex: 1;
+    font-family: var(--serif);
+    font-size: 14px;
+    color: var(--ink);
+}
+.tag-system-badge {
+    font-family: var(--mono);
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--muted);
+    border: 1px solid var(--rule);
+    padding: 1px 6px;
+    border-radius: 8px;
+}
+.tag-manage-row input[type="text"] {
+    flex: 1;
+    min-width: 0;
+}
+.tag-manage-row input[type="color"] {
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border: 1px solid var(--ink);
+    border-radius: 2px;
+    background: transparent;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+.tag-manage-actions {
+    display: flex;
+    gap: 6px;
+    align-items: center;
     flex-shrink: 0;
 }
 .todo-when {
@@ -2464,83 +2591,163 @@ details.class-section > summary.class-section-summary .section-toggle-chevron {
     color: var(--muted);
 }
 
-/* ---- Week view: 7 columns on desktop, stack on mobile ---- */
+/* ---- Month view (Mon-Sun, 6 weeks) ---- */
 
-.week-grid {
-    display: grid;
-    grid-template-columns: repeat(7, minmax(0, 1fr));
+.month-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    flex-wrap: wrap;
     gap: 12px;
-    margin-top: 16px;
+    /* Break out of <main>'s 24px horizontal padding so the sticky bar's
+       background spans edge-to-edge of the viewport while content stays
+       inset. Padding compensates for the negative margin. */
+    margin: 0 -24px;
+    padding: 16px 24px 12px;
+    /* Stick below the masthead (which is ~64px tall) so this row stays
+       visible as you scroll. Day-cell-heads no longer inherit sticky. */
+    position: sticky;
+    top: 64px;
+    background: var(--paper);
+    z-index: 5;
 }
-.day-block {
-    background: var(--paper-2);
-    border-left: 3px solid var(--rule);
-    border-radius: 2px;
-    padding: 10px 12px;
-    min-width: 0;
-    cursor: pointer;
-    will-change: transform;
-    transition: transform 0.2s cubic-bezier(0.22, 1, 0.36, 1),
-                box-shadow 0.2s cubic-bezier(0.22, 1, 0.36, 1),
-                background 0.2s ease;
+@media (max-width: 480px) {
+    .month-header { margin: 0 -18px; padding: 16px 18px 12px; }
 }
-.day-block.is-hover,
-.day-block:hover,
-.day-block:focus-visible {
-    background: var(--paper-3);
-    transform: translateY(-4px);
-    box-shadow: 4px 6px 0 var(--ink);
-    outline: none;
-}
-.day-block:active {
-    transform: translateY(-1px);
-    box-shadow: 1px 2px 0 var(--ink);
-    transition: transform 0.06s ease, box-shadow 0.06s ease;
-}
-.day-block.is-today { border-left-color: var(--rust); background: var(--paper-3); }
-.day-block.is-today.is-hover,
-.day-block.is-today:hover,
-.day-block.is-today:focus-visible { background: var(--paper-2); }
-.day-block template { display: none; }
-.day-head {
-    margin: 0 0 8px;
-    font-family: var(--serif);
-    font-size: 12px;
+.month-header h1 { margin: 0; }
+.month-nav { display: flex; gap: 8px; }
+.month-nav-btn {
+    font-family: var(--mono);
+    font-size: 11px;
     font-weight: 700;
-    color: var(--ink);
     text-transform: uppercase;
     letter-spacing: 0.08em;
-    background: none;
-    padding: 0;
+    padding: 6px 12px;
+    border: 1.5px solid var(--ink);
+    border-radius: 2px;
+    background: var(--paper);
+    color: var(--ink);
+    text-decoration: none;
+    cursor: pointer;
+}
+.month-nav-btn:hover { background: var(--ink); color: var(--paper); }
+
+.month-weekdays {
+    display: grid;
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+    gap: 4px;
+    margin-top: 16px;
+    margin-bottom: 6px;
+}
+.month-weekdays > div {
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    padding: 0 4px;
+}
+
+.month-grid {
+    display: grid;
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+    grid-auto-rows: minmax(120px, 1fr);
+    gap: 4px;
+}
+
+/* On the week page, stretch the calendar to fill the viewport so we don't
+   have a big empty band below the grid on tall monitors. The :has()
+   selector scopes this to pages that render the grid, leaving home/class
+   layout untouched. */
+body:has(.month-grid) { min-height: 100vh; display: flex; flex-direction: column; }
+body:has(.month-grid) main { flex: 1; display: flex; flex-direction: column; }
+body:has(.month-grid) .month-grid { flex: 1; }
+
+.day-cell {
+    background: var(--paper-2);
+    border: 1px solid var(--rule);
+    border-radius: 2px;
+    padding: 6px 8px;
+    min-height: 120px;
+    min-width: 0;
+    cursor: pointer;
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 6px;
+    transition: background 0.15s ease, border-color 0.15s ease;
 }
-.day-head .day-name { font-size: 11px; }
-.day-head .day-date { font-family: var(--mono); font-size: 10px; color: var(--muted); font-weight: 400; }
-.day-head .day-today-tag {
-    display: inline-block;
+.day-cell:hover,
+.day-cell:focus-visible {
+    background: var(--paper-3);
+    border-color: var(--ink);
+    outline: none;
+}
+.day-cell.is-today {
+    border-color: var(--rust);
+    border-width: 2px;
+    padding: 5px 7px;
+}
+.day-cell.is-out-of-month {
+    background: var(--paper);
+    opacity: 0.5;
+}
+.day-cell template { display: none; }
+
+.day-cell-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 4px;
+}
+.day-cell-date {
+    font-family: var(--serif);
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--ink);
+}
+.day-cell-head .day-today-tag {
     background: var(--rust);
     color: var(--paper);
     font-family: var(--mono);
-    font-size: 9px;
-    padding: 1px 6px;
-    border-radius: 8px;
+    font-size: 8px;
+    padding: 1px 5px;
+    border-radius: 6px;
     letter-spacing: 0.1em;
     text-transform: uppercase;
-    width: fit-content;
 }
-.day-empty { font-size: 11px; }
-.day-block .class-block { margin-bottom: 10px; }
-.day-block .class-block-head { padding: 4px 0; margin-bottom: 4px; border-bottom: 1px solid var(--rule); }
-.day-block .class-block-head .class-code { font-size: 11px; }
-.day-block .class-block-head .class-name { display: none; }
-.day-block .todo-row {
+
+.day-cell-items {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    overflow: hidden;
+}
+.day-cell-item {
     font-size: 12px;
-    padding: 4px 2px;
+    line-height: 1.5;
+    color: var(--ink-2);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    padding: 4px 6px;
+    background: var(--paper);
+    border-left: 2px solid var(--rule);
+    border-radius: 2px;
 }
-.day-block .todo-circle { width: 14px; height: 14px; }
-.day-block .todo-toggle { width: 16px; height: 16px; }
+.day-cell-item.done { text-decoration: line-through; color: var(--muted); }
+.day-cell-code {
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--rust);
+    margin-right: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
 
 /* ---- Responsive: stack class layout + collapse week grid on small screens ---- */
 
@@ -2549,9 +2756,9 @@ details.class-section > summary.class-section-summary .section-toggle-chevron {
     .home-todo-col { position: static; max-height: none; margin-top: 24px; }
     .task-fab { right: 16px; bottom: 16px; padding: 9px 14px; font-size: 13px; }
     .task-fab-panel { right: 16px; bottom: 70px; }
-    .week-grid { grid-template-columns: 1fr; }
-    .day-block { border-left-width: 3px; }
-    .day-block .class-block-head .class-name { display: inline; }
+    .day-cell { min-height: 80px; padding: 4px 6px; }
+    .day-cell-item { font-size: 10px; }
+    .day-cell-code { display: none; }
 }
 
 /* ---- Mobile fine-tuning ---- */
@@ -2572,6 +2779,7 @@ details.class-section > summary.class-section-summary .section-toggle-chevron {
     .class-card { grid-template-columns: 1fr; gap: 4px; }
     .event-list li { grid-template-columns: 80px 1fr; gap: 10px; }
     .event-list .when { grid-column: 1 / -1; }
+    .event-list .event-add-cal { grid-column: 1 / -1; justify-self: start; }
     .section-article--lvl2 { margin-left: 8px; }
     .section-article--lvl3 { margin-left: 16px; }
     .section-article-heading { font-size: 16px !important; }
@@ -2643,13 +2851,8 @@ body:has(.test-layout) main {
     max-width: 1400px;
 }
 .test-layout {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 380px;
-    gap: 18px;
-    align-items: stretch;
     height: calc(100vh - 220px);
     min-height: 500px;
-    margin-top: 16px;
 }
 .test-pdf-pane {
     background: var(--paper-2);
@@ -2657,6 +2860,7 @@ body:has(.test-layout) main {
     border-radius: 4px;
     overflow: hidden;
     min-width: 0;
+    height: 100%;
 }
 .test-pdf-iframe {
     width: 100%;
@@ -2664,137 +2868,8 @@ body:has(.test-layout) main {
     border: 0;
     display: block;
 }
-.test-transform-pane {
-    position: sticky;
-    top: 76px;
-    align-self: start;
-    background: var(--paper-2);
-    border: 1.5px solid var(--ink);
-    border-radius: 4px;
-    padding: 16px;
-    max-height: calc(100vh - 100px);
-    overflow-y: auto;
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-}
-.test-transform-pane h3 {
-    margin: 0;
-    font-family: var(--serif);
-    font-size: 14px;
-    font-weight: 700;
-    color: var(--ink);
-    text-transform: uppercase;
-    letter-spacing: 0.16em;
-}
-.test-field {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-}
-.test-label {
-    font-family: var(--mono);
-    font-size: 10px;
-    font-weight: 700;
-    color: var(--rust);
-    text-transform: uppercase;
-    letter-spacing: 0.12em;
-}
-.test-field textarea {
-    background: var(--paper);
-    color: var(--ink-2);
-    border: 1px solid var(--rule);
-    border-radius: 2px;
-    padding: 8px 10px;
-    font-family: var(--mono);
-    font-size: 12px;
-    line-height: 1.5;
-    resize: vertical;
-    min-height: 60px;
-}
-.test-field textarea:focus {
-    outline: 2px solid var(--ink);
-    outline-offset: 0;
-    border-color: var(--ink);
-}
-.test-actions {
-    display: flex;
-    gap: 8px;
-}
-.test-actions button {
-    cursor: pointer;
-    font-family: var(--mono);
-    font-size: 11px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    padding: 8px 14px;
-    border-radius: 2px;
-    border: 1.5px solid var(--ink);
-}
-.test-actions .primary {
-    background: var(--ink);
-    color: var(--paper);
-}
-.test-actions .primary:hover { background: var(--rust); border-color: var(--rust); }
-.test-actions .primary:disabled { opacity: 0.6; cursor: not-allowed; }
-.test-actions .secondary {
-    background: transparent;
-    color: var(--ink);
-}
-.test-actions .secondary:hover { background: var(--paper); }
-.test-status {
-    margin: 0;
-    font-family: var(--mono);
-    font-size: 11px;
-}
-.test-status.is-error { color: var(--rust); }
-.test-output {
-    border-top: 1px solid var(--rule);
-    padding-top: 12px;
-    margin-top: 4px;
-}
-.test-output h4 {
-    margin: 0 0 8px;
-    font-family: var(--mono);
-    font-size: 10px;
-    font-weight: 700;
-    color: var(--rust);
-    text-transform: uppercase;
-    letter-spacing: 0.12em;
-}
-.test-output .card-body {
-    background: var(--paper);
-    border: 1px solid var(--rule);
-    border-radius: 2px;
-    padding: 10px 12px;
-    font-size: 13px;
-}
-.test-source { margin-top: 10px; }
-.test-source summary {
-    font-family: var(--mono);
-    font-size: 10px;
-    color: var(--muted);
-    cursor: pointer;
-}
-.test-source pre {
-    margin: 6px 0 0;
-    padding: 8px 10px;
-    background: var(--paper);
-    border: 1px solid var(--rule);
-    border-radius: 2px;
-    font-size: 11px;
-    white-space: pre-wrap;
-    word-break: break-word;
-    max-height: 240px;
-    overflow-y: auto;
-}
 
 @media (max-width: 900px) {
-    .test-layout {
-        grid-template-columns: 1fr;
-        height: auto;
-    }
+    .test-layout { height: auto; }
     .test-pdf-pane { height: 60vh; }
-    .test-transform-pane { position: static; max-height: none; }
 }

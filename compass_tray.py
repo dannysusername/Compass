@@ -1,4 +1,4 @@
-"""StudyFlow desktop launcher.
+"""Compass desktop launcher.
 
 Click the desktop shortcut → server starts silently, Brave opens to the home
 page, system-tray icon appears with Open / Quit menu.
@@ -28,7 +28,7 @@ os.chdir(ROOT)
 HOST = "0.0.0.0"
 PORT = 8000
 LOCAL_URL = f"http://localhost:{PORT}"
-LOG_PATH = ROOT / "studyflow.log"
+LOG_PATH = ROOT / "compass.log"
 
 BRAVE_CANDIDATES = [
     Path(os.environ.get("ProgramFiles", "")) / "BraveSoftware" / "Brave-Browser" / "Application" / "brave.exe",
@@ -44,7 +44,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
-log = logging.getLogger("studyflow_tray")
+log = logging.getLogger("compass_tray")
 
 
 # ---- Helpers ----
@@ -82,7 +82,7 @@ def port_in_use(host: str, port: int) -> bool:
 
 def evict_stale_python_on_port(port: int) -> bool:
     """If a python.exe is listening on `port`, kill it. Returns True if a process
-    was evicted. Prevents a stale StudyFlow from before a code change holding the
+    was evicted. Prevents a stale Compass from before a code change holding the
     port and silently making relaunches no-op."""
     if sys.platform != "win32":
         return False
@@ -254,10 +254,10 @@ def stop_server(proc: subprocess.Popen) -> None:
 # ---- Icon ----
 
 def make_icon_image(size: int = 64) -> Image.Image:
-    """Generate a 'SF' tile in StudyFlow blue."""
+    """Generate a 'C' tile in Compass blue."""
     img = Image.new("RGBA", (size, size), (91, 157, 255, 255))  # accent blue
     draw = ImageDraw.Draw(img)
-    text = "SF"
+    text = "C"
     font_size = int(size * 0.55)
     font: ImageFont.ImageFont
     for candidate in ("seguibl.ttf", "segoeuib.ttf", "arialbd.ttf", "arial.ttf"):
@@ -304,10 +304,10 @@ class ServerController:
         return "Stopped"
 
     def reload_env(self) -> None:
-        """Re-read .xai_key, .xai_model, and .studyflow_token so a Restart
+        """Re-read .xai_key, .xai_model, and .compass_token so a Restart
         picks up any edits the user made since the launcher started."""
         for fname, var in (
-            (".studyflow_token", "STUDYFLOW_TOKEN"),
+            (".compass_token", "COMPASS_TOKEN"),
             (".xai_key", "XAI_API_KEY"),
             (".xai_model", "XAI_MODEL"),
         ):
@@ -322,7 +322,7 @@ class ServerController:
         """Start uvicorn if it isn't already running. Returns True on success."""
         if self.is_running():
             return True
-        # Evict anything else on :8000 (some other StudyFlow instance, etc.)
+        # Evict anything else on :8000 (some other Compass instance, etc.)
         if port_in_use("127.0.0.1", PORT):
             evict_stale_python_on_port(PORT)
         self.reload_env()
@@ -391,21 +391,21 @@ def make_menu(controller: ServerController) -> Menu:
     return Menu(
         MenuItem(status_item_text, None, enabled=False),
         Menu.SEPARATOR,
-        MenuItem("Open StudyFlow", on_open, default=True),
+        MenuItem("Open Compass", on_open, default=True),
         Menu.SEPARATOR,
         MenuItem("Restart server", on_restart, enabled=lambda _i: controller.is_running()),
         MenuItem(toggle_text, on_toggle),
         Menu.SEPARATOR,
-        MenuItem("Quit StudyFlow", on_quit),
+        MenuItem("Quit Compass", on_quit),
     )
 
 
 # ---- Main ----
 
 def main() -> int:
-    log.info("StudyFlow tray launcher starting (root=%s)", ROOT)
+    log.info("Compass tray launcher starting (root=%s)", ROOT)
 
-    # If port is taken, first try to evict any stale StudyFlow on it so a relaunch
+    # If port is taken, first try to evict any stale Compass on it so a relaunch
     # actually picks up new code. If something else (non-python) is on the port,
     # just open Brave to it as before.
     if port_in_use("127.0.0.1", PORT):
@@ -414,7 +414,7 @@ def main() -> int:
             log.info("port %d already in use (not ours); opening Brave at %s and exiting", PORT, LOCAL_URL)
             open_in_brave()
             return 0
-        log.info("evicted stale StudyFlow; starting fresh server")
+        log.info("evicted stale Compass; starting fresh server")
 
     controller = ServerController()
     if not controller.start():
@@ -425,16 +425,16 @@ def main() -> int:
     open_in_brave()
 
     icon = pystray.Icon(
-        "studyflow",
+        "compass",
         icon=make_icon_image(64),
-        title="StudyFlow",
+        title="Compass",
         menu=make_menu(controller),
     )
     try:
         icon.run()
     finally:
         controller.stop()
-        log.info("StudyFlow tray launcher exited")
+        log.info("Compass tray launcher exited")
     return 0
 
 

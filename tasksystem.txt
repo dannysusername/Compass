@@ -1,4 +1,4 @@
-I want to design the to-do list system for StudyFlow before writing any code. Don't write code yet — help me think through it first.
+I want to design the to-do list system for Compass before writing any code. Don't write code yet — help me think through it first.
 First: read the codebase and tell me back in a few sentences what the app currently does, so I know we're aligned. Also consider running gstack to help us think through this feature.
 What I'm trying to build:
 The user uploads a syllabus, picks which sections matter, and from those sections we generate a to-do list of things they need to do during the semester — assignments, exam prep, readings, etc. I want a weekly view and a daily view.

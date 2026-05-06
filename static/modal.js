@@ -18,12 +18,14 @@
         document.body.classList.remove('modal-open');
     }
 
-    document.querySelectorAll('[data-open-modal]').forEach((btn) => {
-        btn.addEventListener('click', () => {
-            const id = btn.getAttribute('data-open-modal');
-            const modal = document.getElementById(id);
-            if (modal) open(modal);
-        });
+    // Delegated open: works for buttons that arrive after page load
+    // (e.g. via softRefresh replacing the today-list-block partial).
+    document.addEventListener('click', (e) => {
+        const trigger = e.target.closest('[data-open-modal]');
+        if (!trigger) return;
+        const id = trigger.getAttribute('data-open-modal');
+        const modal = document.getElementById(id);
+        if (modal) open(modal);
     });
 
     document.addEventListener('click', (e) => {

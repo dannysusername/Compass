@@ -1,8 +1,8 @@
-# StudyFlow
+# Compass
 
 Personal school task tracker that:
 
-- Syncs your Canvas calendar + your Apple Calendar + StudyFlow's own exam-date calendar into one overlaid Apple Calendar view.
+- Syncs your Canvas calendar + your Apple Calendar + Compass's own exam-date calendar into one overlaid Apple Calendar view.
 - Auto-extracts late-grade policy, grading breakdown, office hours, and exam dates from syllabus PDFs (xAI Grok API — grok-4).
 - Holds a curated list of "important" docs per class so you don't have to dig through Canvas.
 
@@ -48,7 +48,7 @@ Common picks:
 
 ## Run
 
-Either double-click the **StudyFlow** desktop shortcut, or from a terminal:
+Either double-click the **Compass** desktop shortcut, or from a terminal:
 
 ```powershell
 uvicorn main:app --host 0.0.0.0 --port 8000 --no-reload
@@ -58,7 +58,7 @@ Then visit `http://localhost:8000` on your laptop, or `http://<laptop-local-ip>:
 
 ## Auth (optional)
 
-Set `STUDYFLOW_TOKEN` env var (or write to `.studyflow_token`) to gate mutating routes against random devices on your home WiFi. Without it, dev mode = no auth.
+Set `COMPASS_TOKEN` env var (or write to `.compass_token`) to gate mutating routes against random devices on your home WiFi. Without it, dev mode = no auth.
 
 ## Cost
 
@@ -67,4 +67,4 @@ Set `STUDYFLOW_TOKEN` env var (or write to `.studyflow_token`) to gate mutating 
 
 ## Architecture
 
-See `~/.gstack/projects/StudyFlow/danni-main-design-*.md` for the full design doc.
+See `~/.gstack/projects/Compass/danni-main-design-*.md` for the full design doc.

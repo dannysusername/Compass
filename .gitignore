@@ -3,12 +3,12 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
-studyflow.db
-studyflow.db-journal
-studyflow.log
+compass.db
+compass.db-journal
+compass.log
 uploads/
 .env
-.studyflow_token
+.compass_token
 .anthropic_key
 .xai_key
 .xai_model

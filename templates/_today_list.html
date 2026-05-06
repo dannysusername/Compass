@@ -17,10 +17,15 @@
     {% endif %}
 
     {% macro render_item(it) -%}
-    <li class="todo-row {% if it.completed %}done{% endif %}"
+    {% set row_color = it.tag_color or it.sub_kind_color %}
+    <li class="todo-row {% if it.completed %}done{% endif %} {% if row_color %}has-tag{% endif %} {% if it.is_range_day %}is-range-day{% endif %} {% if it.actionable is defined and not it.actionable %}is-context{% endif %}"
+        {% if row_color %}style="--tag-color: {{ row_color }}"{% endif %}
         data-kind="{{ it.kind }}" data-id="{{ it.id }}" data-class-id="{{ it.class_id }}"
         data-title="{{ it.title }}"
-        data-due-date="{{ it.due_at.strftime('%Y-%m-%d') if it.due_at else '' }}">
+        data-due-at="{{ it.due_at.strftime('%Y-%m-%dT%H:%M') if it.due_at else '' }}"
+        data-starts-at="{{ it.starts_at.strftime('%Y-%m-%dT%H:%M') if it.starts_at else '' }}"
+        data-tag-id="{{ it.tag_id or '' }}"
+        data-sub-kind-id="{{ it.sub_kind_id or '' }}">
         <span class="todo-drag-handle" title="Drag to reorder priority" aria-label="Drag">
             <span class="todo-burger" aria-hidden="true"></span>
         </span>
@@ -28,14 +33,19 @@
             <span class="todo-circle"></span>
         </button>
         <span class="todo-title">{{ it.title }}</span>
-        {% if it.sub_kind %}<span class="todo-sub-kind">{{ it.sub_kind }}</span>{% endif %}
-        {% if it.due_at and (it.due_at.hour or it.due_at.minute) %}<span class="todo-when">{{ it.due_at.strftime('%H:%M') }}</span>{% endif %}
+        {% if it.tag_name %}<span class="todo-tag" style="--tag-color: {{ it.tag_color }}">{{ it.tag_name }}</span>{% endif %}
+        {% if it.sub_kind %}<span class="todo-tag"{% if it.sub_kind_color %} style="--tag-color: {{ it.sub_kind_color }}"{% endif %}>{{ it.sub_kind }}</span>{% endif %}
+        {% if it.is_range %}
+            <span class="todo-range">{{ it.starts_at.strftime('%a %H:%M') }} → {{ it.due_at.strftime('%a %H:%M') }}</span>
+        {% elif it.due_at and (it.due_at.hour or it.due_at.minute) %}
+            <span class="todo-when">{{ it.due_at.strftime('%H:%M') }}</span>
+        {% endif %}
         {% if it.kind == 'task' %}
         <button type="button" class="todo-edit" data-id="{{ it.id }}" aria-label="Edit task" title="Edit">
             <span class="todo-edit-icon" aria-hidden="true">✎</span>
         </button>
-        <button type="button" class="todo-del" data-id="{{ it.id }}" aria-label="Delete task">×</button>
         {% endif %}
+        <button type="button" class="todo-del" data-id="{{ it.id }}" data-kind="{{ it.kind }}" aria-label="Delete {{ it.kind }}">×</button>
     </li>
     {%- endmacro %}
 
@@ -87,10 +97,37 @@
                 <span class="add-task-label">Task</span>
                 <input type="text" name="title" required>
             </label>
-            <label class="add-task-due">
-                <span class="add-task-label">Due date (optional)</span>
-                <input type="date" name="due_at">
+            <label class="add-task-starts" data-task-starts hidden>
+                <span class="add-task-label">Starts on</span>
+                <input type="datetime-local" name="starts_at">
             </label>
+            <button type="button" class="link-btn add-task-range-toggle" data-toggle-task-starts>+ Add start date</button>
+            <label class="add-task-due">
+                <span class="add-task-label">Due (optional)</span>
+                <input type="datetime-local" name="due_at">
+            </label>
+            <div class="add-task-tag">
+                <span class="add-task-label">Tag (optional) <button type="button" class="link-btn" data-open-manage-tags>Manage tags</button></span>
+                <select name="tag_id" data-add-task-tag>
+                    <option value="">No tag</option>
+                    <optgroup label="System">
+                        {% for tag in all_tags if tag.is_system %}
+                        <option value="{{ tag.id }}">{{ tag.name }}</option>
+                        {% endfor %}
+                    </optgroup>
+                    <optgroup label="Yours">
+                        {% for tag in all_tags if not tag.is_system %}
+                        <option value="{{ tag.id }}" data-color="{{ tag.color }}">{{ tag.name }}</option>
+                        {% endfor %}
+                    </optgroup>
+                    <option value="__new__">+ New tag…</option>
+                </select>
+            </div>
+            <div class="new-tag-form" data-new-tag-form hidden>
+                <input type="text" placeholder="Tag name (e.g. Reading)" data-new-tag-name>
+                <input type="color" value="#a83232" data-new-tag-color>
+                <button type="button" class="secondary small" data-cancel-new-tag>Cancel</button>
+            </div>
             <div class="modal-actions">
                 <button type="submit">Save</button>
                 <button type="button" class="secondary" data-close-modal>Cancel</button>
@@ -110,9 +147,14 @@
                 <span class="add-task-label">Task</span>
                 <input type="text" name="title" placeholder="e.g. Read chapter 4" required autofocus>
             </label>
+            <label class="add-task-starts" data-task-starts hidden>
+                <span class="add-task-label">Starts on</span>
+                <input type="datetime-local" name="starts_at">
+            </label>
+            <button type="button" class="link-btn add-task-range-toggle" data-toggle-task-starts>+ Add start date</button>
             <label class="add-task-due">
-                <span class="add-task-label">Due date (optional)</span>
-                <input type="date" name="due_at">
+                <span class="add-task-label">Due (optional)</span>
+                <input type="datetime-local" name="due_at">
             </label>
             <label class="add-task-class">
                 <span class="add-task-label">Class</span>
@@ -122,11 +164,44 @@
                     {% endfor %}
                 </select>
             </label>
+            <div class="add-task-tag">
+                <span class="add-task-label">Tag (optional) <button type="button" class="link-btn" data-open-manage-tags>Manage tags</button></span>
+                <select name="tag_id" data-add-task-tag>
+                    <option value="">No tag</option>
+                    <optgroup label="System">
+                        {% for tag in all_tags if tag.is_system %}
+                        <option value="{{ tag.id }}">{{ tag.name }}</option>
+                        {% endfor %}
+                    </optgroup>
+                    <optgroup label="Yours">
+                        {% for tag in all_tags if not tag.is_system %}
+                        <option value="{{ tag.id }}" data-color="{{ tag.color }}">{{ tag.name }}</option>
+                        {% endfor %}
+                    </optgroup>
+                    <option value="__new__">+ New tag…</option>
+                </select>
+            </div>
+            <div class="new-tag-form" data-new-tag-form hidden>
+                <input type="text" placeholder="Tag name (e.g. Reading)" data-new-tag-name>
+                <input type="color" value="#a83232" data-new-tag-color>
+                <button type="button" class="secondary small" data-cancel-new-tag>Cancel</button>
+            </div>
             <div class="modal-actions">
                 <button type="submit">Add task</button>
                 <button type="button" class="secondary" data-close-modal>Cancel</button>
             </div>
         </form>
+    </div>
+</div>
+
+<div class="modal-overlay" id="manage-tags-modal" hidden>
+    <div class="modal-dialog" role="dialog" aria-labelledby="manage-tags-modal-title">
+        <div class="modal-head">
+            <h2 id="manage-tags-modal-title">Manage tags</h2>
+            <button type="button" class="modal-close" data-close-modal aria-label="Close">×</button>
+        </div>
+        <p class="subtle">System tags are auto-created from event kinds and can't be edited or deleted, but you can apply them to tasks.</p>
+        <ul class="tag-manage-list" data-tag-manage-list></ul>
     </div>
 </div>
 {% endif %}

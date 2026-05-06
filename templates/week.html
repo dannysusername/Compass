@@ -1,55 +1,87 @@
 {% extends "base.html" %}
-{% block title %}Next two weeks — StudyFlow{% endblock %}
+{% block title %}{{ first_of_month.strftime('%B %Y') }} — Compass{% endblock %}
 {% block content %}
-<h1>Next two weeks <span class="subtle">starting {{ monday.strftime('%a %b %d') }}</span></h1>
+<header class="month-header">
+    <h1>{{ first_of_month.strftime('%B %Y') }}</h1>
+    <nav class="month-nav">
+        <a class="month-nav-btn" href="/week?month={{ prev_month }}" aria-label="Previous month">← Prev</a>
+        <a class="month-nav-btn" href="/week">Today</a>
+        <a class="month-nav-btn" href="/week?month={{ next_month }}" aria-label="Next month">Next →</a>
+    </nav>
+</header>
 
-{% macro render_item(it, with_actions=False) -%}
-<li class="todo-row {% if it.completed %}done{% endif %}"
+{% macro render_item(it) -%}
+{% set row_color = it.tag_color or it.sub_kind_color %}
+<li class="todo-row {% if it.completed %}done{% endif %} {% if row_color %}has-tag{% endif %} {% if it.is_range_day %}is-range-day{% endif %} {% if it.actionable is defined and not it.actionable %}is-context{% endif %}"
+    {% if row_color %}style="--tag-color: {{ row_color }}"{% endif %}
     data-kind="{{ it.kind }}" data-id="{{ it.id }}" data-class-id="{{ it.class_id }}"
     data-title="{{ it.title }}"
-    data-due-date="{{ it.due_at.strftime('%Y-%m-%d') if it.due_at else '' }}">
+    data-due-at="{{ it.due_at.strftime('%Y-%m-%dT%H:%M') if it.due_at else '' }}"
+    data-starts-at="{{ it.starts_at.strftime('%Y-%m-%dT%H:%M') if it.starts_at else '' }}"
+    data-tag-id="{{ it.tag_id or '' }}"
+    data-sub-kind-id="{{ it.sub_kind_id or '' }}">
+    <span class="todo-drag-handle" title="Drag to reorder priority" aria-label="Drag">
+        <span class="todo-burger" aria-hidden="true"></span>
+    </span>
     <button type="button" class="todo-toggle" aria-pressed="{{ 'true' if it.completed else 'false' }}" aria-label="Toggle done">
         <span class="todo-circle"></span>
     </button>
     <span class="todo-title">{{ it.title }}</span>
-    {% if it.sub_kind %}<span class="todo-sub-kind">{{ it.sub_kind }}</span>{% endif %}
-    {% if it.due_at and (it.due_at.hour or it.due_at.minute) %}<span class="todo-when">{{ it.due_at.strftime('%H:%M') }}</span>{% endif %}
-    {% if with_actions and it.kind == 'task' %}
+    {% if it.tag_name %}<span class="todo-tag" style="--tag-color: {{ it.tag_color }}">{{ it.tag_name }}</span>{% endif %}
+    {% if it.sub_kind %}<span class="todo-tag"{% if it.sub_kind_color %} style="--tag-color: {{ it.sub_kind_color }}"{% endif %}>{{ it.sub_kind }}</span>{% endif %}
+    {% if it.is_range %}
+        <span class="todo-range">{{ it.starts_at.strftime('%a %H:%M') }} → {{ it.due_at.strftime('%a %H:%M') }}</span>
+    {% elif it.due_at and (it.due_at.hour or it.due_at.minute) %}
+        <span class="todo-when">{{ it.due_at.strftime('%H:%M') }}</span>
+    {% endif %}
+    {% if it.kind == 'task' %}
     <button type="button" class="todo-edit" data-id="{{ it.id }}" aria-label="Edit task" title="Edit">
         <span class="todo-edit-icon" aria-hidden="true">✎</span>
     </button>
-    <button type="button" class="todo-del" data-id="{{ it.id }}" aria-label="Delete task">×</button>
     {% endif %}
+    <button type="button" class="todo-del" data-id="{{ it.id }}" data-kind="{{ it.kind }}" aria-label="Delete {{ it.kind }}">×</button>
 </li>
 {%- endmacro %}
 
-<div class="week-grid">
+<div class="month-weekdays">
+    <div>Mon</div><div>Tue</div><div>Wed</div><div>Thu</div><div>Fri</div><div>Sat</div><div>Sun</div>
+</div>
+
+<div class="month-grid">
 {% for day in days %}
-    <section class="day-block {% if day.is_today %}is-today{% endif %}"
-             role="button" tabindex="0"
-             data-open-day-modal="day-{{ loop.index0 }}"
-             aria-label="View tasks for {{ day.date.strftime('%A %b %d') }}">
-        <h2 class="day-head">
-            <span class="day-name">{{ day.date.strftime('%A') }}</span>
-            <span class="day-date">{{ day.date.strftime('%b %d') }}</span>
+    <section class="day-cell
+        {% if day.is_today %}is-today{% endif %}
+        {% if not day.in_month %}is-out-of-month{% endif %}"
+        role="button" tabindex="0"
+        data-open-day-modal="day-{{ loop.index0 }}"
+        aria-label="View tasks for {{ day.date.strftime('%A %b %d') }}">
+        <header class="day-cell-head">
+            <span class="day-cell-date">{{ day.date.day }}</span>
             {% if day.is_today %}<span class="day-today-tag">today</span>{% endif %}
-        </h2>
+        </header>
         {% if day.items_by_class %}
-            {% for slot in day.items_by_class.values() %}
-            <div class="class-block">
-                <a href="/classes/{{ slot.cls.id }}" class="class-block-head">
-                    <span class="class-code">{{ slot.cls.code }}</span>
-                </a>
-                <ul class="todo-list">
-                    {% for it in slot["items"] %}{{ render_item(it) }}{% endfor %}
-                </ul>
-            </div>
-            {% endfor %}
-        {% else %}
-            <p class="empty day-empty">Nothing.</p>
+            <ul class="day-cell-items">
+                {% for slot in day.items_by_class.values() %}
+                    {% for it in slot["items"] %}
+                    {% set cell_color = it.tag_color or it.sub_kind_color %}
+                    <li class="day-cell-item {% if it.completed %}done{% endif %} {% if cell_color %}has-tag{% endif %} {% if it.is_range_day %}is-range-day{% endif %} {% if it.actionable is defined and not it.actionable %}is-context{% endif %}"
+                        {% if cell_color %}style="--tag-color: {{ cell_color }}"{% endif %}
+                        data-kind="{{ it.kind }}" data-id="{{ it.id }}"
+                        data-tag-id="{{ it.tag_id or '' }}"
+                        data-sub-kind-id="{{ it.sub_kind_id or '' }}">
+                        <span class="day-cell-code">{{ slot.cls.code }}</span>
+                        <span class="day-cell-title">{{ it.title }}</span>
+                    </li>
+                    {% endfor %}
+                {% endfor %}
+            </ul>
         {% endif %}
         <template data-day-modal-content="day-{{ loop.index0 }}"
-                  data-day-label="{{ day.date.strftime('%A, %b %d') }}">
+                  data-day-label="{{ day.date.strftime('%A, %b %d') }}"
+                  data-day-date="{{ day.date.strftime('%Y-%m-%d') }}">
+            {% if all_classes %}
+            <button type="button" class="add-task-btn" data-add-for-date="{{ day.date.strftime('%Y-%m-%d') }}">+ Add task for this day</button>
+            {% endif %}
             {% if day.items_by_class %}
                 {% for slot in day.items_by_class.values() %}
                 <div class="class-block">
@@ -57,8 +89,8 @@
                         <span class="class-code">{{ slot.cls.code }}</span>
                         <span class="class-name">{{ slot.cls.name }}</span>
                     </a>
-                    <ul class="todo-list">
-                        {% for it in slot["items"] %}{{ render_item(it, with_actions=True) }}{% endfor %}
+                    <ul class="todo-list todo-list-draggable">
+                        {% for it in slot["items"] %}{{ render_item(it) }}{% endfor %}
                     </ul>
                 </div>
                 {% endfor %}
@@ -92,10 +124,39 @@
                 <span class="add-task-label">Task</span>
                 <input type="text" name="title" required>
             </label>
-            <label class="add-task-due">
-                <span class="add-task-label">Due date (optional)</span>
-                <input type="date" name="due_at">
+            <label class="add-task-starts" data-task-starts hidden>
+                <span class="add-task-label">Starts on</span>
+                <input type="datetime-local" name="starts_at">
             </label>
+            <button type="button" class="link-btn add-task-range-toggle" data-toggle-task-starts>+ Add start date</button>
+            <label class="add-task-due">
+                <span class="add-task-label">Due (optional)</span>
+                <input type="datetime-local" name="due_at">
+            </label>
+            {% if all_tags %}
+            <div class="add-task-tag">
+                <span class="add-task-label">Tag (optional) <button type="button" class="link-btn" data-open-manage-tags>Manage tags</button></span>
+                <select name="tag_id" data-add-task-tag>
+                    <option value="">No tag</option>
+                    <optgroup label="System">
+                        {% for tag in all_tags if tag.is_system %}
+                        <option value="{{ tag.id }}">{{ tag.name }}</option>
+                        {% endfor %}
+                    </optgroup>
+                    <optgroup label="Yours">
+                        {% for tag in all_tags if not tag.is_system %}
+                        <option value="{{ tag.id }}" data-color="{{ tag.color }}">{{ tag.name }}</option>
+                        {% endfor %}
+                    </optgroup>
+                    <option value="__new__">+ New tag…</option>
+                </select>
+            </div>
+            <div class="new-tag-form" data-new-tag-form hidden>
+                <input type="text" placeholder="Tag name (e.g. Reading)" data-new-tag-name>
+                <input type="color" value="#a83232" data-new-tag-color>
+                <button type="button" class="secondary small" data-cancel-new-tag>Cancel</button>
+            </div>
+            {% endif %}
             <div class="modal-actions">
                 <button type="submit">Save</button>
                 <button type="button" class="secondary" data-close-modal>Cancel</button>
@@ -104,43 +165,147 @@
     </div>
 </div>
 
+{% if all_classes %}
+<div class="modal-overlay" id="add-task-modal" hidden>
+    <div class="modal-dialog" role="dialog" aria-labelledby="add-task-modal-title">
+        <div class="modal-head">
+            <h2 id="add-task-modal-title">Add a task</h2>
+            <button type="button" class="modal-close" data-close-modal aria-label="Close">×</button>
+        </div>
+        <form method="post" action="/classes/0/tasks" class="add-task-form" data-add-task>
+            <label class="add-task-title">
+                <span class="add-task-label">Task</span>
+                <input type="text" name="title" placeholder="e.g. Read chapter 4" required autofocus>
+            </label>
+            <label class="add-task-starts" data-task-starts hidden>
+                <span class="add-task-label">Starts on</span>
+                <input type="datetime-local" name="starts_at">
+            </label>
+            <button type="button" class="link-btn add-task-range-toggle" data-toggle-task-starts>+ Add start date</button>
+            <label class="add-task-due">
+                <span class="add-task-label">Due (optional)</span>
+                <input type="datetime-local" name="due_at">
+            </label>
+            <label class="add-task-class">
+                <span class="add-task-label">Class</span>
+                <select name="class_id" data-add-task-class>
+                    {% for c in all_classes %}
+                    <option value="{{ c.id }}" {% if c.id == default_class_id %}selected{% endif %}>{{ c.code }} — {{ c.name }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <div class="add-task-tag">
+                <span class="add-task-label">Tag (optional) <button type="button" class="link-btn" data-open-manage-tags>Manage tags</button></span>
+                <select name="tag_id" data-add-task-tag>
+                    <option value="">No tag</option>
+                    <optgroup label="System">
+                        {% for tag in all_tags if tag.is_system %}
+                        <option value="{{ tag.id }}">{{ tag.name }}</option>
+                        {% endfor %}
+                    </optgroup>
+                    <optgroup label="Yours">
+                        {% for tag in all_tags if not tag.is_system %}
+                        <option value="{{ tag.id }}" data-color="{{ tag.color }}">{{ tag.name }}</option>
+                        {% endfor %}
+                    </optgroup>
+                    <option value="__new__">+ New tag…</option>
+                </select>
+            </div>
+            <div class="new-tag-form" data-new-tag-form hidden>
+                <input type="text" placeholder="Tag name (e.g. Reading)" data-new-tag-name>
+                <input type="color" value="#a83232" data-new-tag-color>
+                <button type="button" class="secondary small" data-cancel-new-tag>Cancel</button>
+            </div>
+            <div class="modal-actions">
+                <button type="submit">Add task</button>
+                <button type="button" class="secondary" data-close-modal>Cancel</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<div class="modal-overlay" id="manage-tags-modal" hidden>
+    <div class="modal-dialog" role="dialog" aria-labelledby="manage-tags-modal-title">
+        <div class="modal-head">
+            <h2 id="manage-tags-modal-title">Manage tags</h2>
+            <button type="button" class="modal-close" data-close-modal aria-label="Close">×</button>
+        </div>
+        <p class="subtle">System tags are auto-created from event kinds and can't be edited or deleted, but you can apply them to tasks.</p>
+        <ul class="tag-manage-list" data-tag-manage-list></ul>
+    </div>
+</div>
+{% endif %}
+
 <script src="{{ '/static/todo.js' | static_v }}" defer></script>
 <script src="{{ '/static/modal.js' | static_v }}" defer></script>
 <script>
-// Open the day modal when a .day-block is clicked / Enter / Space.
-// Inner interactive elements (the toggle button, the class link) handle
-// their own clicks first via stopPropagation below, so they don't bubble
-// up and accidentally pop the modal.
+// Open the day modal when a .day-cell is clicked / Enter / Space.
+// "+ Add task for this day" inside the day modal swaps to the add-task
+// modal with that day's date pre-filled.
 (function () {
-    const modal = document.getElementById('day-modal');
-    const body = document.getElementById('day-modal-body');
-    const title = document.getElementById('day-modal-title');
-    if (!modal || !body || !title) return;
-
-    function openDay(blockEl) {
-        const id = blockEl.getAttribute('data-open-day-modal');
-        const tpl = blockEl.querySelector(`template[data-day-modal-content="${id}"]`);
+    function openDay(cellEl) {
+        // Look up nodes at click time, not at page load — softRefresh in
+        // todo.js replaces #day-modal in place, so cached references would
+        // point to detached DOM and silently no-op while still flipping
+        // body.modal-open (locking the page).
+        const modal = document.getElementById('day-modal');
+        const body = document.getElementById('day-modal-body');
+        const title = document.getElementById('day-modal-title');
+        if (!modal || !body || !title) return;
+        const id = cellEl.getAttribute('data-open-day-modal');
+        const tpl = cellEl.querySelector(`template[data-day-modal-content="${id}"]`);
         if (!tpl) return;
         title.textContent = tpl.dataset.dayLabel || 'Day';
         body.replaceChildren(tpl.content.cloneNode(true));
         modal.hidden = false;
         document.body.classList.add('modal-open');
         if (typeof window.bindTodoToggles === 'function') window.bindTodoToggles();
+        body.querySelectorAll('[data-add-for-date]').forEach((btn) => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                openAddForDay(btn.dataset.addForDate);
+            });
+        });
     }
 
-    document.querySelectorAll('.day-block[data-open-day-modal]').forEach((block) => {
-        block.addEventListener('click', (e) => {
-            // Ignore clicks that originated on inner interactive elements.
-            if (e.target.closest('.todo-toggle, .class-block-head, .todo-edit, .todo-del')) return;
-            openDay(block);
-        });
-        block.addEventListener('keydown', (e) => {
+    function openAddForDay(dateStr) {
+        const dayModal = document.getElementById('day-modal');
+        const addModal = document.getElementById('add-task-modal');
+        if (!addModal) return;
+        // Default to end-of-day so a date-only pick still hits the right
+        // calendar cell (datetime-local needs HH:MM).
+        const dateInput = addModal.querySelector('input[name="due_at"]');
+        if (dateInput) dateInput.value = dateStr + 'T23:59';
+        const startsInput = addModal.querySelector('input[name="starts_at"]');
+        if (startsInput) startsInput.value = '';
+        const startsLabel = addModal.querySelector('[data-task-starts]');
+        if (startsLabel) startsLabel.hidden = true;
+        const titleInput = addModal.querySelector('input[name="title"]');
+        if (titleInput) titleInput.value = '';
+        if (dayModal) dayModal.hidden = true;
+        addModal.hidden = false;
+        document.body.classList.add('modal-open');
+        if (titleInput) titleInput.focus();
+    }
+
+    function bindCell(cell) {
+        if (cell.dataset.bound === '1') return;
+        cell.dataset.bound = '1';
+        cell.addEventListener('click', () => openDay(cell));
+        cell.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' || e.key === ' ') {
                 e.preventDefault();
-                openDay(block);
+                openDay(cell);
             }
         });
-    });
+    }
+    function bindAll() {
+        document.querySelectorAll('.day-cell[data-open-day-modal]').forEach(bindCell);
+    }
+    // softRefresh in todo.js calls this after replacing .month-grid so the
+    // freshly-rendered day cells get click/keyboard handlers re-attached.
+    window.rebindDayCells = bindAll;
+    bindAll();
 })();
 </script>
 {% endblock %}

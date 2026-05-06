@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Optional, List
 from zoneinfo import ZoneInfo
@@ -35,17 +35,17 @@ import pdfplumber
 LOCAL_TZ = ZoneInfo("America/New_York")  # change to your timezone
 XAI_MODEL = os.environ.get("XAI_MODEL", "grok-4-fast-reasoning").strip()
 MAX_UPLOAD_MB = 25
-STUDYFLOW_TOKEN = os.environ.get("STUDYFLOW_TOKEN", "").strip()  # empty = dev mode (no auth)
-COOKIE_NAME = "studyflow_token"
+COMPASS_TOKEN = os.environ.get("COMPASS_TOKEN", "").strip()  # empty = dev mode (no auth)
+COOKIE_NAME = "compass_token"
 
 
-# Logger that writes to the same studyflow.log the tray launcher uses.
+# Logger that writes to the same compass.log the tray launcher uses.
 # Hand-configured (not basicConfig) so it works whether main.py is the entry
 # point or runs as a uvicorn subprocess with stdout/stderr suppressed.
-log = logging.getLogger("studyflow")
+log = logging.getLogger("compass")
 if not log.handlers:
     log.setLevel(logging.INFO)
-    _h = logging.FileHandler(Path(__file__).parent / "studyflow.log", encoding="utf-8")
+    _h = logging.FileHandler(Path(__file__).parent / "compass.log", encoding="utf-8")
     _h.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
     log.addHandler(_h)
     log.propagate = False
@@ -79,10 +79,9 @@ class Syllabus(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     class_id: int = Field(foreign_key="class.id")
     filename: str
-    raw_text: str  # contains [TABLE:N] markers where pdfplumber detected tables
+    raw_text: str
     parsed_at: datetime
     outline_json: Optional[str] = Field(default=None)  # cached Pass-1.5 outline
-    tables_json: Optional[str] = Field(default=None)   # JSON list of {rows: [[cell,...],...]}
     cls: Optional[Class] = Relationship(back_populates="syllabi")
 
 
@@ -93,7 +92,9 @@ class CalendarEvent(SQLModel, table=True):
     title: str
     starts_at: Optional[datetime] = None
     ends_at: Optional[datetime] = None
-    kind: str  # exam | assignment | project | milestone
+    kind: str  # free-form lowercase noun (quiz, lab, lecture, exam, ...)
+    actionable: bool = Field(default=True)  # False = context (lecture topic, holiday)
+    position: int = Field(default=0)  # drag-to-reorder priority, shared with Task
     source_text: Optional[str] = Field(default=None)
     completed_at: Optional[datetime] = Field(default=None)
     cls: Optional[Class] = Relationship(back_populates="events")
@@ -106,11 +107,133 @@ class Task(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     class_id: int = Field(foreign_key="class.id")
     title: str
-    due_at: Optional[datetime] = None
+    starts_at: Optional[datetime] = None  # range start; None = single-date task
+    due_at: Optional[datetime] = None     # range end / deadline
     completed_at: Optional[datetime] = None
     position: int = Field(default=0)  # drag-to-reorder priority
     created_at: datetime
+    tag_id: Optional[int] = Field(default=None, foreign_key="tag.id")
     cls: Optional[Class] = Relationship(back_populates="tasks")
+    tag: Optional["Tag"] = Relationship(back_populates="tasks")
+
+
+class Tag(SQLModel, table=True):
+    """User-defined category (e.g. 'Reading', 'Lab') applied to tasks.
+    Free-form name + free-form hex color. Globally scoped (not per-class).
+
+    `is_system=True` marks tags seeded by the app to mirror Grok-generated
+    event kinds. Users can rename and recolor system tags but can't
+    delete them.
+
+    `system_key` is an immutable canonical slug (matches the original
+    `CalendarEvent.kind` string). Events are linked to their system tag
+    by this key — so renaming a system tag's user-facing `name` doesn't
+    sever the link to all the events with that kind."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str
+    color: str  # hex string like #a83232
+    is_system: bool = Field(default=False)
+    system_key: Optional[str] = Field(default=None, index=True)
+    tasks: List["Task"] = Relationship(back_populates="tag")
+
+
+# Names + colors mirror the event sub-kinds so a user task tagged
+# "milestone" looks identical to an event with kind="milestone". Each
+# kind gets its own muted, paper-aesthetic color so users can tell them
+# apart at a glance.
+SYSTEM_TAGS = [
+    ("exam",       "#a04528"),  # rust — urgent
+    ("assignment", "#2c5f7c"),  # deep teal
+    ("project",    "#7b3f61"),  # mauve
+    ("milestone",  "#9e7b2c"),  # ochre
+]
+
+# Palette for auto-assigning colors to brand-new kinds Grok returns
+# (quiz, lab, lecture, holiday, ...). Hash the kind name → palette index
+# so the same kind always gets the same color across runs.
+TAG_PALETTE = [
+    "#a04528",  # rust
+    "#2c5f7c",  # deep teal
+    "#7b3f61",  # mauve
+    "#9e7b2c",  # ochre
+    "#5c8a3a",  # forest green
+    "#506b87",  # slate blue
+    "#8a4f7a",  # plum
+    "#6e6b35",  # olive
+    "#3a6b6e",  # pine
+    "#a85f3a",  # terracotta
+    "#4d6b4f",  # sage
+    "#7a5b8c",  # iris
+]
+
+
+def _pick_tag_color(kind: str) -> str:
+    """Deterministic palette pick so re-extraction never changes a kind's color."""
+    h = sum(ord(c) for c in kind.lower()) if kind else 0
+    return TAG_PALETTE[h % len(TAG_PALETTE)]
+
+
+def _ensure_system_tag(session: "Session", kind: str) -> None:
+    """Make sure a system tag exists for `kind`. Idempotent. Re-uses an
+    existing tag (system or user) by name and backfills `system_key` so
+    the collector can resolve color/name for events with this kind."""
+    if not kind:
+        return
+    kind = kind.lower().strip()
+    if not kind:
+        return
+    existing = session.exec(
+        select(Tag).where(
+            (Tag.system_key == kind) | (Tag.name == kind)
+        )
+    ).first()
+    if existing is None:
+        seeded = dict(SYSTEM_TAGS)
+        color = seeded.get(kind) or _pick_tag_color(kind)
+        session.add(Tag(name=kind, color=color, is_system=True, system_key=kind))
+        return
+    changed = False
+    if not existing.is_system:
+        existing.is_system = True
+        changed = True
+    if not existing.system_key:
+        existing.system_key = kind
+        changed = True
+    if changed:
+        session.add(existing)
+
+
+def _seed_system_tags() -> None:
+    """Insert system tags on startup if they don't already exist. Once
+    a row exists, we leave its name alone so user edits stick. We:
+      • force-set `is_system`,
+      • backfill `system_key` (for rows created before that column existed),
+      • lowercase any uppercase hex color (HTML5 `<input type="color">`
+        rejects uppercase, falling back to a default — which made the
+        manage-tags color picker show the wrong swatch)."""
+    with Session(engine) as session:
+        # Heal uppercase hex on every row, system or not — this is a
+        # general data-quality fix, not a system-tag-specific one.
+        for tag in session.exec(select(Tag)).all():
+            if tag.color and tag.color != tag.color.lower():
+                tag.color = tag.color.lower()
+                session.add(tag)
+        for name, color in SYSTEM_TAGS:
+            existing = session.exec(
+                select(Tag).where(
+                    (Tag.system_key == name) | (Tag.name == name)
+                )
+            ).first()
+            if existing is None:
+                session.add(Tag(
+                    name=name, color=color, is_system=True, system_key=name,
+                ))
+            else:
+                existing.is_system = True
+                if not existing.system_key:
+                    existing.system_key = name
+                session.add(existing)
+        session.commit()
 
 
 class Document(SQLModel, table=True):
@@ -124,7 +247,7 @@ class Document(SQLModel, table=True):
 
 # ---- App setup ----
 
-DB_PATH = Path(__file__).parent / "studyflow.db"
+DB_PATH = Path(__file__).parent / "compass.db"
 UPLOAD_DIR = Path(__file__).parent / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
 
@@ -150,68 +273,21 @@ async def lifespan(app: FastAPI):
         _add_column_if_missing(conn, "policy", "source_text", "TEXT")
         _add_column_if_missing(conn, "calendarevent", "source_text", "TEXT")
         _add_column_if_missing(conn, "syllabus", "outline_json", "TEXT")
-        _add_column_if_missing(conn, "syllabus", "tables_json", "TEXT")
-        _add_column_if_missing(conn, "card", "tables_json", "TEXT")
-        _add_column_if_missing(conn, "card", "sections_meta_json", "TEXT")
-        _add_column_if_missing(conn, "card", "tailor_prompt", "TEXT")
-        _add_column_if_missing(conn, "card", "position", "INTEGER NOT NULL DEFAULT 0")
         _add_column_if_missing(conn, "calendarevent", "completed_at", "TIMESTAMP")
+        _add_column_if_missing(conn, "calendarevent", "actionable", "INTEGER NOT NULL DEFAULT 1")
+        _add_column_if_missing(conn, "calendarevent", "position", "INTEGER NOT NULL DEFAULT 0")
         _add_column_if_missing(conn, "task", "position", "INTEGER NOT NULL DEFAULT 0")
+        _add_column_if_missing(conn, "task", "tag_id", "INTEGER")
+        _add_column_if_missing(conn, "task", "starts_at", "TIMESTAMP")
+        _add_column_if_missing(conn, "tag", "is_system", "INTEGER NOT NULL DEFAULT 0")
+        _add_column_if_missing(conn, "tag", "system_key", "TEXT")
+    _seed_system_tags()
     yield
 
 
-app = FastAPI(title="StudyFlow", lifespan=lifespan)
+app = FastAPI(title="Compass", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
-
-
-def _render_text_with_tables(text: str, tables_json: Optional[str]) -> "Markup":
-    """Jinja filter: render Markdown text + replace [TABLE:N] markers with
-    rendered HTML tables. `tables_json` is the JSON-encoded list stored on
-    Syllabus or Card. Each non-table text segment is run through
-    python-markdown so bullets/paragraphs/headings/bold come out as proper
-    HTML, then the rendered tables are spliced in at marker positions."""
-    import html as _html
-    import markdown as _md
-    from markupsafe import Markup
-    if not text:
-        return Markup("")
-    try:
-        tables = json.loads(tables_json or "[]")
-    except (ValueError, TypeError):
-        tables = []
-
-    parts = _TABLE_MARKER_RE.split(text)
-    # split() interleaves: [text, idx, text, idx, ..., text]
-    out: list[str] = []
-    for i, part in enumerate(parts):
-        if i % 2 == 0:
-            stripped = part.strip()
-            if stripped:
-                out.append(_md.markdown(stripped, extensions=["sane_lists"]))
-        else:
-            try:
-                idx = int(part)
-                table = tables[idx]
-                rows = table.get("rows") if isinstance(table, dict) else None
-                if not rows:
-                    out.append(f"[TABLE:{part}]")
-                    continue
-                row_html = []
-                for r_i, row in enumerate(rows):
-                    cell_tag = "th" if r_i == 0 else "td"
-                    cells_html = "".join(
-                        f"<{cell_tag}>{_html.escape((c or '').strip())}</{cell_tag}>"
-                        for c in row
-                    )
-                    row_html.append(f"<tr>{cells_html}</tr>")
-                out.append(f'<table class="syllabus-table"><tbody>{"".join(row_html)}</tbody></table>')
-            except (ValueError, IndexError, TypeError):
-                out.append(f"[TABLE:{part}]")
-    return Markup("".join(out))
-
-
-templates.env.filters["render_text_with_tables"] = _render_text_with_tables
 
 
 def _static_v(path: str) -> str:
@@ -240,16 +316,16 @@ parse_jobs: dict[int, str] = {}  # syllabus_id -> "pending"|"running"|"done"|"er
 # ---- Auth ----
 
 def _token_matches(candidate: str) -> bool:
-    if not candidate or not STUDYFLOW_TOKEN:
+    if not candidate or not COMPASS_TOKEN:
         return False
-    return secrets.compare_digest(candidate, STUDYFLOW_TOKEN)
+    return secrets.compare_digest(candidate, COMPASS_TOKEN)
 
 
 def require_token(request: Request) -> None:
-    """Dependency: enforce auth on mutating routes if STUDYFLOW_TOKEN is set."""
-    if not STUDYFLOW_TOKEN:
+    """Dependency: enforce auth on mutating routes if COMPASS_TOKEN is set."""
+    if not COMPASS_TOKEN:
         return  # dev mode
-    header = request.headers.get("x-studyflow-token", "")
+    header = request.headers.get("x-compass-token", "")
     if _token_matches(header):
         return
     cookie = request.cookies.get(COOKIE_NAME, "")
@@ -258,11 +334,11 @@ def require_token(request: Request) -> None:
     qp = request.query_params.get("token", "")
     if _token_matches(qp):
         return
-    raise HTTPException(401, "Missing or invalid token. Set X-StudyFlow-Token header or visit /setup-token in a browser.")
+    raise HTTPException(401, "Missing or invalid token. Set X-Compass-Token header or visit /setup-token in a browser.")
 
 
 def has_valid_cookie(request: Request) -> bool:
-    if not STUDYFLOW_TOKEN:
+    if not COMPASS_TOKEN:
         return True
     return _token_matches(request.cookies.get(COOKIE_NAME, ""))
 
@@ -296,11 +372,15 @@ def event_sort_key(e) -> tuple:
 
 
 def parse_iso_dt(value) -> Optional[datetime]:
-    """Parse an ISO datetime string, attaching LOCAL_TZ if naive. Returns None on failure."""
+    """Parse an ISO datetime string, attaching LOCAL_TZ if naive. Returns None on failure.
+    Tolerates the `YYYY-MM-DDTHH:MM` form emitted by HTML <input type=datetime-local>
+    on Python <3.11 (whose fromisoformat is strict about seconds)."""
     if not value or not isinstance(value, str):
         return None
     try:
         cleaned = value.strip().replace("Z", "+00:00")
+        if _re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$", cleaned):
+            cleaned += ":00"
         dt = datetime.fromisoformat(cleaned)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=LOCAL_TZ)
@@ -309,292 +389,39 @@ def parse_iso_dt(value) -> Optional[datetime]:
         return None
 
 
-def _stitch_wrapped_cells(rows: list) -> list:
-    """Merge adjacent rows where the next non-blank row is a wrapped-cell
-    continuation of the previous one. When a long cell value spans a PDF page
-    break, pdfplumber emits the spillover as its own row (often after one or
-    more blank rows from the page boundary) with a single filled cell — we
-    fold that fragment back into the matching column of the previous row.
+def extract_pdf_text(path: Path) -> str:
+    """Pull plain text out of a PDF. dedupe_chars handles 'fake bold'
+    double-stamped glyphs that show up in many professor-authored syllabi
+    (cells like 'CCIISS33995500' come out as 'CIS 3950').
 
-    A row counts as a continuation when:
-    - exactly 1 cell is filled, the fragment is ≤ 60 chars, AND
-    - either (a) the previous row's same-column cell ends in hanging
-      punctuation (`-`, `/`, `,`, `&`, `:`, `(`, `[`), OR
-    - (b) the fragment itself starts with lowercase / hanging punctuation /
-      a sentence-continuing word (`and`, `or`, `with`, etc.)
-
-    Blank rows between the truncated row and its continuation are dropped
-    (they're page-boundary artifacts), but only when a continuation is
-    actually found; otherwise they stay in the output."""
-    if len(rows) < 2:
-        return rows
-
-    HANGING = "-/&,([:"
-
-    def _is_blank(row: list) -> bool:
-        return not any((c or "").strip() for c in row)
-
-    out: list[list] = []
-    i = 0
-    while i < len(rows):
-        merged = list(rows[i])
-        j = i + 1
-        while True:
-            # Look ahead past any blank rows for the next non-blank.
-            scan = j
-            while scan < len(rows) and _is_blank(rows[scan]):
-                scan += 1
-            if scan >= len(rows):
-                break
-            nxt = rows[scan]
-            filled = [(k, (c or "").strip()) for k, c in enumerate(nxt) if (c or "").strip()]
-            if len(filled) != 1:
-                break
-            col_idx, frag = filled[0]
-            if len(frag) > 60:
-                break
-
-            prev_cell = (merged[col_idx] or "").strip() if col_idx < len(merged) else ""
-            prev_ends_hanging = bool(prev_cell) and prev_cell[-1] in HANGING
-
-            first_char = frag[0]
-            looks_like_continuation = (
-                prev_ends_hanging
-                or first_char.islower()
-                or first_char in "/-,&)]"
-                or frag.lower().startswith(("and ", "or ", "with ", "the ", "of ", "in "))
-            )
-            if not looks_like_continuation:
-                break
-
-            prev_filled = sum(1 for c in merged if (c or "").strip())
-            if len(merged) and prev_filled / len(merged) < 0.5:
-                break
-
-            if col_idx < len(merged):
-                existing = (merged[col_idx] or "").strip()
-                merged[col_idx] = (existing + " " + frag).strip()
-            j = scan + 1  # advance past everything consumed (including blanks)
-        out.append(merged)
-        i = j
-    return out
-
-
-def _find_real_header_row(rows: list) -> int:
-    """Return the index of the first row that looks like a real column header
-    (most cells populated, each populated cell short). Returns -1 if no
-    header-like row is found in the first 6 rows.
-
-    Used to trim layout prose that pdfplumber sometimes glues to the front of
-    a real table (e.g., a section heading + descriptive paragraph immediately
-    above the actual grid). Without this trim, those rows pollute the table
-    cells and visibly bleed neighboring section text into our rendered HTML
-    table — the exact bug that prompted this function."""
-    for i, row in enumerate(rows[:6]):
-        cells = [(c or "").strip() for c in row]
-        if not cells:
-            continue
-        n_filled = sum(1 for c in cells if c)
-        n_short = sum(1 for c in cells if c and len(c) <= 50)
-        # At least 60% of cells populated AND every populated cell is short
-        # (prose paragraphs run long; column headers don't).
-        if n_filled / len(cells) >= 0.6 and n_short == n_filled:
-            return i
-    return -1
-
-
-def _looks_like_continuation(prev_rows: list, new_rows: list) -> bool:
-    """Heuristic: is `new_rows` a multi-page continuation of `prev_rows`
-    (no repeated header on the second page)? True when the first row of
-    new_rows looks like a body row, not a header — e.g., short cells,
-    digits, or content that fits the same shape as previous body rows.
-    Used to merge split tables in Simple Syllabus and similar templates."""
-    if not prev_rows or not new_rows:
-        return False
-    # Header rows usually have all cells populated; continuation body rows
-    # often don't. If the new table's first row has a blank cell while the
-    # previous header didn't, it's almost certainly a body row.
-    prev_header = prev_rows[0]
-    new_first = new_rows[0]
-    prev_header_all_filled = all((c or "").strip() for c in prev_header)
-    new_first_has_blank = any(not (c or "").strip() for c in new_first)
-    if prev_header_all_filled and new_first_has_blank:
-        return True
-    # If the previous body rows are short cells (e.g. grade letters or
-    # dates) and the new first row matches that pattern, likely continuation.
-    if len(prev_rows) > 1:
-        prev_body_first = prev_rows[1]
-        max_prev_cell = max((len((c or "").strip()) for c in prev_body_first), default=0)
-        max_new_cell = max((len((c or "").strip()) for c in new_first), default=0)
-        if max_prev_cell <= 40 and max_new_cell <= 40:
-            return True
-    return False
-
-
-def extract_pdf_text(path: Path) -> tuple[str, list[dict]]:
-    """Extract text + tables. dedupe_chars handles 'fake bold' double-stamped
-    glyphs that show up in many professor-authored syllabi.
-
-    For each table pdfplumber detects, we (a) append a list entry to the
-    returned tables list and (b) inject a `[TABLE:N]` marker into the page
-    text at the table's vertical position. Markers ride along through Grok
-    outline + summarization (we instruct Grok to preserve them) and are
-    swapped for rendered HTML tables at display time.
-
-    Returns (text_with_markers, tables) where tables is
-    [{"rows": [[cell, ...], ...]}, ...] and N indexes that list."""
+    No table detection — pdfplumber's plain extract_text() keeps schedule
+    grids inline as readable rows, which is what Grok needs to find every
+    quiz/lecture/deadline. The previous table-detection path stripped grid
+    cells out of the prose entirely, hiding most of the schedule from
+    extraction."""
     chunks: list[str] = []
-    tables: list[dict] = []
     with pdfplumber.open(path) as pdf:
         total = len(pdf.pages)
         for page in pdf.pages:
-            # Dedupe glyphs once and use the filtered view for both text and
-            # tables so cells like "CCIISS33995500" come out as "CIS 3950".
             try:
                 source = page.dedupe_chars()
             except Exception:
                 source = page
-
-            page_tables: list[tuple[float, str]] = []  # (top_y, marker)
-            accepted_bboxes: list[tuple] = []  # bboxes of tables we kept, used to filter chars
             try:
-                found = source.find_tables()
-            except Exception:
-                found = []
-            for tbl in found:
-                try:
-                    rows = tbl.extract()
-                except Exception:
-                    continue
-                if not rows or len(rows) < 2:
-                    continue
-                max_cols = max((len(r) for r in rows), default=0)
-                if max_cols < 2:
-                    continue
-
-                # Find the real header row. If the table starts with layout
-                # prose (a heading or paragraph above the actual grid),
-                # `header_idx` will be > 0 and we trim those rows. If we
-                # can't find a header at all, this isn't really a data table
-                # — skip it.
-                header_idx = _find_real_header_row(rows)
-                if header_idx == -1:
-                    continue
-                table_bbox_top = tbl.bbox[1] if hasattr(tbl, "bbox") else 0
-                if header_idx > 0:
-                    rows = rows[header_idx:]
-                    if len(rows) < 2:
-                        continue
-                    # Shrink the bbox top to the kept rows' top so the layout
-                    # prose above appears in regular text instead of being
-                    # filtered out as "inside the table region".
-                    try:
-                        kept_top = tbl.rows[header_idx].bbox[1]
-                        if kept_top > table_bbox_top:
-                            table_bbox_top = kept_top
-                    except (AttributeError, IndexError):
-                        pass
-
-                non_blank = sum(1 for r in rows for c in r if (c or "").strip())
-                if non_blank < 3:
-                    continue
-                body = rows[1:] if len(rows) > 1 else rows
-                if body:
-                    body_cells = [c for r in body for c in r]
-                    body_blank = sum(1 for c in body_cells if not (c or "").strip())
-                    if body_cells and body_blank / len(body_cells) > 0.5:
-                        continue
-
-                merged = False
-                if tables:
-                    prev_rows = tables[-1]["rows"]
-                    if prev_rows and len(prev_rows[0]) == len(rows[0]):
-                        if prev_rows[0] == rows[0]:
-                            tables[-1]["rows"].extend(rows[1:])
-                            tables[-1]["rows"] = _stitch_wrapped_cells(tables[-1]["rows"])
-                            merged = True
-                        elif _looks_like_continuation(prev_rows, rows):
-                            tables[-1]["rows"].extend(rows)
-                            tables[-1]["rows"] = _stitch_wrapped_cells(tables[-1]["rows"])
-                            merged = True
-                # Build the bbox we'll use for char filtering — substitutes
-                # the trimmed-table's top so layout prose above the real
-                # data isn't pulled into the table region.
-                if hasattr(tbl, "bbox"):
-                    bx0, _bt, bx1, bb = tbl.bbox
-                    use_bbox = (bx0, table_bbox_top, bx1, bb)
-                else:
-                    use_bbox = None
-
-                if merged:
-                    if use_bbox is not None:
-                        accepted_bboxes.append(use_bbox)
-                    continue
-
-                idx = len(tables)
-                tables.append({"rows": _stitch_wrapped_cells(rows)})
-                page_tables.append((table_bbox_top, f"[TABLE:{idx}]"))
-                if use_bbox is not None:
-                    accepted_bboxes.append(use_bbox)
-
-            # Extract text with characters inside accepted table bboxes removed,
-            # so the prose version of "A 100% / A- 92%..." doesn't duplicate
-            # what the rendered HTML table will show.
-            #
-            # The bbox is shrunk inward by a small margin before testing
-            # containment. pdfplumber's table bboxes often include a few
-            # points of padding above the visible grid (where rule lines
-            # extend), so a section heading sitting just above the table can
-            # have its baseline inside the raw bbox and disappear from the
-            # prose. Margin keeps headings safely on the outside.
-            BBOX_TOP_MARGIN = 6.0   # shrink top edge by this many points
-            BBOX_BOT_MARGIN = 3.0
-            BBOX_X_MARGIN = 2.0
-            try:
-                if accepted_bboxes:
-                    shrunk = [
-                        (x0 + BBOX_X_MARGIN, t0 + BBOX_TOP_MARGIN,
-                         x1 - BBOX_X_MARGIN, b1 - BBOX_BOT_MARGIN)
-                        for (x0, t0, x1, b1) in accepted_bboxes
-                    ]
-
-                    def _outside_tables(obj: dict) -> bool:
-                        x = (obj.get("x0", 0) + obj.get("x1", 0)) / 2
-                        y = (obj.get("top", 0) + obj.get("bottom", 0)) / 2
-                        for x0, t0, x1, b1 in shrunk:
-                            if t0 >= b1 or x0 >= x1:
-                                continue  # bbox shrunk past itself; skip
-                            if x0 <= x <= x1 and t0 <= y <= b1:
-                                return False
-                        return True
-                    text_source = source.filter(_outside_tables)
-                else:
-                    text_source = source
-                text = text_source.extract_text() or ""
+                text = source.extract_text() or ""
             except Exception:
                 text = page.extract_text() or ""
-
-            # Inject markers in document order. Without per-line y-positions we
-            # just append markers to the end of the page in their detected
-            # order, separated by blank lines so Grok treats them as their own
-            # paragraph. Good enough for syllabus tables (they typically sit
-            # alone on a page or at the end of a section).
-            page_tables.sort(key=lambda t: t[0])
             page_text = text.strip()
-            if page_tables:
-                marker_block = "\n\n".join(m for _, m in page_tables)
-                page_text = (page_text + "\n\n" + marker_block).strip() if page_text else marker_block
             if page_text:
                 chunks.append(page_text)
-
     log.info(
-        "extract_pdf_text: %d of %d pages had text, %d tables found (%s)",
-        len(chunks), total, len(tables), path.name,
+        "extract_pdf_text: %d of %d pages had text (%s)",
+        len(chunks), total, path.name,
     )
-    return "\n\n".join(chunks), tables
+    return "\n\n".join(chunks)
 
 
-SYLLABUS_SYSTEM_PROMPT = """You are a focused extractor for university course syllabi. The user does the heavy curation themselves by highlighting passages on a separate page; your job is narrow.
+SYLLABUS_SYSTEM_PROMPT = """You are an extractor for university course syllabi. The student needs full visibility into what's happening when, so they don't miss a deadline or walk into a lecture unprepared. Be inclusive, not conservative.
 
 INPUT: the full text of a syllabus.
 
@@ -607,46 +434,66 @@ UPPERCASE with one space between department prefix and number ("math 250" → "M
 Full course title as listed in the header. Don't include the course code, section, or term. Prefer the expanded title over a short one.
 
 # events
-Dated milestones the student needs on a calendar: exams, assignment/project due dates, presentation slots, drop deadlines. Each: {title, kind, starts_at, ends_at, source_text}.
+EVERY dated item the student would put on a calendar — actionable AND contextual. Each: {title, kind, actionable, starts_at, ends_at, source_text}.
 
-- kind: one of `exam`, `assignment`, `project`, `milestone`.
-- starts_at: naive ISO 8601 ("2026-09-15T18:00:00"). Date only → use 23:59:00 of that day.
-- ends_at: only when the syllabus gives an explicit duration ("Final Exam: Dec 14, 8-10am" → starts_at 08:00, ends_at 10:00); else null.
-- source_text: short verbatim quote (≤ 240 chars) from the syllabus showing where this came from. Null if you derived it.
+CAST A WIDE NET. Capture:
+- Submission deadlines: assignments, problem sets, papers, projects, lab reports, drafts, peer reviews, anything turned in.
+- Assessments: quizzes, exams, midterms, finals, oral exams, presentations.
+- Class meetings with topics or readings: lectures, discussion sections, labs, recitations, guest speakers.
+- Course logistics: drop/add deadlines, withdrawal deadlines, registration deadlines, holidays / no-class days.
+- One-off events: field trips, reviews, office-hours specials.
 
-DATE HANDLING — STRICT:
-- DO NOT INVENT DATES. "Week 5 — Midterm" with no explicit date → starts_at: null, put the descriptor in the title.
-- Skip recurring weekly work ("PSet due every Friday"). Capture only specific dated milestones.
-- Ignore syllabus-stated time zones; emit naive datetimes.
+If the syllabus lists each instance of a recurring item with its own date (Quiz 1 = Sep 10, Quiz 2 = Sep 17, …), emit ONE EVENT PER INSTANCE. Don't summarize them into one entry.
+
+# kind
+Lowercase noun describing what type it is, taken from the syllabus's own language. Examples: `quiz`, `exam`, `midterm`, `final`, `assignment`, `problem set`, `lab`, `project`, `paper`, `presentation`, `reading`, `lecture`, `discussion`, `recitation`, `holiday`, `deadline`. Use whatever fits — new kinds get auto-tagged after extraction. Prefer specific over generic (`quiz` over `assignment`).
+
+# actionable
+Boolean. `true` if the student has to do something on/by this date (submit, take an exam, give a presentation, drop a class, attend a special session). `false` if it's pure context — lecture topics with no associated submission, holidays, no-class days, optional study sessions, things that just inform the schedule. When uncertain, prefer `true` (better to surface than hide).
+
+# starts_at
+Naive ISO 8601 ("2026-09-15T18:00:00"). Date-only → 23:59:00 of that day for deadlines, 09:00:00 for class meetings without a stated time. DO NOT INVENT DATES. "Week 5 — Midterm" with no explicit date → starts_at: null, descriptor goes in title.
+
+# ends_at
+Only when the syllabus gives an explicit duration ("Final Exam: Dec 14, 8-10am" → starts_at 08:00, ends_at 10:00). Else null.
+
+# source_text
+Short verbatim quote (≤ 240 chars) showing where this came from. Null if derived.
+
+Ignore syllabus-stated time zones; emit naive datetimes. When uncertain about a date, prefer null over inventing.
 
 # Example
 
-INPUT (excerpted): "CS 101 - Intro to Programming. Spring 2026. Midterm Exam: March 15, 2026 at 6:00pm. Final Project Due: May 7, 2026. Final Project Presentations: May 10, 2026, 9am-12pm."
+INPUT (excerpted): "CS 101 - Intro to Programming. Spring 2026. Sep 8: Lecture — Variables. Sep 10: Quiz 1 (in class, 15min). Sep 15: Lecture — Control flow. Reading: ch.3. Sep 17: Quiz 2. Oct 5: Problem Set 1 due 11:59pm. Nov 1: No class (Fall break). Midterm Exam: March 15, 2026 at 6:00pm. Final Project Due: May 7, 2026."
 
 OUTPUT:
 {
   "course_code": "CS 101",
   "course_name": "Intro to Programming",
   "events": [
-    {"title": "Midterm Exam", "kind": "exam", "starts_at": "2026-03-15T18:00:00", "ends_at": null, "source_text": "Midterm Exam: March 15, 2026 at 6:00pm"},
-    {"title": "Final Project Due", "kind": "project", "starts_at": "2026-05-07T23:59:00", "ends_at": null, "source_text": "Final Project Due: May 7, 2026"},
-    {"title": "Final Project Presentations", "kind": "project", "starts_at": "2026-05-10T09:00:00", "ends_at": "2026-05-10T12:00:00", "source_text": "Final Project Presentations: May 10, 2026, 9am-12pm"}
+    {"title": "Lecture: Variables", "kind": "lecture", "actionable": false, "starts_at": "2026-09-08T09:00:00", "ends_at": null, "source_text": "Sep 8: Lecture — Variables"},
+    {"title": "Quiz 1", "kind": "quiz", "actionable": true, "starts_at": "2026-09-10T09:00:00", "ends_at": null, "source_text": "Sep 10: Quiz 1 (in class, 15min)"},
+    {"title": "Lecture: Control flow (read ch.3)", "kind": "lecture", "actionable": false, "starts_at": "2026-09-15T09:00:00", "ends_at": null, "source_text": "Sep 15: Lecture — Control flow. Reading: ch.3"},
+    {"title": "Quiz 2", "kind": "quiz", "actionable": true, "starts_at": "2026-09-17T09:00:00", "ends_at": null, "source_text": "Sep 17: Quiz 2"},
+    {"title": "Problem Set 1 due", "kind": "problem set", "actionable": true, "starts_at": "2026-10-05T23:59:00", "ends_at": null, "source_text": "Oct 5: Problem Set 1 due 11:59pm"},
+    {"title": "No class (Fall break)", "kind": "holiday", "actionable": false, "starts_at": "2026-11-01T09:00:00", "ends_at": null, "source_text": "Nov 1: No class (Fall break)"},
+    {"title": "Midterm Exam", "kind": "midterm", "actionable": true, "starts_at": "2026-03-15T18:00:00", "ends_at": null, "source_text": "Midterm Exam: March 15, 2026 at 6:00pm"},
+    {"title": "Final Project Due", "kind": "project", "actionable": true, "starts_at": "2026-05-07T23:59:00", "ends_at": null, "source_text": "Final Project Due: May 7, 2026"}
   ]
-}
-
-When uncertain, prefer null over inventing."""
+}"""
 
 
 # Pydantic models for upload-time extraction. Now narrow: only course identity
 # and dated events (the calendar feed needs structured dates). Everything else
 # the student cares about is captured per-passage via the highlight UI.
 
-EventKind = Literal["exam", "assignment", "project", "milestone"]
-
-
 class EventItem(BaseModel):
     title: str
-    kind: EventKind
+    # Free-form so Grok can return whatever the syllabus says (quiz, lab,
+    # problem set, reading, lecture, etc.). New kinds get auto-tagged
+    # post-extraction in process_syllabus.
+    kind: str
+    actionable: bool = True  # False = context-only (lecture topic, holiday)
     starts_at: Optional[str] = None
     ends_at: Optional[str] = None
     source_text: Optional[str] = None
@@ -738,16 +585,36 @@ def process_syllabus(syllabus_id: int) -> None:
             session.exec(delete(CalendarEvent).where(CalendarEvent.class_id == cls.id))
             session.flush()
 
+            # First pass: auto-create system tags for any new kinds Grok
+            # returned (quiz, lab, holiday, ...) so the collector can resolve
+            # color + name for them right away.
+            kinds_seen: set[str] = set()
             for ev in data.get("events", []) or []:
                 if not isinstance(ev, dict):
                     continue
+                k = str(ev.get("kind") or "milestone").lower().strip() or "milestone"
+                kinds_seen.add(k)
+            for k in kinds_seen:
+                _ensure_system_tag(session, k)
+            session.flush()
+
+            for ev in data.get("events", []) or []:
+                if not isinstance(ev, dict):
+                    continue
+                kind = str(ev.get("kind") or "milestone").lower().strip() or "milestone"
+                actionable = ev.get("actionable")
+                # Default to actionable when the model omits the field — better
+                # to surface an item than hide it.
+                if not isinstance(actionable, bool):
+                    actionable = True
                 session.add(CalendarEvent(
                     class_id=cls.id,
                     class_code=cls.code,
                     title=str(ev.get("title") or "Untitled"),
                     starts_at=parse_iso_dt(ev.get("starts_at")),
                     ends_at=parse_iso_dt(ev.get("ends_at")),
-                    kind=str(ev.get("kind") or "milestone"),
+                    kind=kind,
+                    actionable=actionable,
                     source_text=ev.get("source_text") or None,
                 ))
 
@@ -763,14 +630,14 @@ def process_syllabus(syllabus_id: int) -> None:
 @app.get("/setup-token", response_class=HTMLResponse)
 def setup_token_page(request: Request):
     return templates.TemplateResponse(request, "setup_token.html", {
-        "auth_required": bool(STUDYFLOW_TOKEN),
+        "auth_required": bool(COMPASS_TOKEN),
         "already_set": has_valid_cookie(request),
     })
 
 
 @app.post("/setup-token")
 def setup_token_submit(token: str = Form(...)):
-    if STUDYFLOW_TOKEN and not _token_matches(token.strip()):
+    if COMPASS_TOKEN and not _token_matches(token.strip()):
         raise HTTPException(401, "Wrong token")
     resp = RedirectResponse("/", status_code=303)
     resp.set_cookie(
@@ -785,7 +652,7 @@ def setup_token_submit(token: str = Form(...)):
 
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):
-    if STUDYFLOW_TOKEN and not has_valid_cookie(request):
+    if COMPASS_TOKEN and not has_valid_cookie(request):
         return RedirectResponse("/setup-token", status_code=303)
     today_start = _today_local()
     today_end = today_start + timedelta(days=1)
@@ -793,12 +660,14 @@ def home(request: Request):
     overdue = _collect_overdue()
     with Session(engine, expire_on_commit=False) as session:
         classes = session.exec(select(Class).order_by(Class.code)).all()
+        all_tags = session.exec(select(Tag).order_by(Tag.name)).all()
     return templates.TemplateResponse(request, "home.html", {
         "classes": classes,
         "today": today_start,
         "today_items": today_items,
         "overdue": overdue,
         "default_class_id": (classes[0].id if classes else None),
+        "all_tags": all_tags,
     })
 
 
@@ -822,7 +691,7 @@ def classes_json():
 
 @app.get("/classes/{class_id}", response_class=HTMLResponse)
 def class_detail(request: Request, class_id: int):
-    if STUDYFLOW_TOKEN and not has_valid_cookie(request):
+    if COMPASS_TOKEN and not has_valid_cookie(request):
         return RedirectResponse("/setup-token", status_code=303)
     with Session(engine) as session:
         cls = session.get(Class, class_id)
@@ -839,6 +708,7 @@ def class_detail(request: Request, class_id: int):
     overdue = _collect_overdue()
     with Session(engine, expire_on_commit=False) as session:
         all_classes = session.exec(select(Class).order_by(Class.code)).all()
+        all_tags = session.exec(select(Tag).order_by(Tag.name)).all()
     return templates.TemplateResponse(request, "class.html", {
         "cls": cls,
         "events": events,
@@ -849,6 +719,7 @@ def class_detail(request: Request, class_id: int):
         "overdue": overdue,
         "all_classes": all_classes,
         "default_class_id": cls.id,
+        "all_tags": all_tags,
     })
 
 
@@ -885,7 +756,7 @@ async def syllabus_upload(
     upload_path.write_bytes(content)
 
     try:
-        raw_text, tables = extract_pdf_text(upload_path)
+        raw_text = extract_pdf_text(upload_path)
     except Exception as e:
         raise HTTPException(400, f"Could not extract text from PDF: {e}")
 
@@ -901,7 +772,6 @@ async def syllabus_upload(
             filename=filename,
             raw_text=raw_text,
             parsed_at=datetime.now(timezone.utc),
-            tables_json=json.dumps(tables) if tables else None,
         )
         session.add(syllabus)
         session.commit()
@@ -964,7 +834,12 @@ def edit_event(
         if not ev:
             raise HTTPException(404)
         ev.title = title.strip() or "Untitled"
-        ev.kind = kind.strip() or "milestone"
+        new_kind = (kind.strip() or "milestone").lower()
+        ev.kind = new_kind
+        # First-time use of a kind from manual edit auto-creates its tag,
+        # same as Grok-extracted kinds. Without this the collector finds
+        # no system tag and the pill renders uncolored.
+        _ensure_system_tag(session, new_kind)
         ev.starts_at = parse_iso_dt(starts_at) if starts_at else None
         ev.ends_at = parse_iso_dt(ends_at) if ends_at else None
         cls_id = ev.class_id
@@ -973,8 +848,36 @@ def edit_event(
     return RedirectResponse(f"/classes/{cls_id}", status_code=303)
 
 
+@app.post("/events/{event_id}/clone", dependencies=[Depends(require_token)])
+def clone_event(event_id: int, request: Request):
+    """Duplicate an event so it shows on the calendar as a separate row.
+    Same class, same title/kind/starts_at/ends_at — fresh id. If the
+    user clicks twice and gets two copies, that's on them to clean up."""
+    with Session(engine) as session:
+        ev = session.get(CalendarEvent, event_id)
+        if not ev:
+            raise HTTPException(404)
+        copy = CalendarEvent(
+            class_id=ev.class_id,
+            class_code=ev.class_code,
+            title=ev.title,
+            starts_at=ev.starts_at,
+            ends_at=ev.ends_at,
+            kind=ev.kind,
+            source_text=ev.source_text,
+        )
+        session.add(copy)
+        session.commit()
+        session.refresh(copy)
+        cls_id = copy.class_id
+        new_id = copy.id
+    if "application/json" in request.headers.get("accept", ""):
+        return JSONResponse({"id": new_id})
+    return RedirectResponse(f"/classes/{cls_id}", status_code=303)
+
+
 @app.post("/events/{event_id}/delete", dependencies=[Depends(require_token)])
-def delete_event(event_id: int):
+def delete_event(event_id: int, request: Request):
     with Session(engine) as session:
         ev = session.get(CalendarEvent, event_id)
         if not ev:
@@ -982,142 +885,14 @@ def delete_event(event_id: int):
         cls_id = ev.class_id
         session.delete(ev)
         session.commit()
+    if "application/json" in request.headers.get("accept", ""):
+        return JSONResponse({"deleted": event_id})
     return RedirectResponse(f"/classes/{cls_id}", status_code=303)
 
 
 # ---- Helpers shared by PDF table marker rendering ----
 
-MAX_PASSAGE_CHARS = 16000  # rough cap on what we send to Grok per request
-
 import re as _re
-
-_TABLE_MARKER_RE = _re.compile(r"\[TABLE:(\d+)\]")
-
-
-# ---- Routes: PDF viewer + AI transform sandbox ----
-
-
-def _format_tables_for_cross_reference(tables_json: Optional[str]) -> str:
-    """Render a syllabus's pdfplumber-detected tables as markdown blocks
-    suitable for inclusion in a Grok prompt. Returns empty string if
-    there are no tables. Capped so very large syllabi don't blow the
-    context window."""
-    if not tables_json:
-        return ""
-    try:
-        tables = json.loads(tables_json)
-    except (ValueError, TypeError):
-        return ""
-    if not isinstance(tables, list) or not tables:
-        return ""
-    blocks: list[str] = []
-    budget = MAX_PASSAGE_CHARS // 2  # leave room for user's highlight
-    used = 0
-    for i, t in enumerate(tables):
-        rows = (t or {}).get("rows") if isinstance(t, dict) else None
-        if not rows:
-            continue
-        block_lines = [f"\nTable {i}:"]
-        for r in rows:
-            cells = [(c or "").strip().replace("\n", " ") for c in r]
-            block_lines.append("| " + " | ".join(cells) + " |")
-        block = "\n".join(block_lines)
-        if used + len(block) > budget:
-            break
-        blocks.append(block)
-        used += len(block)
-    if not blocks:
-        return ""
-    return ("\n\nSTRUCTURED TABLES (cross-reference, detected by automated parser):"
-            + "".join(blocks))
-
-
-TEST_TRANSFORM_SYSTEM_PROMPT = """You transform a snippet of text the user highlighted from their syllabus, following their instruction.
-
-OUTPUT: markdown only. No preamble like "Here's the transformed text:".
-
-==============================================================
-CRITICAL — STRUCTURED TABLES ARE AUTHORITATIVE
-==============================================================
-The user message may include a section labelled "STRUCTURED TABLES (cross-reference)". These were extracted from the same PDF by a deterministic table parser. When one of them matches the user's highlight, it IS the answer — your job is to print it, not to rebuild it.
-
-BEFORE responding, do this check:
-1. Scan each structured table.
-2. Does any structured table share content with the highlighted text? (matching column headers, or row labels appearing in both)
-3. If YES — that table IS the answer the user wants. Output it as-is in markdown pipe-table form:
-   - SAME column count. Do not merge or split columns.
-   - SAME column names, in the SAME order.
-   - EVERY row from the structured table, in the SAME order, no rows added or dropped.
-   - EVERY cell value character-for-character. Do not abbreviate ("< 95" stays "< 95"), do not round, do not "clean up" punctuation.
-   - The user's instruction ("clean", "no colors", "simple", "make a table") is satisfied automatically by markdown format. They want different APPEARANCE, not different DATA.
-4. If NO structured table matches — ignore the cross-reference entirely and work only from the highlighted text below.
-
-==============================================================
-GENERAL RULES (apply when no structured table matches)
-==============================================================
-- Follow the user's instruction faithfully. Examples: "simplify this", "make a clean table", "bullet list", "summarize in 3 lines".
-- DO NOT invent content. If the snippet doesn't contain what the user asks about, say so in one sentence.
-- For tables, use markdown pipe-table syntax (`| col | col |\n|---|---|`).
-- Preserve EXACTLY: names, emails, phone numbers, room numbers, dates, times, percentages, dollar amounts, URLs.
-- Strip noise like "Page X of Y", repeated headers, or copy-paste artifacts.
-- Output the transformed content only — no commentary.
-"""
-
-
-@app.post("/test/transform", dependencies=[Depends(require_token)])
-async def test_transform(request: Request):
-    """Sandbox endpoint: take user-selected text + an instruction,
-    return markdown. No persistence. If `syllabus_id` is provided, the
-    syllabus's pdfplumber-detected tables are sent as cross-reference
-    so Grok can fill in cells the browser's copy missed."""
-    payload = await request.json()
-    text = (payload.get("text") or "").strip()
-    prompt = (payload.get("prompt") or "").strip()
-    raw_sid = payload.get("syllabus_id")
-    if not text:
-        raise HTTPException(400, "Selected text is empty")
-    if not prompt:
-        raise HTTPException(400, "Instruction is required")
-    if len(text) > MAX_PASSAGE_CHARS:
-        text = text[:MAX_PASSAGE_CHARS]
-
-    cross_ref = ""
-    if raw_sid is not None:
-        try:
-            sid = int(raw_sid)
-        except (TypeError, ValueError):
-            sid = None
-        if sid is not None:
-            with Session(engine) as session:
-                syllabus = session.get(Syllabus, sid)
-                if syllabus:
-                    cross_ref = _format_tables_for_cross_reference(syllabus.tables_json)
-
-    api_key = os.environ.get("XAI_API_KEY", "").strip()
-    if not api_key:
-        raise HTTPException(500, "XAI_API_KEY is not set")
-    try:
-        client = XAIClient(api_key=api_key)
-        chat = client.chat.create(
-            model=XAI_MODEL,
-            messages=[xai_system(TEST_TRANSFORM_SYSTEM_PROMPT)],
-        )
-        chat.append(xai_user(
-            f"Instruction: {prompt}\n\n---\n\nHighlighted text:\n{text}{cross_ref}"
-        ))
-        response = chat.sample()
-        out = (response.content or "").strip()
-        if not out:
-            raise HTTPException(502, "Grok returned an empty response")
-    except grpc.RpcError as e:
-        raise HTTPException(502, f"Grok call failed: {_grpc_error_message(e)}")
-
-    rendered = _render_text_with_tables(out, None)
-    return JSONResponse({
-        "markdown": out,
-        "html": str(rendered),
-        "cross_reference_used": bool(cross_ref),
-    })
 
 
 # ---- Routes: Tasks ----
@@ -1137,23 +912,50 @@ def _to_local(dt: Optional[datetime]) -> Optional[datetime]:
     return dt.astimezone(LOCAL_TZ)
 
 
+def _normalize_task_range(starts_at: str, due_at: str) -> tuple[Optional[datetime], Optional[datetime]]:
+    """Coerce raw ISO strings into a (starts_dt, due_dt) pair where:
+       - starts_dt is None unless the task is an actual range,
+       - if only one was supplied, it becomes due_dt (a single-date task),
+       - if both were supplied in reverse order, swap them so due is later."""
+    starts_dt = parse_iso_dt(starts_at) if starts_at else None
+    due_dt = parse_iso_dt(due_at) if due_at else None
+    if starts_dt and not due_dt:
+        starts_dt, due_dt = None, starts_dt
+    if starts_dt and due_dt and starts_dt > due_dt:
+        starts_dt, due_dt = due_dt, starts_dt
+    if starts_dt and due_dt and starts_dt == due_dt:
+        starts_dt = None
+    return starts_dt, due_dt
+
+
 @app.post("/classes/{class_id}/tasks", dependencies=[Depends(require_token)])
 async def create_task(class_id: int, request: Request,
-                      title: str = Form(...), due_at: str = Form("")):
+                      title: str = Form(...), due_at: str = Form(""),
+                      starts_at: str = Form(""), tag_id: str = Form("")):
     """Create a manual task on a class. Form-post adds via the class sidebar;
     AJAX clients get JSON, plain forms get a redirect (preserves no-JS path)."""
     title = title.strip()
     if not title:
         raise HTTPException(400, "Title required")
-    due_dt = parse_iso_dt(due_at) if due_at else None
+    starts_dt, due_dt = _normalize_task_range(starts_at, due_at)
+    tag_pk: Optional[int] = None
+    if tag_id:
+        try:
+            tag_pk = int(tag_id)
+        except ValueError:
+            tag_pk = None
     with Session(engine) as session:
         cls = session.get(Class, class_id)
         if not cls:
             raise HTTPException(404, "Class not found")
+        if tag_pk is not None and not session.get(Tag, tag_pk):
+            tag_pk = None  # silently drop bad tag id
         task = Task(
             class_id=class_id,
             title=title,
+            starts_at=starts_dt,
             due_at=due_dt,
+            tag_id=tag_pk,
             created_at=datetime.now(timezone.utc),
         )
         session.add(task)
@@ -1167,6 +969,37 @@ async def create_task(class_id: int, request: Request,
                 "completed_at": None,
             })
     return RedirectResponse(f"/classes/{class_id}", status_code=303)
+
+
+@app.get("/tags.json", dependencies=[Depends(require_token)])
+def list_tags():
+    with Session(engine) as session:
+        tags = session.exec(
+            select(Tag).order_by(Tag.is_system.desc(), Tag.name)
+        ).all()
+        return JSONResponse([
+            {"id": t.id, "name": t.name, "color": t.color, "is_system": t.is_system}
+            for t in tags
+        ])
+
+
+_HEX_COLOR_RE = _re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+@app.post("/tags", dependencies=[Depends(require_token)])
+async def create_tag(name: str = Form(...), color: str = Form(...)):
+    name = name.strip()
+    color = color.strip()
+    if not name:
+        raise HTTPException(400, "Name required")
+    if not _HEX_COLOR_RE.match(color):
+        raise HTTPException(400, "Color must be #rrggbb hex")
+    with Session(engine) as session:
+        tag = Tag(name=name, color=color)
+        session.add(tag)
+        session.commit()
+        session.refresh(tag)
+        return JSONResponse({"id": tag.id, "name": tag.name, "color": tag.color})
 
 
 @app.post("/tasks/{task_id}/toggle", dependencies=[Depends(require_token)])
@@ -1199,18 +1032,36 @@ def toggle_event(event_id: int):
 
 @app.post("/tasks/{task_id}/edit", dependencies=[Depends(require_token)])
 async def edit_task(task_id: int, request: Request,
-                    title: str = Form(...), due_at: str = Form("")):
-    """Update title and/or due_at on an existing task. AJAX returns JSON."""
+                    title: str = Form(...), due_at: str = Form(""),
+                    starts_at: str = Form(""),
+                    tag_id: str = Form("__unset__")):
+    """Update title, due_at, and (optionally) tag_id on a task. The form
+    sends tag_id as '' for 'no tag', or a numeric id. The sentinel
+    '__unset__' (default) means 'don't touch the tag' — so an old client
+    that doesn't send the field still works."""
     title = title.strip()
     if not title:
         raise HTTPException(400, "Title required")
-    due_dt = parse_iso_dt(due_at) if due_at else None
+    starts_dt, due_dt = _normalize_task_range(starts_at, due_at)
     with Session(engine) as session:
         t = session.get(Task, task_id)
         if not t:
             raise HTTPException(404)
         t.title = title
+        t.starts_at = starts_dt
         t.due_at = due_dt
+        if tag_id != "__unset__":
+            if tag_id == "":
+                t.tag_id = None
+            else:
+                try:
+                    tpk = int(tag_id)
+                except ValueError:
+                    tpk = None
+                if tpk is not None and session.get(Tag, tpk):
+                    t.tag_id = tpk
+                else:
+                    t.tag_id = None
         session.add(t)
         session.commit()
         session.refresh(t)
@@ -1224,27 +1075,88 @@ async def edit_task(task_id: int, request: Request,
     return RedirectResponse(f"/classes/{t.class_id}", status_code=303)
 
 
+@app.post("/tags/{tag_id}/edit", dependencies=[Depends(require_token)])
+async def edit_tag(tag_id: int, name: str = Form(...), color: str = Form(...)):
+    """Rename and/or recolor a tag. System tags can be edited (their
+    `system_key` stays canonical so events keep matching), but cannot
+    be deleted — see delete_tag."""
+    name = name.strip()
+    color = color.strip()
+    if not name:
+        raise HTTPException(400, "Name required")
+    if not _HEX_COLOR_RE.match(color):
+        raise HTTPException(400, "Color must be #rrggbb hex")
+    with Session(engine) as session:
+        tag = session.get(Tag, tag_id)
+        if not tag:
+            raise HTTPException(404)
+        tag.name = name
+        tag.color = color
+        # system_key is intentionally NOT touched — that's the key the
+        # collector uses to keep events linked to this tag across renames.
+        session.add(tag)
+        session.commit()
+        session.refresh(tag)
+        return JSONResponse({"id": tag.id, "name": tag.name, "color": tag.color})
+
+
+@app.post("/tags/{tag_id}/delete", dependencies=[Depends(require_token)])
+async def delete_tag(tag_id: int):
+    with Session(engine) as session:
+        tag = session.get(Tag, tag_id)
+        if not tag:
+            raise HTTPException(404)
+        if tag.is_system:
+            raise HTTPException(400, "System tags cannot be deleted")
+        # Null out tag_id on any tasks that reference this tag.
+        for t in session.exec(select(Task).where(Task.tag_id == tag_id)).all():
+            t.tag_id = None
+            session.add(t)
+        session.delete(tag)
+        session.commit()
+        return JSONResponse({"deleted": tag_id})
+
+
 @app.post("/tasks/reorder", dependencies=[Depends(require_token)])
 async def reorder_tasks(request: Request):
-    """Persist drag-to-reorder priority. Body: {task_ids: [...]} — order in
-    list becomes position 0..N-1 for the given tasks. IDs not in the body
-    are left alone."""
+    """Persist drag-to-reorder priority across tasks AND events. Body shape:
+       {items: [{kind:'task'|'event', id:int}, ...]}
+       Older clients may still send {task_ids:[...]}; we treat that as
+       all-tasks for backwards compat. Position 0..N-1 is assigned in the
+       order received; non-listed rows are left alone."""
     payload = await request.json()
-    raw_ids = payload.get("task_ids") or []
-    if not isinstance(raw_ids, list):
-        raise HTTPException(400, "task_ids must be a list")
-    try:
-        task_ids = [int(i) for i in raw_ids]
-    except (TypeError, ValueError):
-        raise HTTPException(400, "task_ids entries must be integers")
+    raw_items = payload.get("items")
+    if raw_items is None:
+        # Legacy: {task_ids: [...]}
+        raw_ids = payload.get("task_ids") or []
+        if not isinstance(raw_ids, list):
+            raise HTTPException(400, "task_ids must be a list")
+        try:
+            raw_items = [{"kind": "task", "id": int(i)} for i in raw_ids]
+        except (TypeError, ValueError):
+            raise HTTPException(400, "task_ids entries must be integers")
+    if not isinstance(raw_items, list):
+        raise HTTPException(400, "items must be a list")
     with Session(engine) as session:
         updated = 0
-        for pos, tid in enumerate(task_ids):
-            t = session.get(Task, tid)
-            if t is None:
+        for pos, entry in enumerate(raw_items):
+            if not isinstance(entry, dict):
                 continue
-            t.position = pos
-            session.add(t)
+            kind = entry.get("kind")
+            try:
+                eid = int(entry.get("id"))
+            except (TypeError, ValueError):
+                continue
+            if kind == "task":
+                row = session.get(Task, eid)
+            elif kind == "event":
+                row = session.get(CalendarEvent, eid)
+            else:
+                continue
+            if row is None:
+                continue
+            row.position = pos
+            session.add(row)
             updated += 1
         session.commit()
     return JSONResponse({"reordered": updated})
@@ -1274,39 +1186,94 @@ def _collect_items_in_range(start: datetime, end: datetime) -> dict:
 
     def _add(cls: "Class", kind: str, item_id: int, title: str,
              when: Optional[datetime], completed: bool,
-             position: int = 0, sub_kind: Optional[str] = None):
+             position: int = 0, sub_kind: Optional[str] = None,
+             tag_color: Optional[str] = None, tag_name: Optional[str] = None,
+             tag_id: Optional[int] = None, tag_is_system: bool = False,
+             sub_kind_color: Optional[str] = None,
+             sub_kind_id: Optional[int] = None,
+             starts_at: Optional[datetime] = None,
+             is_range: bool = False, is_range_day: bool = False,
+             actionable: bool = True):
         slot = out.setdefault(cls.id, {"cls": cls, "items": []})
         slot["items"].append({
             "kind": kind,
             "sub_kind": sub_kind,
+            "sub_kind_color": sub_kind_color,
+            "sub_kind_id": sub_kind_id,
             "id": item_id,
             "class_id": cls.id,
             "title": title,
             "due_at": when,
+            "starts_at": starts_at,
+            "is_range": is_range,
+            "is_range_day": is_range_day,
+            "actionable": actionable,
             "completed": completed,
             "position": position,
+            "tag_color": tag_color,
+            "tag_name": tag_name,
+            "tag_id": tag_id,
+            "tag_is_system": tag_is_system,
         })
 
     with Session(engine, expire_on_commit=False) as session:
+        sys_tag_by_key = {
+            t.system_key: t
+            for t in session.exec(select(Tag).where(Tag.is_system == True)).all()
+            if t.system_key
+        }
         for cls in session.exec(select(Class)).all():
             for t in cls.tasks:
-                if t.due_at is None:
-                    # No due date — show on today only if uncompleted (acts
+                tcolor = t.tag.color if t.tag else None
+                tname = t.tag.name if t.tag else None
+                tpk = t.tag.id if t.tag else None
+                tsys = t.tag.is_system if t.tag else False
+                tag_kw = dict(tag_color=tcolor, tag_name=tname,
+                              tag_id=tpk, tag_is_system=tsys)
+                if t.due_at is None and t.starts_at is None:
+                    # No dates — show on today only if uncompleted (acts
                     # like an open backlog item)
                     if start <= _today_local() < end and not t.completed_at:
-                        _add(cls, "task", t.id, t.title, None, False, t.position or 0)
+                        _add(cls, "task", t.id, t.title, None, False,
+                             t.position or 0, **tag_kw)
+                    continue
+                # Range tasks: emit one entry per day from starts_at.date()
+                # through due_at.date() that falls in [start, end). Every
+                # entry keeps the *actual* due_at and starts_at — only
+                # is_range_day differs day-to-day — so the edit modal
+                # repopulates correctly no matter which day the user clicks.
+                if t.starts_at is not None and t.due_at is not None:
+                    starts_local = _to_local(t.starts_at)
+                    due_local = _to_local(t.due_at)
+                    last_date = due_local.date()
+                    d = starts_local.date()
+                    while d <= last_date:
+                        day_start = datetime.combine(d, time.min, tzinfo=LOCAL_TZ)
+                        day_end = day_start + timedelta(days=1)
+                        if day_start < end and day_end > start:
+                            is_deadline = (d == last_date)
+                            _add(cls, "task", t.id, t.title, due_local,
+                                 t.completed_at is not None, t.position or 0,
+                                 starts_at=starts_local, is_range=True,
+                                 is_range_day=not is_deadline, **tag_kw)
+                        d += timedelta(days=1)
                     continue
                 local_due = _to_local(t.due_at)
                 if start <= local_due < end:
                     _add(cls, "task", t.id, t.title, local_due,
-                         t.completed_at is not None, t.position or 0)
+                         t.completed_at is not None, t.position or 0, **tag_kw)
             for ev in cls.events:
                 if ev.starts_at is None:
                     continue
                 local_when = _to_local(ev.starts_at)
                 if start <= local_when < end:
+                    sys_tag = sys_tag_by_key.get(ev.kind)
                     _add(cls, "event", ev.id, ev.title, local_when,
-                         ev.completed_at is not None, 0, sub_kind=ev.kind)
+                         ev.completed_at is not None, ev.position or 0,
+                         sub_kind=sys_tag.name if sys_tag else ev.kind,
+                         sub_kind_color=sys_tag.color if sys_tag else None,
+                         sub_kind_id=sys_tag.id if sys_tag else None,
+                         actionable=ev.actionable)
     # Sort: position first (user's drag priority), then due time.
     for slot in out.values():
         slot["items"].sort(key=lambda it: (
@@ -1322,6 +1289,11 @@ def _collect_overdue() -> dict:
     now = datetime.now(LOCAL_TZ)
     out: dict[int, dict] = {}
     with Session(engine, expire_on_commit=False) as session:
+        sys_tag_by_key = {
+            t.system_key: t
+            for t in session.exec(select(Tag).where(Tag.is_system == True)).all()
+            if t.system_key
+        }
         for cls in session.exec(select(Class)).all():
             for t in cls.tasks:
                 if t.completed_at:
@@ -1331,23 +1303,48 @@ def _collect_overdue() -> dict:
                 local_due = _to_local(t.due_at)
                 if local_due < now and local_due >= now - timedelta(days=30):
                     out.setdefault(cls.id, {"cls": cls, "items": []})["items"].append({
-                        "kind": "task", "sub_kind": None, "id": t.id,
+                        "kind": "task", "sub_kind": None, "sub_kind_color": None,
+                        "sub_kind_id": None,
+                        "id": t.id,
                         "class_id": cls.id, "title": t.title,
                         "due_at": local_due, "completed": False,
+                        "starts_at": _to_local(t.starts_at) if t.starts_at else None,
+                        "is_range": t.starts_at is not None,
+                        "is_range_day": False,
+                        "actionable": True,
                         "position": t.position or 0,
+                        "tag_color": t.tag.color if t.tag else None,
+                        "tag_name": t.tag.name if t.tag else None,
+                        "tag_id": t.tag.id if t.tag else None,
+                        "tag_is_system": t.tag.is_system if t.tag else False,
                     })
             for ev in cls.events:
                 if ev.completed_at:
                     continue
                 if ev.starts_at is None:
                     continue
+                # Non-actionable events (past lectures, holidays) aren't
+                # "overdue" — nothing to chase. Skip.
+                if not ev.actionable:
+                    continue
                 local_when = _to_local(ev.starts_at)
                 if local_when < now and local_when >= now - timedelta(days=30):
+                    sys_tag = sys_tag_by_key.get(ev.kind)
                     out.setdefault(cls.id, {"cls": cls, "items": []})["items"].append({
-                        "kind": "event", "sub_kind": ev.kind, "id": ev.id,
+                        "kind": "event",
+                        "sub_kind": sys_tag.name if sys_tag else ev.kind,
+                        "sub_kind_color": sys_tag.color if sys_tag else None,
+                        "sub_kind_id": sys_tag.id if sys_tag else None,
+                        "id": ev.id,
                         "class_id": cls.id, "title": ev.title,
                         "due_at": local_when, "completed": False,
-                        "position": 0,
+                        "starts_at": None, "is_range": False, "is_range_day": False,
+                        "actionable": True,
+                        "position": ev.position or 0,
+                        "tag_color": None,
+                        "tag_name": None,
+                        "tag_id": None,
+                        "tag_is_system": False,
                     })
     for slot in out.values():
         slot["items"].sort(key=lambda it: (it["position"], it["due_at"] or datetime.max.replace(tzinfo=LOCAL_TZ)))
@@ -1357,7 +1354,7 @@ def _collect_overdue() -> dict:
 @app.get("/today", response_class=HTMLResponse)
 def today_view(request: Request):
     """Tasks and events due today, plus anything overdue."""
-    if STUDYFLOW_TOKEN and not has_valid_cookie(request):
+    if COMPASS_TOKEN and not has_valid_cookie(request):
         return RedirectResponse("/setup-token", status_code=303)
     today_start = _today_local()
     today_end = today_start + timedelta(days=1)
@@ -1371,26 +1368,56 @@ def today_view(request: Request):
 
 
 @app.get("/week", response_class=HTMLResponse)
-def week_view(request: Request):
-    """Next two weeks' items, grouped by day → class."""
-    if STUDYFLOW_TOKEN and not has_valid_cookie(request):
+def week_view(request: Request, month: Optional[str] = None):
+    """Month-grid view (Mon-Sun, 6 weeks) for the requested YYYY-MM.
+    Defaults to the current month."""
+    if COMPASS_TOKEN and not has_valid_cookie(request):
         return RedirectResponse("/setup-token", status_code=303)
     today_start = _today_local()
-    # Two-week window starts on this week's Monday.
-    monday = today_start - timedelta(days=today_start.weekday())
+    # Parse the requested month; fall back to today's month on bad input.
+    target_year, target_month = today_start.year, today_start.month
+    if month:
+        try:
+            y, m = month.split("-")
+            ty, tm = int(y), int(m)
+            if 1 <= tm <= 12:
+                target_year, target_month = ty, tm
+        except (ValueError, AttributeError):
+            pass
+    first_of_month = datetime(target_year, target_month, 1, tzinfo=LOCAL_TZ)
+    # Grid starts on the Monday on-or-before the 1st.
+    grid_start = first_of_month - timedelta(days=first_of_month.weekday())
     days = []
-    for i in range(14):
-        day_start = monday + timedelta(days=i)
+    for i in range(42):  # 6 weeks × 7 days
+        day_start = grid_start + timedelta(days=i)
         day_end = day_start + timedelta(days=1)
         items_by_class = _collect_items_in_range(day_start, day_end)
         days.append({
             "date": day_start,
+            "in_month": day_start.month == target_month,
             "is_today": day_start == today_start,
             "items_by_class": items_by_class,
         })
+    # Prev / next month nav.
+    if target_month == 1:
+        prev_y, prev_m = target_year - 1, 12
+    else:
+        prev_y, prev_m = target_year, target_month - 1
+    if target_month == 12:
+        next_y, next_m = target_year + 1, 1
+    else:
+        next_y, next_m = target_year, target_month + 1
+    with Session(engine, expire_on_commit=False) as session:
+        all_classes = session.exec(select(Class).order_by(Class.code)).all()
+        all_tags = session.exec(select(Tag).order_by(Tag.name)).all()
     return templates.TemplateResponse(request, "week.html", {
-        "monday": monday,
+        "first_of_month": first_of_month,
         "days": days,
+        "prev_month": f"{prev_y:04d}-{prev_m:02d}",
+        "next_month": f"{next_y:04d}-{next_m:02d}",
+        "all_classes": all_classes,
+        "default_class_id": (all_classes[0].id if all_classes else None),
+        "all_tags": all_tags,
     })
 
 
@@ -1454,9 +1481,9 @@ def serve_upload(filename: str):
 @app.get("/calendar.ics")
 def ical_feed():
     cal = Calendar()
-    cal.add("prodid", "-//StudyFlow//Local//EN")
+    cal.add("prodid", "-//Compass//Local//EN")
     cal.add("version", "2.0")
-    cal.add("x-wr-calname", "StudyFlow")
+    cal.add("x-wr-calname", "Compass")
     cal.add("x-wr-timezone", str(LOCAL_TZ))
 
     with Session(engine) as session:
@@ -1465,7 +1492,7 @@ def ical_feed():
         ).all()
         for ev in events:
             ie = ICalEvent()
-            ie.add("uid", f"studyflow-event-{ev.id}@local")
+            ie.add("uid", f"compass-event-{ev.id}@local")
             ie.add("summary", f"[{ev.class_code}] {ev.title}")
             starts = ev.starts_at if ev.starts_at.tzinfo else ev.starts_at.replace(tzinfo=LOCAL_TZ)
             ie.add("dtstart", starts)

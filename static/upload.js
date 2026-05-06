@@ -119,7 +119,7 @@
             var goingDark = !html.classList.contains("dark");
             html.classList.toggle("dark", goingDark);
             try {
-                localStorage.setItem("studyflow-theme", goingDark ? "dark" : "light");
+                localStorage.setItem("compass-theme", goingDark ? "dark" : "light");
             } catch (e) {
                 // localStorage may be unavailable in private mode; toggle still works for the session.
             }

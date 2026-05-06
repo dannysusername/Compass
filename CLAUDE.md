@@ -1,4 +1,4 @@
-# StudyFlow
+# Compass
 
 A personal task tracker focused on schoolwork — keep track of assignments, deadlines, and what to do next.
 

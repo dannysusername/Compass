@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}StudyFlow{% endblock %}
+{% block title %}Compass{% endblock %}
 {% block content %}
 
 <div class="home-layout">
@@ -59,7 +59,7 @@
             <h2 id="syllabus-modal-title">Add a syllabus</h2>
             <button type="button" class="modal-close" data-close-modal aria-label="Close">×</button>
         </div>
-        <p class="subtle">StudyFlow auto-creates the class, extracts policies, and pulls exam dates from the PDF.</p>
+        <p class="subtle">Compass auto-creates the class, extracts policies, and pulls exam dates from the PDF.</p>
         <form method="post" action="/syllabus" enctype="multipart/form-data">
             <div class="drop-zone" data-upload-zone>
                 <input type="file" name="file" accept="application/pdf,.pdf" required>

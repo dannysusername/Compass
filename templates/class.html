@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}{{ cls.code }} — StudyFlow{% endblock %}
+{% block title %}{{ cls.code }} — Compass{% endblock %}
 {% block content %}
 <a href="/" class="back">← All classes</a>
 
@@ -8,51 +8,26 @@
 <div class="class-page">
 
 {% if syllabus %}
-<div class="test-layout">
-    <div class="test-pdf-pane">
-        <iframe class="test-pdf-iframe"
-                src="/uploads/{{ syllabus.filename }}"
-                title="Syllabus preview"></iframe>
+<details class="class-section" data-state-key="class-{{ cls.id }}-pdf" open>
+<summary class="class-section-summary">
+    <h2>Syllabus</h2>
+    <span class="section-toggle-chevron" aria-hidden="true"></span>
+</summary>
+<div class="class-section-body">
+    <div class="test-layout">
+        <div class="test-pdf-pane">
+            <iframe class="test-pdf-iframe"
+                    src="/uploads/{{ syllabus.filename }}"
+                    title="Syllabus preview"></iframe>
+        </div>
     </div>
-
-    <aside class="test-transform-pane">
-        <h3>Transform a selection</h3>
-
-        <label class="test-field">
-            <span class="test-label">Selected text</span>
-            <textarea id="test-text" rows="6"
-                      placeholder="Highlight in the PDF → Ctrl/Cmd+C → paste here"></textarea>
-        </label>
-
-        <label class="test-field">
-            <span class="test-label">How should the AI format this?</span>
-            <textarea id="test-prompt" rows="3"
-                      placeholder="e.g. simplify this, make a clean table without colors, bullet list"></textarea>
-        </label>
-
-        <div class="test-actions">
-            <button type="button" id="test-go" class="primary">Transform</button>
-            <button type="button" id="test-clear" class="secondary">Clear</button>
-        </div>
-
-        <p id="test-status" class="subtle test-status" hidden></p>
-
-        <div id="test-output" class="test-output" hidden>
-            <h4>Result</h4>
-            <div id="test-output-body" class="card-body"></div>
-            <details class="test-source">
-                <summary>view markdown source</summary>
-                <pre id="test-output-md"></pre>
-            </details>
-        </div>
-    </aside>
+    <p class="syllabus-meta subtle">
+        <a href="/uploads/{{ syllabus.filename }}" target="_blank" rel="noopener">Open PDF in a new tab</a>
+        &middot;
+        <a href="/uploads/{{ syllabus.filename }}" download="{{ syllabus.filename }}">Download</a>
+    </p>
 </div>
-
-<p class="syllabus-meta subtle">
-    <a href="/uploads/{{ syllabus.filename }}" target="_blank" rel="noopener">Open PDF in a new tab</a>
-    &middot;
-    <a href="/uploads/{{ syllabus.filename }}" download="{{ syllabus.filename }}">Download</a>
-</p>
+</details>
 {% else %}
 <section class="syllabus-link">
     <h2>Syllabus</h2>
@@ -73,6 +48,9 @@
             <span class="kind">{{ e.kind }}</span>
             <span class="title">{{ e.title }}</span>
             <span class="when">{{ e.starts_at.strftime('%a %b %d %H:%M') if e.starts_at else 'TBD' }}</span>
+            <form method="post" action="/events/{{ e.id }}/clone" class="event-add-cal-form">
+                <button type="submit" class="event-add-cal" title="Add a copy of this event to the calendar">+ Add to calendar</button>
+            </form>
             {% if e.source_text %}
             <details class="source event-source"><summary>show source</summary><blockquote>{{ e.source_text }}</blockquote></details>
             {% endif %}
@@ -81,11 +59,7 @@
                 <form method="post" action="/events/{{ e.id }}/edit" class="inline-edit">
                     <label>Title <input type="text" name="title" value="{{ e.title }}" required></label>
                     <label>Kind
-                        <select name="kind">
-                            {% for k in ['exam','assignment','project','milestone'] %}
-                            <option value="{{ k }}" {% if k == e.kind %}selected{% endif %}>{{ k }}</option>
-                            {% endfor %}
-                        </select>
+                        <input type="text" name="kind" value="{{ e.kind }}" placeholder="quiz, lab, exam, lecture, ...">
                     </label>
                     <label>Starts at (ISO)
                         <input type="text" name="starts_at" value="{{ e.starts_at.strftime('%Y-%m-%dT%H:%M:%S') if e.starts_at else '' }}" placeholder="2026-09-15T23:59:00">
@@ -163,83 +137,6 @@
 <script src="{{ '/static/todo.js' | static_v }}" defer></script>
 <script src="{{ '/static/modal.js' | static_v }}" defer></script>
 
-{% if syllabus %}
-<script>
-// PDF + AI transform sidebar.
-(function () {
-    const textInput = document.getElementById('test-text');
-    const promptInput = document.getElementById('test-prompt');
-    const goBtn = document.getElementById('test-go');
-    const clearBtn = document.getElementById('test-clear');
-    const status = document.getElementById('test-status');
-    const output = document.getElementById('test-output');
-    const outputBody = document.getElementById('test-output-body');
-    const outputMd = document.getElementById('test-output-md');
-    if (!textInput) return;
-
-    function setStatus(msg, isError) {
-        if (!msg) { status.hidden = true; status.textContent = ''; return; }
-        status.hidden = false;
-        status.textContent = msg;
-        status.classList.toggle('is-error', !!isError);
-    }
-
-    async function transform() {
-        const text = textInput.value.trim();
-        const prompt = promptInput.value.trim();
-        if (!text) { setStatus('Paste some selected text first.', true); return; }
-        if (!prompt) { setStatus('Tell the AI what to do.', true); return; }
-        goBtn.disabled = true;
-        goBtn.textContent = 'Working…';
-        setStatus('Asking Grok (5–30s)…');
-        output.hidden = true;
-        try {
-            const r = await fetch('/test/transform', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-                body: JSON.stringify({ text, prompt, syllabus_id: {{ syllabus.id }} }),
-            });
-            if (!r.ok) {
-                let detail = `${r.status} ${r.statusText}`;
-                try { const j = await r.json(); if (j.detail) detail = j.detail; } catch (_) {}
-                throw new Error(detail);
-            }
-            const data = await r.json();
-            outputBody.innerHTML = data.html || '';
-            outputMd.textContent = data.markdown || '';
-            output.hidden = false;
-            const xref = data.cross_reference_used
-                ? 'Done — used pdfplumber tables as cross-reference.'
-                : 'Done — no structured tables to cross-reference for this syllabus.';
-            setStatus(xref);
-        } catch (err) {
-            setStatus('Error: ' + err.message, true);
-        } finally {
-            goBtn.disabled = false;
-            goBtn.textContent = 'Transform';
-        }
-    }
-
-    function clearAll() {
-        textInput.value = '';
-        promptInput.value = '';
-        output.hidden = true;
-        setStatus('');
-        textInput.focus();
-    }
-
-    goBtn.addEventListener('click', transform);
-    clearBtn.addEventListener('click', clearAll);
-    promptInput.addEventListener('keydown', (e) => {
-        if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
-            e.preventDefault();
-            transform();
-        }
-    });
-})();
-</script>
-{% endif %}
-
 <script>
 // Floating tasks panel toggle.
 (function () {
@@ -262,7 +159,7 @@
 // Persist <details> open/closed state to localStorage so reloads don't
 // reset every section.
 (function () {
-    const STORAGE_KEY = 'studyflow-details';
+    const STORAGE_KEY = 'compass-details';
     let states = {};
     try { states = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}') || {}; } catch (_) {}
     document.querySelectorAll('details[data-state-key]').forEach((d) => {
