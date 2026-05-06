@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Settings — Compass{% endblock %}
+{% block content %}
+
+<div class="setup-card">
+    <h1>Your account</h1>
+    <p class="subtle">Signed in as <strong>{{ user.email }}</strong></p>
+
+    <h2 style="margin-top: 28px">xAI API key</h2>
+    <p class="subtle">
+        Compass parses syllabi by calling the xAI Grok API on your own
+        account. You need a key set here before you can upload a syllabus.
+        Get one at <a href="https://console.x.ai/" target="_blank" rel="noopener">console.x.ai</a>
+        — typical syllabus parses cost a few cents.
+    </p>
+
+    {% if need_key %}
+        <p class="error-message">Add your xAI key below before uploading a syllabus.</p>
+    {% endif %}
+    {% if saved %}
+        <p class="subtle" style="color: var(--accent, #5b9d5b)">Saved.</p>
+    {% endif %}
+    {% if error %}
+        <p class="error-message">{{ error }}</p>
+    {% endif %}
+    {% if masked_key %}
+        <p class="hint">Currently saved: <code>{{ masked_key }}</code></p>
+    {% else %}
+        <p class="hint">No key saved — using the demo fallback.</p>
+    {% endif %}
+
+    <form method="post" action="/settings">
+        <label>
+            xAI API key
+            <input type="password" name="xai_api_key" placeholder="xai-..." autocomplete="off">
+        </label>
+        <button type="submit">Save</button>
+        <button type="submit" name="xai_api_key" value="" formnovalidate
+                style="margin-left: 8px; opacity: 0.7">Remove saved key</button>
+    </form>
+</div>
+
+{% endblock %}

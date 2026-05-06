@@ -1,7 +1,8 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, time, timedelta, timezone
+from io import BytesIO
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Union
 from zoneinfo import ZoneInfo
 import json
 import logging
@@ -30,6 +31,8 @@ from xai_sdk.chat import system as xai_system, user as xai_user
 import pdfplumber
 import bcrypt
 from starlette.middleware.sessions import SessionMiddleware
+
+import storage
 
 
 # ---- Config ----
@@ -257,18 +260,33 @@ class User(SQLModel, table=True):
     email: str = Field(unique=True, index=True)
     password_hash: str
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    # User-supplied xAI API key. Falls back to the server-wide XAI_API_KEY
+    # env var when missing, so the demo still works for accounts that never
+    # configured one. Stored in cleartext — DB is private; rotation is
+    # manual via /settings.
+    xai_api_key: Optional[str] = Field(default=None)
 
 
 # ---- App setup ----
 
+# DATABASE_URL is set by Heroku; it arrives as `postgres://...`. Rewrite to
+# the psycopg3 driver explicitly so SQLAlchemy doesn't reach for psycopg2
+# (which we don't install). Falls back to a local SQLite file for dev.
 DB_PATH = Path(__file__).parent / "compass.db"
-UPLOAD_DIR = Path(__file__).parent / "uploads"
-UPLOAD_DIR.mkdir(exist_ok=True)
+_db_url = os.environ.get("DATABASE_URL", "").strip()
+if _db_url.startswith("postgres://"):
+    _db_url = "postgresql+psycopg://" + _db_url[len("postgres://"):]
+elif _db_url.startswith("postgresql://"):
+    _db_url = "postgresql+psycopg://" + _db_url[len("postgresql://"):]
+if not _db_url:
+    _db_url = f"sqlite:///{DB_PATH}"
 
-engine = create_engine(
-    f"sqlite:///{DB_PATH}",
-    connect_args={"check_same_thread": False},
-)
+IS_SQLITE = _db_url.startswith("sqlite")
+if IS_SQLITE:
+    engine = create_engine(_db_url, connect_args={"check_same_thread": False})
+else:
+    # Postgres: pool_pre_ping survives Heroku's idle-connection drops.
+    engine = create_engine(_db_url, pool_pre_ping=True)
 
 
 def _add_column_if_missing(conn, table: str, column: str, ddl: str) -> None:
@@ -283,33 +301,40 @@ def _add_column_if_missing(conn, table: str, column: str, ddl: str) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     SQLModel.metadata.create_all(engine)
-    with engine.begin() as conn:
-        _add_column_if_missing(conn, "policy", "source_text", "TEXT")
-        _add_column_if_missing(conn, "calendarevent", "source_text", "TEXT")
-        _add_column_if_missing(conn, "syllabus", "outline_json", "TEXT")
-        _add_column_if_missing(conn, "calendarevent", "completed_at", "TIMESTAMP")
-        _add_column_if_missing(conn, "calendarevent", "actionable", "INTEGER NOT NULL DEFAULT 1")
-        _add_column_if_missing(conn, "calendarevent", "position", "INTEGER NOT NULL DEFAULT 0")
-        _add_column_if_missing(conn, "task", "position", "INTEGER NOT NULL DEFAULT 0")
-        _add_column_if_missing(conn, "task", "tag_id", "INTEGER")
-        _add_column_if_missing(conn, "task", "starts_at", "TIMESTAMP")
-        _add_column_if_missing(conn, "tag", "is_system", "INTEGER NOT NULL DEFAULT 0")
-        _add_column_if_missing(conn, "tag", "system_key", "TEXT")
-        # Phase 2: per-user data scoping. Add user_id to top-level
-        # tables and backfill all orphan rows to the oldest user, so
-        # anyone upgrading keeps their data instead of losing it to
-        # the user_id=NULL filter.
-        _add_column_if_missing(conn, "class", "user_id", "INTEGER")
-        _add_column_if_missing(conn, "task", "user_id", "INTEGER")
-        _add_column_if_missing(conn, "tag", "user_id", "INTEGER")
-        users = conn.exec_driver_sql('SELECT id FROM "user" ORDER BY id').fetchall()
-        if users:
-            owner_id = users[0][0]
-            for tbl in ("class", "task", "tag"):
-                conn.exec_driver_sql(
-                    f"UPDATE {tbl} SET user_id = {owner_id} WHERE user_id IS NULL"
-                )
-            log.info("backfilled user_id=%s on existing class/task/tag rows", owner_id)
+    # The PRAGMA-based ALTER TABLE migrations below are SQLite-specific
+    # (they rely on PRAGMA table_info introspection). Postgres deployments
+    # start from a fresh DB created by metadata.create_all above, so we
+    # skip them entirely there.
+    if IS_SQLITE:
+        with engine.begin() as conn:
+            _add_column_if_missing(conn, "policy", "source_text", "TEXT")
+            _add_column_if_missing(conn, "calendarevent", "source_text", "TEXT")
+            _add_column_if_missing(conn, "syllabus", "outline_json", "TEXT")
+            _add_column_if_missing(conn, "calendarevent", "completed_at", "TIMESTAMP")
+            _add_column_if_missing(conn, "calendarevent", "actionable", "INTEGER NOT NULL DEFAULT 1")
+            _add_column_if_missing(conn, "calendarevent", "position", "INTEGER NOT NULL DEFAULT 0")
+            _add_column_if_missing(conn, "task", "position", "INTEGER NOT NULL DEFAULT 0")
+            _add_column_if_missing(conn, "task", "tag_id", "INTEGER")
+            _add_column_if_missing(conn, "task", "starts_at", "TIMESTAMP")
+            _add_column_if_missing(conn, "tag", "is_system", "INTEGER NOT NULL DEFAULT 0")
+            _add_column_if_missing(conn, "tag", "system_key", "TEXT")
+            # Phase 2: per-user data scoping. Add user_id to top-level
+            # tables and backfill all orphan rows to the oldest user, so
+            # anyone upgrading keeps their data instead of losing it to
+            # the user_id=NULL filter.
+            _add_column_if_missing(conn, "class", "user_id", "INTEGER")
+            _add_column_if_missing(conn, "task", "user_id", "INTEGER")
+            _add_column_if_missing(conn, "tag", "user_id", "INTEGER")
+            # Phase 3: each user can supply their own xAI API key.
+            _add_column_if_missing(conn, "user", "xai_api_key", "TEXT")
+            users = conn.exec_driver_sql('SELECT id FROM "user" ORDER BY id').fetchall()
+            if users:
+                owner_id = users[0][0]
+                for tbl in ("class", "task", "tag"):
+                    conn.exec_driver_sql(
+                        f"UPDATE {tbl} SET user_id = {owner_id} WHERE user_id IS NULL"
+                    )
+                log.info("backfilled user_id=%s on existing class/task/tag rows", owner_id)
     # Make sure every user has the four default system tags (signup also
     # calls this, but we re-run for the existing-data case).
     with Session(engine) as session:
@@ -525,8 +550,10 @@ def parse_iso_dt(value) -> Optional[datetime]:
         return None
 
 
-def extract_pdf_text(path: Path) -> str:
-    """Pull plain text out of a PDF. dedupe_chars handles 'fake bold'
+def extract_pdf_text(source: Union[Path, bytes]) -> str:
+    """Pull plain text out of a PDF. Accepts either a Path (dev/local-disk
+    path) or raw bytes (so callers can pass content fetched from object
+    storage without writing a tempfile). dedupe_chars handles 'fake bold'
     double-stamped glyphs that show up in many professor-authored syllabi
     (cells like 'CCIISS33995500' come out as 'CIS 3950').
 
@@ -536,15 +563,17 @@ def extract_pdf_text(path: Path) -> str:
     cells out of the prose entirely, hiding most of the schedule from
     extraction."""
     chunks: list[str] = []
-    with pdfplumber.open(path) as pdf:
+    label = source.name if isinstance(source, Path) else f"<bytes {len(source)}>"
+    opener = source if isinstance(source, Path) else BytesIO(source)
+    with pdfplumber.open(opener) as pdf:
         total = len(pdf.pages)
         for page in pdf.pages:
             try:
-                source = page.dedupe_chars()
+                page_src = page.dedupe_chars()
             except Exception:
-                source = page
+                page_src = page
             try:
-                text = source.extract_text() or ""
+                text = page_src.extract_text() or ""
             except Exception:
                 text = page.extract_text() or ""
             page_text = text.strip()
@@ -552,7 +581,7 @@ def extract_pdf_text(path: Path) -> str:
                 chunks.append(page_text)
     log.info(
         "extract_pdf_text: %d of %d pages had text (%s)",
-        len(chunks), total, path.name,
+        len(chunks), total, label,
     )
     return "\n\n".join(chunks)
 
@@ -641,14 +670,16 @@ class SyllabusExtraction(BaseModel):
     events: List[EventItem] = PydanticField(default_factory=list)
 
 
-def parse_syllabus_with_grok(text: str) -> dict:
+def parse_syllabus_with_grok(text: str, user_key: str) -> dict:
     """Call xAI Grok (grok-4-latest by default) via the native xai-sdk with
-    structured-output enforcement. Raises grpc.RpcError on API failures; caller logs."""
-    api_key = os.environ.get("XAI_API_KEY", "").strip()
+    structured-output enforcement. Raises grpc.RpcError on API failures; caller logs.
+
+    The xAI key is always per-user (set in /settings) — no server-wide
+    fallback, so one user's account can never spend another's quota."""
+    api_key = (user_key or "").strip()
     if not api_key:
         raise RuntimeError(
-            "XAI_API_KEY is not set. Put your key in .xai_key next to "
-            "main.py, or export it before launching."
+            "No xAI API key on your account. Add one in /settings to parse syllabi."
         )
     client = XAIClient(api_key=api_key)
     chat = client.chat.create(
@@ -693,9 +724,14 @@ def process_syllabus(syllabus_id: int) -> None:
                 parse_jobs[syllabus_id] = "error: syllabus not found"
                 return
             raw_text = syllabus.raw_text
+            # Look up the class owner's per-user xAI key so the parse runs
+            # against their quota, not the demo's.
+            cls = session.get(Class, syllabus.class_id)
+            owner = session.get(User, cls.user_id) if cls else None
+            user_key = owner.xai_api_key if owner else None
 
         try:
-            data = parse_syllabus_with_grok(raw_text)
+            data = parse_syllabus_with_grok(raw_text, user_key=user_key)
         except grpc.RpcError as e:
             parse_jobs[syllabus_id] = f"error: {_grpc_error_message(e)}"
             return
@@ -837,6 +873,55 @@ def logout(request: Request):
     return RedirectResponse("/login", status_code=303)
 
 
+def _mask_key(key: Optional[str]) -> Optional[str]:
+    """Show enough of the key to confirm which one is saved without
+    exposing the secret. Used by the /settings page."""
+    if not key:
+        return None
+    if len(key) <= 12:
+        return "set"
+    return f"{key[:6]}…{key[-4:]}"
+
+
+@app.get("/settings", response_class=HTMLResponse)
+def settings_page(
+    request: Request,
+    saved: int = 0,
+    need_key: int = 0,
+    user: User = Depends(require_login),
+):
+    return templates.TemplateResponse(request, "settings.html", {
+        "user": user,
+        "masked_key": _mask_key(user.xai_api_key),
+        "saved": bool(saved),
+        "need_key": bool(need_key),
+        "error": None,
+    })
+
+
+@app.post("/settings")
+def settings_save(
+    request: Request,
+    xai_api_key: str = Form(""),
+    user: User = Depends(require_login),
+):
+    key = xai_api_key.strip()
+    if key and not key.startswith("xai-"):
+        return templates.TemplateResponse(request, "settings.html", {
+            "user": user,
+            "masked_key": _mask_key(user.xai_api_key),
+            "saved": False,
+            "need_key": False,
+            "error": "xAI keys start with 'xai-'. Get one at https://console.x.ai/",
+        }, status_code=400)
+    with Session(engine) as session:
+        u = session.get(User, user.id)
+        u.xai_api_key = key or None
+        session.add(u)
+        session.commit()
+    return RedirectResponse("/settings?saved=1", status_code=303)
+
+
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request, user: User = Depends(require_login)):
     today_start = _today_local()
@@ -945,16 +1030,20 @@ async def syllabus_upload(
     file: UploadFile = File(...),
     user: User = Depends(require_login),
 ):
+    # Block uploads from accounts with no xAI key — there's nothing to
+    # call Grok with, so parsing would just fail later. Send them to
+    # /settings with a banner instead of letting the upload silently break.
+    if not (user.xai_api_key or "").strip():
+        return RedirectResponse("/settings?need_key=1", status_code=303)
     content = await file.read()
     validate_pdf(content)
 
     safe_name = safe_filename(file.filename or "syllabus.pdf")
     filename = f"{uuid.uuid4().hex[:8]}_{safe_name}"
-    upload_path = UPLOAD_DIR / filename
-    upload_path.write_bytes(content)
+    storage.save(filename, content, content_type="application/pdf")
 
     try:
-        raw_text = extract_pdf_text(upload_path)
+        raw_text = extract_pdf_text(content)
     except Exception as e:
         raise HTTPException(400, f"Could not extract text from PDF: {e}")
 
@@ -1642,7 +1731,7 @@ async def upload_doc(
     validate_upload(content)
     safe_name = safe_filename(file.filename or "doc")
     filename = f"{uuid.uuid4().hex[:8]}_{safe_name}"
-    (UPLOAD_DIR / filename).write_bytes(content)
+    storage.save(filename, content, content_type=file.content_type or "application/octet-stream")
 
     with Session(engine) as session:
         _own_class(session, class_id, user.id)
@@ -1662,11 +1751,7 @@ def delete_doc(doc_id: int, user: User = Depends(require_login)):
     with Session(engine) as session:
         d = _own_document(session, doc_id, user.id)
         cls_id = d.class_id
-        # remove file from disk too (best-effort)
-        try:
-            (UPLOAD_DIR / d.filename).unlink(missing_ok=True)
-        except Exception:
-            pass
+        storage.delete(d.filename)
         session.delete(d)
         session.commit()
     return RedirectResponse(f"/classes/{cls_id}", status_code=303)
@@ -1678,8 +1763,7 @@ def serve_upload(filename: str, user: User = Depends(require_login)):
     belongs to a class owned by the requesting user. Filename uniqueness
     is enforced at upload time so we can match by filename alone."""
     safe = safe_filename(filename)
-    path = UPLOAD_DIR / safe
-    if not path.exists():
+    if not storage.exists(safe):
         raise HTTPException(404)
     with Session(engine) as session:
         # File could be either a Document attachment or a Syllabus upload.
@@ -1695,7 +1779,8 @@ def serve_upload(filename: str, user: User = Depends(require_login)):
                 owned = bool(cls and cls.user_id == user.id)
         if not owned:
             raise HTTPException(404)
-    return FileResponse(path)
+    content_type = "application/pdf" if safe.lower().endswith(".pdf") else None
+    return storage.serve(safe, content_type=content_type)
 
 
 # ---- Routes: iCal feed ----
