@@ -45,8 +45,14 @@ System tags (`exam`, `assignment`, `project`, `milestone`) are **per-user**, not
 ### Task notes
 `Task.notes` is free-form text, optional. Surfaced in:
 - The add/edit task modals as a `<textarea name="notes">` (rows=4, vertical resize).
-- A notes-toggle button (📝 icon, no text) on `.todo-row` when the task has notes — toggles a `.todo-notes` panel inline. Hidden by default everywhere; visible only after the user clicks the toggle. The week-grid's compact `.day-cell-item` rows do NOT show notes or the toggle (they're for at-a-glance only); notes appear in the day-detail modal.
+- The row's expand drawer (see "Row drawer UX" below) — full notes text appears when the user clicks the row.
+- A subtle 📝 indicator on the row (not a button — just a hint that notes exist).
 - iCal feed's `DESCRIPTION` field — flows through to Apple Calendar event details. Falls back to "Compass task" when notes are empty.
+
+### Row drawer UX
+Task rows are intentionally minimal at rest: drag handle, toggle circle, title, tag pill, time. The 📝 indicator is the only nod to "extra content lives here." Edit/delete buttons are NOT inline — they live in a `.todo-drawer` that's collapsed by default. Clicking anywhere on `.todo-row-main` (except the toggle / drag handle / inner buttons) toggles the drawer. The drawer holds the full notes text, an Edit button (opens the edit modal), and a Delete button.
+
+This pattern lives in `_today_list.html` and `week.html` (duplicated row macros — keep in sync). The drawer state is preserved across `softRefresh()` in `static/todo.js` so edit-saves don't visually destroy the open drawer.
 
 ### Database engine
 Reads `DATABASE_URL` first (Heroku sets `postgres://...`, rewritten to `postgresql+psycopg://`), falls back to local `compass.db` (SQLite). The `IS_SQLITE` flag gates SQLite-only `_add_column_if_missing` migrations in the lifespan; Postgres deploys rely on `SQLModel.metadata.create_all` from a fresh DB.
