@@ -125,6 +125,26 @@
             if (startsInput) startsInput.value = startsAt;
             if (startsLabel) startsLabel.hidden = !startsAt;
             syncStartsToggleLabel(form);
+            // Notes textarea: populate from row's data-notes (comes through
+            // as the actual text via Jinja's HTML escaping). Stored in
+            // dataset.origNotes so we can detect a change at submit time.
+            const notesField = form.querySelector('textarea[name="notes"]');
+            if (notesField) {
+                const notes = row.dataset.notes || '';
+                notesField.value = notes;
+                form.dataset.origNotes = notes;
+            }
+            // Class dropdown: pre-select the row's current class (or "0"
+            // for Personal tasks). Tracked in origClassId so we can detect
+            // a class move on submit.
+            const classSelect = form.querySelector('[data-edit-task-class]');
+            if (classSelect) {
+                // Personal tasks have data-class-id="0" (PERSONAL_BUCKET sentinel).
+                const cid = row.dataset.classId && row.dataset.classId !== '0'
+                    ? row.dataset.classId : '0';
+                classSelect.value = cid;
+                form.dataset.origClassId = cid;
+            }
             // Track originals so we can decide whether to patch in place
             // or soft-refresh (date / range / tag changes need server-side
             // re-render to land in the right calendar cell / list section).
@@ -167,15 +187,29 @@
             const origTagId = form.dataset.origTagId || '';
             const origDueAt = form.dataset.origDueAt || '';
             const origStartsAt = form.dataset.origStartsAt || '';
+            const origNotes = form.dataset.origNotes || '';
+            const origClassId = form.dataset.origClassId || '0';
+            const notesField = form.querySelector('textarea[name="notes"]');
+            const classSelect = form.querySelector('[data-edit-task-class]');
+            const newNotes = notesField ? notesField.value : '';
+            const newClassId = classSelect ? classSelect.value : origClassId;
             const tagChanged = tagId !== origTagId;
             const dateChanged = (due || '') !== origDueAt
                 || (starts || '') !== origStartsAt;
+            const notesChanged = newNotes !== origNotes;
+            // Class move means the row jumps to a different bucket on
+            // home/today/week — softRefresh re-renders it in the right place.
+            const classChanged = newClassId !== origClassId;
             const fd = new FormData();
             fd.append('title', title);
             if (due) fd.append('due_at', due);
             if (starts) fd.append('starts_at', starts);
             // Always send tag_id (form value). '' means clear.
             fd.append('tag_id', tagId);
+            // Notes: send the current value so server can update or clear.
+            if (notesField) fd.append('notes', notesField.value || '');
+            // class_id: '' (or '0' from the dropdown) means Personal.
+            if (classSelect) fd.append('class_id', newClassId);
             try {
                 const r = await fetch(`/tasks/${id}/edit`, {
                     method: 'POST',
@@ -196,7 +230,7 @@
                 // overdue) or between calendar cells; tag swap changes
                 // colors and pill text. softRefresh swaps the affected
                 // sections without the full-reload flash.
-                if (tagChanged || dateChanged) {
+                if (tagChanged || dateChanged || notesChanged || classChanged) {
                     await softRefresh();
                     return;
                 }
@@ -436,13 +470,13 @@
             const startsInput = form.querySelector('input[name="starts_at"]');
             const startsLabel = form.querySelector('[data-task-starts]');
             const classSelect = form.querySelector('[data-add-task-class]');
+            const notesField = form.querySelector('textarea[name="notes"]');
             const title = (titleInput.value || '').trim();
             if (!title) return;
-            const classId = classSelect ? classSelect.value : null;
-            // Forms in the partial use `/classes/0/tasks` as a stub; rewrite to picked class.
-            const url = classId
-                ? `/classes/${classId}/tasks`
-                : form.action;
+            // Empty class value = "Personal" — POST to /tasks (no class).
+            // Numeric value = real class — POST to /classes/{id}/tasks.
+            const classId = classSelect ? classSelect.value : '';
+            const url = classId ? `/classes/${classId}/tasks` : '/tasks';
             let tagId;
             try {
                 tagId = await resolveTagId(form);
@@ -455,6 +489,7 @@
                 fd.append('starts_at', startsInput.value);
             }
             if (tagId) fd.append('tag_id', tagId);
+            if (notesField && notesField.value.trim()) fd.append('notes', notesField.value);
             try {
                 const r = await fetch(url, {
                     method: 'POST',
@@ -472,6 +507,7 @@
                 if (dueInput) dueInput.value = '';
                 if (startsInput) startsInput.value = '';
                 if (startsLabel) startsLabel.hidden = true;
+                if (notesField) notesField.value = '';
                 const addModal = form.closest('.modal-overlay');
                 if (addModal) {
                     addModal.hidden = true;
@@ -536,6 +572,14 @@
     // edit task with date change) where patching one row in place isn't
     // enough.
     async function softRefresh() {
+        // Capture which rows are currently expanded so we can re-open them
+        // after the re-render. Without this the drawer collapses on every
+        // edit-save and the user thinks something didn't take effect.
+        const expandedKeys = new Set();
+        document.querySelectorAll('.todo-row.expanded').forEach((row) => {
+            expandedKeys.add(`${row.dataset.kind}:${row.dataset.id}`);
+        });
+
         try {
             const url = window.location.pathname + window.location.search;
             const r = await fetch(url, {
@@ -566,6 +610,20 @@
             if (replaced) {
                 bindAll();
                 if (typeof window.rebindDayCells === 'function') window.rebindDayCells();
+                // Re-expand rows that were open before the re-render so
+                // edits don't visually destroy the user's open drawer.
+                expandedKeys.forEach((key) => {
+                    const [kind, id] = key.split(':');
+                    document.querySelectorAll(
+                        `.todo-row[data-kind="${kind}"][data-id="${id}"]`
+                    ).forEach((row) => {
+                        const drawer = row.querySelector('.todo-drawer');
+                        const main = row.querySelector('[data-row-toggle]');
+                        if (drawer) drawer.hidden = false;
+                        row.classList.add('expanded');
+                        if (main) main.setAttribute('aria-expanded', 'true');
+                    });
+                });
             }
             return replaced;
         } catch (err) {
@@ -776,11 +834,155 @@
 
     // ---- Wire up ----
 
+    // ---- Class-block drag (reorder bucket order on home/today) ----
+
+    function bindClassBlockDrag(list) {
+        if (list.dataset.dragBound === '1') return;
+        list.dataset.dragBound = '1';
+        let dragBlock = null;
+        let pointerStart = null;
+        let isDragging = false;
+        const MOVE_THRESHOLD = 5;
+
+        function applyFlipReorder(insertBeforeBlock) {
+            const currentNext = dragBlock.nextSibling;
+            if (insertBeforeBlock === dragBlock) return;
+            if (insertBeforeBlock && insertBeforeBlock === currentNext) return;
+            if (!insertBeforeBlock && currentNext === null) return;
+
+            const all = Array.from(list.querySelectorAll(':scope > .class-block'));
+            const firstRects = new Map();
+            all.forEach((c) => firstRects.set(c, c.getBoundingClientRect()));
+            if (insertBeforeBlock) list.insertBefore(dragBlock, insertBeforeBlock);
+            else list.appendChild(dragBlock);
+            all.forEach((c) => {
+                const first = firstRects.get(c);
+                const last = c.getBoundingClientRect();
+                const dy = first.top - last.top;
+                if (Math.abs(dy) < 1) return;
+                c.style.transition = 'none';
+                c.style.transform = `translateY(${dy}px)`;
+                void c.offsetHeight;
+                c.style.transition = 'transform 0.18s cubic-bezier(0.22, 1, 0.36, 1)';
+                c.style.transform = '';
+            });
+        }
+
+        function moveTowards(clientY) {
+            if (!dragBlock) return;
+            const others = Array.from(
+                list.querySelectorAll(':scope > .class-block:not(.dragging)')
+            );
+            let insertBefore = null;
+            for (const target of others) {
+                const rect = target.getBoundingClientRect();
+                if (clientY < rect.top + rect.height / 2) { insertBefore = target; break; }
+            }
+            applyFlipReorder(insertBefore);
+        }
+
+        async function persistOrder() {
+            const order = Array.from(list.querySelectorAll(':scope > .class-block'))
+                .map((b) => b.dataset.bucketKey)
+                .filter((k) => k != null);
+            try {
+                await fetch('/classes/reorder', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                    body: JSON.stringify({ order }),
+                });
+            } catch (err) {
+                console.error('class reorder failed:', err);
+            }
+        }
+
+        function onPointerMove(e) {
+            if (!dragBlock || !pointerStart) return;
+            const dy = e.clientY - pointerStart.y;
+            if (!isDragging && Math.abs(dy) < MOVE_THRESHOLD) return;
+            if (!isDragging) {
+                isDragging = true;
+                dragBlock.classList.add('dragging');
+                document.body.classList.add('cards-dragging');
+            }
+            moveTowards(e.clientY);
+            e.preventDefault();
+        }
+        function onPointerUp() {
+            if (!dragBlock) return;
+            const wasDragging = isDragging;
+            dragBlock.classList.remove('dragging');
+            document.body.classList.remove('cards-dragging');
+            dragBlock = null;
+            pointerStart = null;
+            isDragging = false;
+            if (wasDragging) persistOrder();
+        }
+
+        list.querySelectorAll('.class-block-drag').forEach((handle) => {
+            handle.addEventListener('pointerdown', (e) => {
+                if (e.button !== undefined && e.button !== 0) return;
+                const block = handle.closest('.class-block');
+                if (!block) return;
+                dragBlock = block;
+                pointerStart = { x: e.clientX, y: e.clientY };
+                isDragging = false;
+                e.preventDefault();
+            });
+        });
+        document.addEventListener('pointermove', onPointerMove);
+        document.addEventListener('pointerup', onPointerUp);
+        document.addEventListener('pointercancel', onPointerUp);
+    }
+
+    // ---- Row expand ----
+    // Click on .todo-row-main toggles the .todo-drawer (notes + edit/delete
+    // buttons) below the row. Reduces inline clutter — drawer-collapsed by
+    // default. Clicks on the toggle circle, drag handle, or any inner
+    // <button> are ignored so they keep their own behavior.
+
+    function bindRowExpand(main) {
+        if (main.dataset.bound === '1') return;
+        main.dataset.bound = '1';
+
+        function shouldIgnore(target) {
+            return Boolean(
+                target.closest('.todo-toggle') ||
+                target.closest('.todo-drag-handle') ||
+                target.closest('button')
+            );
+        }
+
+        function toggle() {
+            const row = main.closest('.todo-row');
+            if (!row) return;
+            const drawer = row.querySelector('.todo-drawer');
+            if (!drawer) return;
+            const willOpen = drawer.hidden;
+            drawer.hidden = !willOpen;
+            main.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+            row.classList.toggle('expanded', willOpen);
+        }
+
+        main.addEventListener('click', (e) => {
+            if (shouldIgnore(e.target)) return;
+            toggle();
+        });
+        main.addEventListener('keydown', (e) => {
+            if (e.key !== 'Enter' && e.key !== ' ') return;
+            if (shouldIgnore(e.target)) return;
+            e.preventDefault();
+            toggle();
+        });
+    }
+
     function bindAll() {
         document.querySelectorAll('.todo-toggle').forEach(bindToggle);
         document.querySelectorAll('.todo-del').forEach(bindDelete);
         document.querySelectorAll('.todo-edit').forEach(bindEditButton);
+        document.querySelectorAll('[data-row-toggle]').forEach(bindRowExpand);
         document.querySelectorAll('.todo-list-draggable').forEach(bindDrag);
+        document.querySelectorAll('[data-class-block-list]').forEach(bindClassBlockDrag);
         document.querySelectorAll('form[data-add-task]').forEach(bindAddTaskForm);
         document.querySelectorAll('form[data-edit-task]').forEach(bindEditTaskForm);
         bindManageTags();

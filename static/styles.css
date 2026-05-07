@@ -2326,7 +2326,10 @@ details.class-section > summary.class-section-summary .section-toggle-chevron {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 8px 4px;
+    padding: 8px 4px 8px 8px;
+    /* Always reserve the 3px slit on the left so rows line up regardless
+       of whether they're tagged. .has-tag overrides the border color. */
+    border-left: 3px solid transparent;
     border-bottom: 1px dotted var(--rule);
     font-family: var(--serif);
     font-size: 14px;
@@ -2384,8 +2387,7 @@ details.class-section > summary.class-section-summary .section-toggle-chevron {
 
 /* Tag swatch + colored row indicator (user-defined Tag on a Task). */
 .todo-row.has-tag {
-    border-left: 3px solid var(--tag-color);
-    padding-left: 8px;
+    border-left-color: var(--tag-color);
 }
 .todo-tag {
     display: inline-block;
@@ -2561,6 +2563,156 @@ details.class-section > summary.class-section-summary .section-toggle-chevron {
     display: inline-block;
     line-height: 1;
     font-size: 13px;
+}
+
+/* Row layout: main row is the always-visible click target; the drawer sits
+   below it and shows on expand. The original .todo-row's flex behavior
+   moves into .todo-row-main so the drawer can stack as a block. */
+.todo-row {
+    flex-direction: column;
+    align-items: stretch;
+}
+.todo-row-main {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    width: 100%;
+    /* No padding here — keep existing .todo-row padding doing its job. */
+}
+.todo-row-main:focus-visible {
+    outline: 2px solid var(--rust);
+    outline-offset: 2px;
+}
+.todo-row-main .todo-title { flex: 1; min-width: 0; }
+
+/* Tiny memo glyph in the row that hints "this task has notes" without
+   being a button. The full notes show in the drawer when expanded. */
+.todo-notes-indicator {
+    font-size: 12px;
+    opacity: 0.6;
+    margin-left: 2px;
+}
+
+/* Drawer that opens below the row when clicked. Holds the full notes
+   text and the action buttons. */
+.todo-drawer {
+    margin: 6px 0 4px 28px;  /* indent past drag handle + circle */
+    padding: 10px 12px;
+    background: var(--paper-2);
+    border-left: 2px solid var(--rule);
+}
+.todo-row.expanded .todo-drawer { display: block; }
+
+/* Notes content inside the drawer. Pre-wrap preserves user line breaks. */
+.todo-drawer .todo-notes {
+    margin: 0 0 10px;
+    color: var(--ink-2);
+    font-size: 13px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+.todo-drawer-actions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+/* Override .todo-edit/.todo-del compact styles when they live in the
+   drawer — we want labeled, room-to-tap buttons, not inline icons. */
+.todo-drawer .todo-edit,
+.todo-drawer .todo-del {
+    background: transparent;
+    border: 1px solid var(--ink);
+    color: var(--ink);
+    padding: 4px 10px;
+    font-family: var(--mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    cursor: pointer;
+    border-radius: 2px;
+}
+.todo-drawer .todo-del:hover {
+    background: var(--danger, #b94747);
+    border-color: var(--danger, #b94747);
+    color: var(--paper);
+}
+.todo-drawer .todo-edit:hover {
+    background: var(--ink);
+    color: var(--paper);
+}
+
+/* Class-block drag handle — sits to the left of the class header.
+   Grabbable when reordering the class blocks. */
+.class-block-head-row {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+}
+.class-block-head-row .class-block-head { flex: 1; min-width: 0; }
+.class-block-drag {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    cursor: grab;
+    opacity: 0;
+    transition: opacity 120ms ease;
+    flex-shrink: 0;
+    align-self: center;
+}
+.class-block:hover .class-block-drag,
+.class-block-drag:focus-visible { opacity: 0.6; }
+.class-block-drag:hover { opacity: 1; }
+.class-block-drag:active { cursor: grabbing; }
+.class-block-drag-grip {
+    width: 10px;
+    height: 12px;
+    background-image: linear-gradient(to bottom,
+        var(--ink) 0, var(--ink) 1.5px,
+        transparent 1.5px, transparent 4px,
+        var(--ink) 4px, var(--ink) 5.5px,
+        transparent 5.5px, transparent 8px,
+        var(--ink) 8px, var(--ink) 9.5px,
+        transparent 9.5px, transparent 12px);
+}
+.class-block.dragging {
+    opacity: 0.5;
+    background: var(--paper);
+    box-shadow: 0 8px 16px rgba(0, 0, 0, 0.18);
+}
+
+/* Personal bucket header — looks like a class header but isn't a link.
+   Italic + slightly muted to differentiate from real classes. */
+.class-block-head-personal {
+    display: flex;
+    gap: 12px;
+    align-items: baseline;
+    margin-bottom: 6px;
+    padding: 6px 0;
+    border-bottom: 1.5px solid var(--ink);
+}
+.class-block-head-personal .class-code {
+    font-family: var(--serif);
+    font-weight: 700;
+    font-style: italic;
+    color: var(--muted);
+}
+
+/* Notes textarea in add/edit task modals. Matches the existing input style. */
+.add-task-notes textarea {
+    width: 100%;
+    padding: 8px 10px;
+    font-family: var(--serif);
+    font-size: 14px;
+    color: var(--ink-2);
+    background: var(--paper);
+    border: 1px solid var(--ink);
+    border-radius: 2px;
+    resize: vertical;
+    min-height: 70px;
 }
 
 /* ---- Today view ---- */

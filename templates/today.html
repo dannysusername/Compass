@@ -1,54 +1,11 @@
 {% extends "base.html" %}
 {% block title %}Today — Compass{% endblock %}
 {% block content %}
-<h1>Today <span class="subtle">{{ today.strftime('%a %b %d') }}</span></h1>
 
-{% macro render_item(it) -%}
-<li class="todo-row {% if it.completed %}done{% endif %}" data-kind="{{ it.kind }}" data-id="{{ it.id }}">
-    <button type="button" class="todo-toggle" aria-pressed="{{ 'true' if it.completed else 'false' }}" aria-label="Toggle done">
-        <span class="todo-circle"></span>
-    </button>
-    <span class="todo-title">{{ it.title }}</span>
-    {% if it.sub_kind %}<span class="todo-sub-kind">{{ it.sub_kind }}</span>{% endif %}
-    {% if it.due_at and (it.due_at.hour or it.due_at.minute) %}<span class="todo-when">{{ it.due_at.strftime('%H:%M') }}</span>{% endif %}
-</li>
-{%- endmacro %}
-
-{% if overdue %}
-<section class="todo-section overdue-section">
-    <h2>Overdue</h2>
-    {% for slot in overdue.values() %}
-    <div class="class-block">
-        <a href="/classes/{{ slot.cls.id }}" class="class-block-head">
-            <span class="class-code">{{ slot.cls.code }}</span>
-            <span class="class-name">{{ slot.cls.name }}</span>
-        </a>
-        <ul class="todo-list">
-            {% for it in slot["items"] %}{{ render_item(it) }}{% endfor %}
-        </ul>
-    </div>
-    {% endfor %}
-</section>
-{% endif %}
-
-<section class="todo-section">
-    <h2>Today</h2>
-    {% if today_items %}
-        {% for slot in today_items.values() %}
-        <div class="class-block">
-            <a href="/classes/{{ slot.cls.id }}" class="class-block-head">
-                <span class="class-code">{{ slot.cls.code }}</span>
-                <span class="class-name">{{ slot.cls.name }}</span>
-            </a>
-            <ul class="todo-list">
-                {% for it in slot["items"] %}{{ render_item(it) }}{% endfor %}
-            </ul>
-        </div>
-        {% endfor %}
-    {% else %}
-        <p class="empty">Nothing due today. Add tasks from each class page.</p>
-    {% endif %}
-</section>
+{# Reuses the shared today-list partial so /today and / render with the
+   same row layout (collapsed-by-default, click to expand drawer). #}
+{% include "_today_list.html" %}
 
 <script src="{{ '/static/todo.js' | static_v }}" defer></script>
+<script src="{{ '/static/modal.js' | static_v }}" defer></script>
 {% endblock %}

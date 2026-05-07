@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, time, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Optional, List, Union
 from zoneinfo import ZoneInfo
 import json
@@ -81,10 +82,10 @@ class Class(SQLModel, table=True):
         back_populates="cls",
         sa_relationship_kwargs={"cascade": "all, delete-orphan"},
     )
-    tasks: List["Task"] = Relationship(
-        back_populates="cls",
-        sa_relationship_kwargs={"cascade": "all, delete-orphan"},
-    )
+    # No cascade on tasks: deleting a class preserves its tasks (their
+    # class_id gets nulled out in delete_class), so the user doesn't lose
+    # work just because they cleaned up an old class.
+    tasks: List["Task"] = Relationship(back_populates="cls")
 
 
 class Syllabus(SQLModel, table=True):
@@ -113,13 +114,19 @@ class CalendarEvent(SQLModel, table=True):
 
 
 class Task(SQLModel, table=True):
-    """User-typed to-do item attached to a class. Sits alongside CalendarEvent
-    on the today/week views — both can be marked done with the circular
-    button. Tasks are entirely manual; no AI/syllabus auto-generation."""
+    """User-typed to-do item, optionally attached to a class. Sits alongside
+    CalendarEvent on the today/week views — both can be marked done with the
+    circular button. Tasks are entirely manual; no AI/syllabus auto-generation.
+
+    `class_id` is nullable: a NULL class_id is a "Personal" task with no
+    course association (e.g. groceries, errands). The home/today/week views
+    bucket personal tasks under a synthetic "Personal" group.
+    """
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="user.id", index=True)
-    class_id: int = Field(foreign_key="class.id")
+    class_id: Optional[int] = Field(default=None, foreign_key="class.id")
     title: str
+    notes: Optional[str] = Field(default=None)  # free-form, surfaced in iCal DESCRIPTION
     starts_at: Optional[datetime] = None  # range start; None = single-date task
     due_at: Optional[datetime] = None     # range end / deadline
     completed_at: Optional[datetime] = None
@@ -271,6 +278,11 @@ class User(SQLModel, table=True):
         default_factory=lambda: secrets.token_urlsafe(32),
         unique=True, index=True,
     )
+    # JSON list of class-bucket keys ("1", "0", "3", ...) defining the
+    # user's preferred display order on home/today views. "0" is the
+    # Personal bucket. Buckets not listed here append in default
+    # alphabetical-by-code order.
+    class_order_json: Optional[str] = Field(default=None)
 
 
 # ---- App setup ----
@@ -336,6 +348,32 @@ async def lifespan(app: FastAPI):
             # Phase 4: per-user iCal subscription token (for Apple
             # Calendar etc., which can't carry a session cookie).
             _add_column_if_missing(conn, "user", "calendar_token", "TEXT")
+            # Phase 6: per-user class display order on home/today views.
+            _add_column_if_missing(conn, "user", "class_order_json", "TEXT")
+            # Phase 5: notes field on tasks; class_id becomes nullable
+            # so users can have non-class "Personal" tasks (groceries,
+            # errands, etc.).
+            _add_column_if_missing(conn, "task", "notes", "TEXT")
+            # SQLite has no in-place ALTER COLUMN to drop NOT NULL, so
+            # rebuild the task table when its class_id is still marked
+            # NOT NULL. Idempotent — subsequent boots see notnull=0 and
+            # skip. Postgres deploys start fresh from create_all (which
+            # respects the model's Optional[int]) so this never runs there.
+            cols = conn.exec_driver_sql("PRAGMA table_info(task)").fetchall()
+            class_id_meta = next((c for c in cols if c[1] == "class_id"), None)
+            if class_id_meta and class_id_meta[3] == 1:
+                log.info("rebuilding task table to make class_id nullable")
+                col_csv = ", ".join(c[1] for c in cols)
+                conn.exec_driver_sql("PRAGMA foreign_keys = OFF")
+                conn.exec_driver_sql("ALTER TABLE task RENAME TO _task_pre_phase5")
+                # Recreate task from the current SQLModel definition (now
+                # has class_id as nullable).
+                Task.__table__.create(conn)
+                conn.exec_driver_sql(
+                    f"INSERT INTO task ({col_csv}) SELECT {col_csv} FROM _task_pre_phase5"
+                )
+                conn.exec_driver_sql("DROP TABLE _task_pre_phase5")
+                conn.exec_driver_sql("PRAGMA foreign_keys = ON")
             users = conn.exec_driver_sql('SELECT id FROM "user" ORDER BY id').fetchall()
             if users:
                 owner_id = users[0][0]
@@ -1059,6 +1097,13 @@ def delete_class(class_id: int, user: User = Depends(require_login)):
         # in-memory parse_jobs dict — otherwise stale "done" entries linger
         # and confuse status pages for re-used IDs.
         deleted_syllabus_ids = [s.id for s in cls.syllabi]
+        # Detach tasks first so they survive the class deletion as
+        # Personal tasks. Without this, the FK would either cascade-delete
+        # them (old behavior) or fail.
+        for t in cls.tasks:
+            t.class_id = None
+            session.add(t)
+        session.flush()
         session.delete(cls)
         session.commit()
     for sid in deleted_syllabus_ids:
@@ -1254,13 +1299,11 @@ def _normalize_task_range(starts_at: str, due_at: str) -> tuple[Optional[datetim
     return starts_dt, due_dt
 
 
-@app.post("/classes/{class_id}/tasks")
-async def create_task(class_id: int, request: Request,
-                      title: str = Form(...), due_at: str = Form(""),
-                      starts_at: str = Form(""), tag_id: str = Form(""),
-                      user: User = Depends(require_login)):
-    """Create a manual task on a class. Form-post adds via the class sidebar;
-    AJAX clients get JSON, plain forms get a redirect (preserves no-JS path)."""
+def _create_task_for_user(
+    user: User, class_id: Optional[int], request: Request,
+    title: str, due_at: str, starts_at: str, tag_id: str, notes: str,
+):
+    """Shared body for both /tasks (no class) and /classes/{id}/tasks."""
     title = title.strip()
     if not title:
         raise HTTPException(400, "Title required")
@@ -1271,16 +1314,19 @@ async def create_task(class_id: int, request: Request,
             tag_pk = int(tag_id)
         except ValueError:
             tag_pk = None
+    notes_clean = (notes or "").strip() or None
     with Session(engine) as session:
-        _own_class(session, class_id, user.id)  # 404 if not the user's class
+        if class_id is not None:
+            _own_class(session, class_id, user.id)  # 404 if not the user's class
         if tag_pk is not None:
             tag = session.get(Tag, tag_pk)
             if not tag or tag.user_id != user.id:
-                tag_pk = None  # silently drop bad/foreign tag id
+                tag_pk = None
         task = Task(
             user_id=user.id,
             class_id=class_id,
             title=title,
+            notes=notes_clean,
             starts_at=starts_dt,
             due_at=due_dt,
             tag_id=tag_pk,
@@ -1296,7 +1342,32 @@ async def create_task(class_id: int, request: Request,
                 "due_at": task.due_at.isoformat() if task.due_at else None,
                 "completed_at": None,
             })
-    return RedirectResponse(f"/classes/{class_id}", status_code=303)
+    redirect_to = f"/classes/{class_id}" if class_id is not None else "/"
+    return RedirectResponse(redirect_to, status_code=303)
+
+
+@app.post("/classes/{class_id}/tasks")
+async def create_task(class_id: int, request: Request,
+                      title: str = Form(...), due_at: str = Form(""),
+                      starts_at: str = Form(""), tag_id: str = Form(""),
+                      notes: str = Form(""),
+                      user: User = Depends(require_login)):
+    """Create a manual task on a class."""
+    return _create_task_for_user(user, class_id, request,
+                                 title, due_at, starts_at, tag_id, notes)
+
+
+@app.post("/tasks")
+async def create_personal_task(request: Request,
+                               title: str = Form(...), due_at: str = Form(""),
+                               starts_at: str = Form(""), tag_id: str = Form(""),
+                               notes: str = Form(""),
+                               user: User = Depends(require_login)):
+    """Create a Personal task (no class). Used by the home / today / week
+    add-task forms when the user picks the 'Personal' option in the class
+    dropdown."""
+    return _create_task_for_user(user, None, request,
+                                 title, due_at, starts_at, tag_id, notes)
 
 
 @app.get("/tags.json")
@@ -1360,36 +1431,53 @@ def toggle_event(event_id: int, user: User = Depends(require_login)):
 
 @app.post("/tasks/{task_id}/edit")
 async def edit_task(task_id: int, request: Request,
-                    title: str = Form(...), due_at: str = Form(""),
-                    starts_at: str = Form(""),
-                    tag_id: str = Form("__unset__"),
                     user: User = Depends(require_login)):
-    """Update title, due_at, and (optionally) tag_id on a task. The form
-    sends tag_id as '' for 'no tag', or a numeric id. The sentinel
-    '__unset__' (default) means 'don't touch the tag' — so an old client
-    that doesn't send the field still works."""
-    title = title.strip()
+    """Update title, due_at, tag_id, and notes on a task.
+
+    Reads the form directly via `request.form()` because FastAPI's
+    Form() collapses "" and "field absent" into the same value, which
+    breaks the "did the client intend to clear this?" semantics we need
+    for nullable fields like notes and tag_id."""
+    form = await request.form()
+    title = (form.get("title") or "").strip()
     if not title:
         raise HTTPException(400, "Title required")
+    due_at = form.get("due_at") or ""
+    starts_at = form.get("starts_at") or ""
     starts_dt, due_dt = _normalize_task_range(starts_at, due_at)
     with Session(engine) as session:
         t = _own_task(session, task_id, user.id)
         t.title = title
         t.starts_at = starts_dt
         t.due_at = due_dt
-        if tag_id != "__unset__":
-            if tag_id == "":
+        if "tag_id" in form:
+            raw_tag = (form.get("tag_id") or "").strip()
+            if not raw_tag:
                 t.tag_id = None
             else:
                 try:
-                    tpk = int(tag_id)
-                except ValueError:
-                    tpk = None
-                if tpk is not None:
+                    tpk = int(raw_tag)
                     tag = session.get(Tag, tpk)
                     t.tag_id = tpk if (tag and tag.user_id == user.id) else None
-                else:
+                except ValueError:
                     t.tag_id = None
+        if "notes" in form:
+            t.notes = (form.get("notes") or "").strip() or None
+        if "class_id" in form:
+            raw_class = (form.get("class_id") or "").strip()
+            if not raw_class or raw_class == "0":
+                # "0" is the Personal sentinel from the dropdown; "" works too.
+                t.class_id = None
+            else:
+                try:
+                    cpk = int(raw_class)
+                    cls = session.get(Class, cpk)
+                    if cls and cls.user_id == user.id:
+                        t.class_id = cpk
+                    # Foreign class id is silently ignored; don't reset to None
+                    # because that would surprise the user.
+                except ValueError:
+                    pass
         session.add(t)
         session.commit()
         session.refresh(t)
@@ -1398,9 +1486,11 @@ async def edit_task(task_id: int, request: Request,
             "id": t.id,
             "title": t.title,
             "due_at": t.due_at.isoformat() if t.due_at else None,
+            "notes": t.notes,
             "completed_at": t.completed_at.isoformat() if t.completed_at else None,
         })
-    return RedirectResponse(f"/classes/{t.class_id}", status_code=303)
+    redirect_to = f"/classes/{t.class_id}" if t.class_id is not None else "/"
+    return RedirectResponse(redirect_to, status_code=303)
 
 
 @app.post("/tags/{tag_id}/edit")
@@ -1446,6 +1536,40 @@ async def delete_tag(tag_id: int, user: User = Depends(require_login)):
         session.delete(tag)
         session.commit()
         return JSONResponse({"deleted": tag_id})
+
+
+@app.post("/classes/reorder")
+async def reorder_classes(request: Request, user: User = Depends(require_login)):
+    """Persist the user's preferred class display order. Body shape:
+       {"order": ["3", "0", "1", "2"]} — class ids as strings, with "0"
+       representing the Personal bucket. Foreign / unknown ids are dropped."""
+    payload = await request.json()
+    raw = payload.get("order")
+    if not isinstance(raw, list):
+        raise HTTPException(400, "order must be a list")
+    with Session(engine) as session:
+        owned = {
+            c.id for c in session.exec(
+                select(Class).where(Class.user_id == user.id)
+            ).all()
+        }
+        cleaned: list[int] = []
+        seen: set[int] = set()
+        for x in raw:
+            try:
+                v = int(x)
+            except (TypeError, ValueError):
+                continue
+            if v in seen:
+                continue
+            if v == 0 or v in owned:
+                cleaned.append(v)
+                seen.add(v)
+        u = session.get(User, user.id)
+        u.class_order_json = json.dumps([str(v) for v in cleaned])
+        session.add(u)
+        session.commit()
+    return JSONResponse({"ok": True, "order": cleaned})
 
 
 @app.post("/tasks/reorder")
@@ -1513,14 +1637,42 @@ def delete_task(task_id: int, request: Request, user: User = Depends(require_log
 
 # ---- Routes: Today + Week views ----
 
+# Synthetic "class" for tasks that aren't tied to an actual course. Lives
+# under id=0 so it slots into the {class_id: bucket} dicts without colliding
+# with real class ids (which start at 1). Templates check is_personal to
+# render it as a non-clickable header instead of a real class link.
+PERSONAL_BUCKET = SimpleNamespace(id=0, code="Personal", name="", is_personal=True)
+
+
+def _apply_class_order(out: dict, user_id: int) -> dict:
+    """Re-key `out` (a {class_id: bucket} dict) into the user's preferred
+    display order. Buckets not mentioned in the saved order append at the
+    end in their existing order (which is class-table insertion order)."""
+    if not out:
+        return out
+    with Session(engine) as session:
+        u = session.get(User, user_id)
+        saved: list[int] = []
+        if u and u.class_order_json:
+            try:
+                saved = [int(x) for x in json.loads(u.class_order_json)]
+            except (ValueError, TypeError, json.JSONDecodeError):
+                saved = []
+    present = set(out.keys())
+    ordered_keys = [k for k in saved if k in present]
+    ordered_keys.extend(k for k in out.keys() if k not in ordered_keys)
+    return {k: out[k] for k in ordered_keys}
+
+
 def _collect_items_in_range(start: datetime, end: datetime, user_id: int) -> dict:
-    """Return {class_id: {class, items: [{kind, id, title, due_at, completed}]}}
+    """Return {class_id: {class, items: [{kind, id, title, due_at, completed, notes}]}}
     for tasks + events whose due/start datetime falls in [start, end). Scoped
-    to the given user. Both open and completed items are included; the
-    template decides display."""
+    to the given user. Personal tasks (class_id IS NULL) bucket under
+    PERSONAL_BUCKET (key 0). Both open and completed items are included;
+    the template decides display."""
     out: dict[int, dict] = {}
 
-    def _add(cls: "Class", kind: str, item_id: int, title: str,
+    def _add(cls, kind: str, item_id: int, title: str,
              when: Optional[datetime], completed: bool,
              position: int = 0, sub_kind: Optional[str] = None,
              tag_color: Optional[str] = None, tag_name: Optional[str] = None,
@@ -1529,7 +1681,8 @@ def _collect_items_in_range(start: datetime, end: datetime, user_id: int) -> dic
              sub_kind_id: Optional[int] = None,
              starts_at: Optional[datetime] = None,
              is_range: bool = False, is_range_day: bool = False,
-             actionable: bool = True):
+             actionable: bool = True,
+             notes: Optional[str] = None):
         slot = out.setdefault(cls.id, {"cls": cls, "items": []})
         slot["items"].append({
             "kind": kind,
@@ -1550,7 +1703,43 @@ def _collect_items_in_range(start: datetime, end: datetime, user_id: int) -> dic
             "tag_name": tag_name,
             "tag_id": tag_id,
             "tag_is_system": tag_is_system,
+            "notes": notes,
         })
+
+    def _emit_task(cls, t):
+        """Walk one task into one or more _add() calls (range tasks emit
+        per-day, single-date tasks emit once if in window)."""
+        tcolor = t.tag.color if t.tag else None
+        tname = t.tag.name if t.tag else None
+        tpk = t.tag.id if t.tag else None
+        tsys = t.tag.is_system if t.tag else False
+        tag_kw = dict(tag_color=tcolor, tag_name=tname,
+                      tag_id=tpk, tag_is_system=tsys, notes=t.notes)
+        if t.due_at is None and t.starts_at is None:
+            if start <= _today_local() < end and not t.completed_at:
+                _add(cls, "task", t.id, t.title, None, False,
+                     t.position or 0, **tag_kw)
+            return
+        if t.starts_at is not None and t.due_at is not None:
+            starts_local = _to_local(t.starts_at)
+            due_local = _to_local(t.due_at)
+            last_date = due_local.date()
+            d = starts_local.date()
+            while d <= last_date:
+                day_start = datetime.combine(d, time.min, tzinfo=LOCAL_TZ)
+                day_end = day_start + timedelta(days=1)
+                if day_start < end and day_end > start:
+                    is_deadline = (d == last_date)
+                    _add(cls, "task", t.id, t.title, due_local,
+                         t.completed_at is not None, t.position or 0,
+                         starts_at=starts_local, is_range=True,
+                         is_range_day=not is_deadline, **tag_kw)
+                d += timedelta(days=1)
+            return
+        local_due = _to_local(t.due_at)
+        if start <= local_due < end:
+            _add(cls, "task", t.id, t.title, local_due,
+                 t.completed_at is not None, t.position or 0, **tag_kw)
 
     with Session(engine, expire_on_commit=False) as session:
         sys_tag_by_key = {
@@ -1562,44 +1751,7 @@ def _collect_items_in_range(start: datetime, end: datetime, user_id: int) -> dic
         }
         for cls in session.exec(select(Class).where(Class.user_id == user_id)).all():
             for t in cls.tasks:
-                tcolor = t.tag.color if t.tag else None
-                tname = t.tag.name if t.tag else None
-                tpk = t.tag.id if t.tag else None
-                tsys = t.tag.is_system if t.tag else False
-                tag_kw = dict(tag_color=tcolor, tag_name=tname,
-                              tag_id=tpk, tag_is_system=tsys)
-                if t.due_at is None and t.starts_at is None:
-                    # No dates — show on today only if uncompleted (acts
-                    # like an open backlog item)
-                    if start <= _today_local() < end and not t.completed_at:
-                        _add(cls, "task", t.id, t.title, None, False,
-                             t.position or 0, **tag_kw)
-                    continue
-                # Range tasks: emit one entry per day from starts_at.date()
-                # through due_at.date() that falls in [start, end). Every
-                # entry keeps the *actual* due_at and starts_at — only
-                # is_range_day differs day-to-day — so the edit modal
-                # repopulates correctly no matter which day the user clicks.
-                if t.starts_at is not None and t.due_at is not None:
-                    starts_local = _to_local(t.starts_at)
-                    due_local = _to_local(t.due_at)
-                    last_date = due_local.date()
-                    d = starts_local.date()
-                    while d <= last_date:
-                        day_start = datetime.combine(d, time.min, tzinfo=LOCAL_TZ)
-                        day_end = day_start + timedelta(days=1)
-                        if day_start < end and day_end > start:
-                            is_deadline = (d == last_date)
-                            _add(cls, "task", t.id, t.title, due_local,
-                                 t.completed_at is not None, t.position or 0,
-                                 starts_at=starts_local, is_range=True,
-                                 is_range_day=not is_deadline, **tag_kw)
-                        d += timedelta(days=1)
-                    continue
-                local_due = _to_local(t.due_at)
-                if start <= local_due < end:
-                    _add(cls, "task", t.id, t.title, local_due,
-                         t.completed_at is not None, t.position or 0, **tag_kw)
+                _emit_task(cls, t)
             for ev in cls.events:
                 if ev.starts_at is None:
                     continue
@@ -1612,6 +1764,12 @@ def _collect_items_in_range(start: datetime, end: datetime, user_id: int) -> dic
                          sub_kind_color=sys_tag.color if sys_tag else None,
                          sub_kind_id=sys_tag.id if sys_tag else None,
                          actionable=ev.actionable)
+        # Personal tasks (no class) — bucket under PERSONAL_BUCKET.
+        personal_tasks = session.exec(
+            select(Task).where(Task.user_id == user_id, Task.class_id == None)
+        ).all()
+        for t in personal_tasks:
+            _emit_task(PERSONAL_BUCKET, t)
     # Sort: position first (user's drag priority), then due time.
     for slot in out.values():
         slot["items"].sort(key=lambda it: (
@@ -1619,14 +1777,39 @@ def _collect_items_in_range(start: datetime, end: datetime, user_id: int) -> dic
             it["due_at"] is None,
             it["due_at"] or datetime.max.replace(tzinfo=LOCAL_TZ),
         ))
-    return out
+    return _apply_class_order(out, user_id)
 
 
 def _collect_overdue(user_id: int) -> dict:
     """All non-completed tasks/events with due dates in the past, scoped to
-    the given user."""
+    the given user. Personal tasks (no class) bucket under PERSONAL_BUCKET."""
     now = datetime.now(LOCAL_TZ)
     out: dict[int, dict] = {}
+
+    def _emit_overdue_task(cls, t):
+        if t.completed_at or t.due_at is None:
+            return
+        local_due = _to_local(t.due_at)
+        if not (local_due < now and local_due >= now - timedelta(days=30)):
+            return
+        out.setdefault(cls.id, {"cls": cls, "items": []})["items"].append({
+            "kind": "task", "sub_kind": None, "sub_kind_color": None,
+            "sub_kind_id": None,
+            "id": t.id,
+            "class_id": cls.id, "title": t.title,
+            "due_at": local_due, "completed": False,
+            "starts_at": _to_local(t.starts_at) if t.starts_at else None,
+            "is_range": t.starts_at is not None,
+            "is_range_day": False,
+            "actionable": True,
+            "position": t.position or 0,
+            "tag_color": t.tag.color if t.tag else None,
+            "tag_name": t.tag.name if t.tag else None,
+            "tag_id": t.tag.id if t.tag else None,
+            "tag_is_system": t.tag.is_system if t.tag else False,
+            "notes": t.notes,
+        })
+
     with Session(engine, expire_on_commit=False) as session:
         sys_tag_by_key = {
             t.system_key: t
@@ -1637,28 +1820,7 @@ def _collect_overdue(user_id: int) -> dict:
         }
         for cls in session.exec(select(Class).where(Class.user_id == user_id)).all():
             for t in cls.tasks:
-                if t.completed_at:
-                    continue
-                if t.due_at is None:
-                    continue
-                local_due = _to_local(t.due_at)
-                if local_due < now and local_due >= now - timedelta(days=30):
-                    out.setdefault(cls.id, {"cls": cls, "items": []})["items"].append({
-                        "kind": "task", "sub_kind": None, "sub_kind_color": None,
-                        "sub_kind_id": None,
-                        "id": t.id,
-                        "class_id": cls.id, "title": t.title,
-                        "due_at": local_due, "completed": False,
-                        "starts_at": _to_local(t.starts_at) if t.starts_at else None,
-                        "is_range": t.starts_at is not None,
-                        "is_range_day": False,
-                        "actionable": True,
-                        "position": t.position or 0,
-                        "tag_color": t.tag.color if t.tag else None,
-                        "tag_name": t.tag.name if t.tag else None,
-                        "tag_id": t.tag.id if t.tag else None,
-                        "tag_is_system": t.tag.is_system if t.tag else False,
-                    })
+                _emit_overdue_task(cls, t)
             for ev in cls.events:
                 if ev.completed_at:
                     continue
@@ -1686,10 +1848,16 @@ def _collect_overdue(user_id: int) -> dict:
                         "tag_name": None,
                         "tag_id": None,
                         "tag_is_system": False,
+                        "notes": None,
                     })
+        # Personal tasks (no class) — bucket under PERSONAL_BUCKET.
+        for t in session.exec(
+            select(Task).where(Task.user_id == user_id, Task.class_id == None)
+        ).all():
+            _emit_overdue_task(PERSONAL_BUCKET, t)
     for slot in out.values():
         slot["items"].sort(key=lambda it: (it["position"], it["due_at"] or datetime.max.replace(tzinfo=LOCAL_TZ)))
-    return out
+    return _apply_class_order(out, user_id)
 
 
 @app.get("/today", response_class=HTMLResponse)
@@ -1699,10 +1867,20 @@ def today_view(request: Request, user: User = Depends(require_login)):
     today_end = today_start + timedelta(days=1)
     today_items = _collect_items_in_range(today_start, today_end, user.id)
     overdue = _collect_overdue(user.id)
+    with Session(engine, expire_on_commit=False) as session:
+        all_classes = session.exec(
+            select(Class).where(Class.user_id == user.id).order_by(Class.code)
+        ).all()
+        all_tags = session.exec(
+            select(Tag).where(Tag.user_id == user.id).order_by(Tag.name)
+        ).all()
     return templates.TemplateResponse(request, "today.html", {
         "today": today_start,
         "today_items": today_items,
         "overdue": overdue,
+        "all_classes": all_classes,
+        "all_tags": all_tags,
+        "default_class_id": (all_classes[0].id if all_classes else None),
     })
 
 
@@ -1907,8 +2085,8 @@ def _build_ical_for_user(user_id: int, request: Optional[Request] = None) -> byt
         for t in tasks:
             ie = ICalEvent()
             ie.add("uid", f"compass-task-{t.id}@compass")
-            code = class_codes.get(t.class_id, "")
-            prefix = f"[{code}] " if code else ""
+            code = class_codes.get(t.class_id) if t.class_id is not None else None
+            prefix = f"[{code}] " if code else "[Personal] "
             ie.add("summary", f"{prefix}{t.title}")
             due = t.due_at if t.due_at.tzinfo else t.due_at.replace(tzinfo=LOCAL_TZ)
             if t.starts_at is not None:
@@ -1919,7 +2097,9 @@ def _build_ical_for_user(user_id: int, request: Optional[Request] = None) -> byt
             else:
                 ie.add("dtstart", due)
             ie.add("dtstamp", datetime.now(timezone.utc))
-            ie.add("description", "Compass task")
+            # User notes flow through to Apple Calendar's event description.
+            # Falls back to a marker so the field isn't blank.
+            ie.add("description", t.notes or "Compass task")
             _attach_reminder(ie)
             cal.add_component(ie)
 

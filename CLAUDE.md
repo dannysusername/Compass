@@ -32,6 +32,22 @@ Email + password, bcrypt-hashed in `User.password_hash`. Sessions are signed coo
 
 System tags (`exam`, `assignment`, `project`, `milestone`) are **per-user**, not global — seeded into each new user's account at signup via `_seed_system_tags_for_user`. Auto-generated tags from Grok parses (e.g. `quiz`, `lab`) flow through `_ensure_system_tag(session, user_id, kind)`.
 
+### Personal tasks (no class)
+`Task.class_id` is **nullable**. A NULL `class_id` means a Personal task — a non-class to-do (groceries, errands). Routes:
+- `POST /tasks` creates a Personal task; `POST /classes/{id}/tasks` creates one tied to a class. Both go through the shared `_create_task_for_user` helper.
+- `delete_class` does NOT cascade-delete tasks; it nulls their `class_id` first so the user keeps their work as Personal tasks.
+- The collectors (`_collect_items_in_range`, `_collect_overdue`) bucket Personal tasks under a synthetic `PERSONAL_BUCKET` (`SimpleNamespace(id=0, code="Personal", is_personal=True)`) alongside real-class buckets. Templates check `slot.cls.is_personal` to render a non-clickable header instead of a class link.
+- The edit-task modal includes the class dropdown, so users can move a task between classes (or to/from Personal). `edit_task` reads the form via `request.form()` instead of `Form()` parameters because FastAPI's Form() collapses empty-string and missing into the same default — direct read lets us distinguish "clear this field" from "don't touch it" (needed for nullable `notes`, `tag_id`, `class_id`).
+
+### Class display order
+`User.class_order_json` is a JSON array of bucket-key strings (`"1"`, `"0"`, `"3"`, etc., where `"0"` = Personal) defining the user's preferred order on home/today views. `_apply_class_order(out, user_id)` re-keys the collector dicts into that order; missing buckets append at the end. `POST /classes/reorder` takes `{"order": [...]}`, validates ownership, persists. Client-side drag is bound on `[data-class-block-list]` containers — class blocks can be reordered as units, but tasks can't be dragged across class boundaries (per-class `.todo-list-draggable` is the task drag scope).
+
+### Task notes
+`Task.notes` is free-form text, optional. Surfaced in:
+- The add/edit task modals as a `<textarea name="notes">` (rows=4, vertical resize).
+- A notes-toggle button (📝 icon, no text) on `.todo-row` when the task has notes — toggles a `.todo-notes` panel inline. Hidden by default everywhere; visible only after the user clicks the toggle. The week-grid's compact `.day-cell-item` rows do NOT show notes or the toggle (they're for at-a-glance only); notes appear in the day-detail modal.
+- iCal feed's `DESCRIPTION` field — flows through to Apple Calendar event details. Falls back to "Compass task" when notes are empty.
+
 ### Database engine
 Reads `DATABASE_URL` first (Heroku sets `postgres://...`, rewritten to `postgresql+psycopg://`), falls back to local `compass.db` (SQLite). The `IS_SQLITE` flag gates SQLite-only `_add_column_if_missing` migrations in the lifespan; Postgres deploys rely on `SQLModel.metadata.create_all` from a fresh DB.
 

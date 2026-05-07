@@ -12,12 +12,12 @@
         <h2>Today <span class="subtle">{{ today.strftime('%a %b %d') }}</span></h2>
     </div>
 
-    {% if all_classes %}
+    {# Add-task is always available — Personal tasks don't need a class. #}
     <button type="button" class="add-task-btn" data-open-modal="add-task-modal">+ Add task</button>
-    {% endif %}
 
     {% macro render_item(it) -%}
     {% set row_color = it.tag_color or it.sub_kind_color %}
+    {% set has_notes = it.notes and it.notes|trim %}
     <li class="todo-row {% if it.completed %}done{% endif %} {% if row_color %}has-tag{% endif %} {% if it.is_range_day %}is-range-day{% endif %} {% if it.actionable is defined and not it.actionable %}is-context{% endif %}"
         {% if row_color %}style="--tag-color: {{ row_color }}"{% endif %}
         data-kind="{{ it.kind }}" data-id="{{ it.id }}" data-class-id="{{ it.class_id }}"
@@ -25,27 +25,39 @@
         data-due-at="{{ it.due_at.strftime('%Y-%m-%dT%H:%M') if it.due_at else '' }}"
         data-starts-at="{{ it.starts_at.strftime('%Y-%m-%dT%H:%M') if it.starts_at else '' }}"
         data-tag-id="{{ it.tag_id or '' }}"
-        data-sub-kind-id="{{ it.sub_kind_id or '' }}">
-        <span class="todo-drag-handle" title="Drag to reorder priority" aria-label="Drag">
-            <span class="todo-burger" aria-hidden="true"></span>
-        </span>
-        <button type="button" class="todo-toggle" aria-pressed="{{ 'true' if it.completed else 'false' }}" aria-label="Toggle done">
-            <span class="todo-circle"></span>
-        </button>
-        <span class="todo-title">{{ it.title }}</span>
-        {% if it.tag_name %}<span class="todo-tag" style="--tag-color: {{ it.tag_color }}">{{ it.tag_name }}</span>{% endif %}
-        {% if it.sub_kind %}<span class="todo-tag"{% if it.sub_kind_color %} style="--tag-color: {{ it.sub_kind_color }}"{% endif %}>{{ it.sub_kind }}</span>{% endif %}
-        {% if it.is_range %}
-            <span class="todo-range">{{ it.starts_at.strftime('%a %H:%M') }} → {{ it.due_at.strftime('%a %H:%M') }}</span>
-        {% elif it.due_at and (it.due_at.hour or it.due_at.minute) %}
-            <span class="todo-when">{{ it.due_at.strftime('%H:%M') }}</span>
-        {% endif %}
-        {% if it.kind == 'task' %}
-        <button type="button" class="todo-edit" data-id="{{ it.id }}" aria-label="Edit task" title="Edit">
-            <span class="todo-edit-icon" aria-hidden="true">✎</span>
-        </button>
-        {% endif %}
-        <button type="button" class="todo-del" data-id="{{ it.id }}" data-kind="{{ it.kind }}" aria-label="Delete {{ it.kind }}">×</button>
+        data-sub-kind-id="{{ it.sub_kind_id or '' }}"
+        data-notes="{{ it.notes or '' }}">
+        <div class="todo-row-main" data-row-toggle aria-expanded="false" tabindex="0" role="button"
+             aria-label="{{ it.title }} — tap for actions">
+            <span class="todo-drag-handle" title="Drag to reorder priority" aria-label="Drag">
+                <span class="todo-burger" aria-hidden="true"></span>
+            </span>
+            <button type="button" class="todo-toggle" aria-pressed="{{ 'true' if it.completed else 'false' }}" aria-label="Toggle done">
+                <span class="todo-circle"></span>
+            </button>
+            <span class="todo-title">{{ it.title }}</span>
+            {% if it.tag_name %}<span class="todo-tag" style="--tag-color: {{ it.tag_color }}">{{ it.tag_name }}</span>{% endif %}
+            {% if it.sub_kind %}<span class="todo-tag"{% if it.sub_kind_color %} style="--tag-color: {{ it.sub_kind_color }}"{% endif %}>{{ it.sub_kind }}</span>{% endif %}
+            {% if it.is_range %}
+                <span class="todo-range">{{ it.starts_at.strftime('%a %H:%M') }} → {{ it.due_at.strftime('%a %H:%M') }}</span>
+            {% elif it.due_at and (it.due_at.hour or it.due_at.minute) %}
+                <span class="todo-when">{{ it.due_at.strftime('%H:%M') }}</span>
+            {% endif %}
+            {% if has_notes %}<span class="todo-notes-indicator" aria-hidden="true" title="Has notes">📝</span>{% endif %}
+        </div>
+        {# Action drawer — collapsed by default, opens on row click. Shows notes
+           and the action buttons so the inline row stays uncluttered. #}
+        <div class="todo-drawer" hidden>
+            {% if has_notes %}
+            <div class="todo-notes">{{ it.notes }}</div>
+            {% endif %}
+            <div class="todo-drawer-actions">
+                {% if it.kind == 'task' %}
+                <button type="button" class="todo-edit" data-id="{{ it.id }}">✎ Edit</button>
+                {% endif %}
+                <button type="button" class="todo-del" data-id="{{ it.id }}" data-kind="{{ it.kind }}">× Delete</button>
+            </div>
+        </div>
     </li>
     {%- endmacro %}
 
@@ -54,10 +66,16 @@
         <h3 class="todo-section-head">Overdue</h3>
         {% for slot in overdue.values() %}
         <div class="class-block">
+            {% if slot.cls.is_personal is defined and slot.cls.is_personal %}
+            <div class="class-block-head class-block-head-personal">
+                <span class="class-code">{{ slot.cls.code }}</span>
+            </div>
+            {% else %}
             <a href="/classes/{{ slot.cls.id }}" class="class-block-head">
                 <span class="class-code">{{ slot.cls.code }}</span>
                 <span class="class-name">{{ slot.cls.name }}</span>
             </a>
+            {% endif %}
             <ul class="todo-list todo-list-draggable">
                 {% for it in slot["items"] %}{{ render_item(it) }}{% endfor %}
             </ul>
@@ -67,23 +85,35 @@
     {% endif %}
 
     {% if today_items %}
+        <div class="class-block-list" data-class-block-list>
         {% for slot in today_items.values() %}
-        <div class="class-block">
-            <a href="/classes/{{ slot.cls.id }}" class="class-block-head">
-                <span class="class-code">{{ slot.cls.code }}</span>
-                <span class="class-name">{{ slot.cls.name }}</span>
-            </a>
+        <div class="class-block" data-bucket-key="{{ slot.cls.id }}">
+            <div class="class-block-head-row">
+                <span class="class-block-drag" title="Drag to reorder this class" aria-label="Drag class">
+                    <span class="class-block-drag-grip" aria-hidden="true"></span>
+                </span>
+                {% if slot.cls.is_personal is defined and slot.cls.is_personal %}
+                <div class="class-block-head class-block-head-personal">
+                    <span class="class-code">{{ slot.cls.code }}</span>
+                </div>
+                {% else %}
+                <a href="/classes/{{ slot.cls.id }}" class="class-block-head">
+                    <span class="class-code">{{ slot.cls.code }}</span>
+                    <span class="class-name">{{ slot.cls.name }}</span>
+                </a>
+                {% endif %}
+            </div>
             <ul class="todo-list todo-list-draggable">
                 {% for it in slot["items"] %}{{ render_item(it) }}{% endfor %}
             </ul>
         </div>
         {% endfor %}
+        </div>
     {% else %}
         {% if not overdue %}<p class="empty">Nothing for today. Click <strong>+ Add task</strong> to add one.</p>{% endif %}
     {% endif %}
 </section>
 
-{% if all_classes %}
 <!-- Edit task modal — populated dynamically by todo.js when the pencil button is clicked. -->
 <div class="modal-overlay" id="edit-task-modal" hidden>
     <div class="modal-dialog" role="dialog" aria-labelledby="edit-task-modal-title">
@@ -105,6 +135,16 @@
             <label class="add-task-due">
                 <span class="add-task-label">Due (optional)</span>
                 <input type="datetime-local" name="due_at">
+            </label>
+            <label class="add-task-class">
+                <span class="add-task-label">Class</span>
+                <select name="class_id" data-edit-task-class>
+                    <option value="0">Personal (no class)</option>
+                    {% if all_classes %}<option disabled>──────────</option>{% endif %}
+                    {% for c in all_classes %}
+                    <option value="{{ c.id }}">{{ c.code }} — {{ c.name }}</option>
+                    {% endfor %}
+                </select>
             </label>
             <div class="add-task-tag">
                 <span class="add-task-label">Tag (optional) <button type="button" class="link-btn" data-open-manage-tags>Manage tags</button></span>
@@ -128,6 +168,10 @@
                 <input type="color" value="#a83232" data-new-tag-color>
                 <button type="button" class="secondary small" data-cancel-new-tag>Cancel</button>
             </div>
+            <label class="add-task-notes">
+                <span class="add-task-label">Notes (optional)</span>
+                <textarea name="notes" rows="4" placeholder="Anything extra — grocery list, links, reminders…"></textarea>
+            </label>
             <div class="modal-actions">
                 <button type="submit">Save</button>
                 <button type="button" class="secondary" data-close-modal>Cancel</button>
@@ -159,6 +203,8 @@
             <label class="add-task-class">
                 <span class="add-task-label">Class</span>
                 <select name="class_id" data-add-task-class>
+                    <option value="" {% if not default_class_id %}selected{% endif %}>Personal (no class)</option>
+                    {% if all_classes %}<option disabled>──────────</option>{% endif %}
                     {% for c in all_classes %}
                     <option value="{{ c.id }}" {% if c.id == default_class_id %}selected{% endif %}>{{ c.code }} — {{ c.name }}</option>
                     {% endfor %}
@@ -186,6 +232,10 @@
                 <input type="color" value="#a83232" data-new-tag-color>
                 <button type="button" class="secondary small" data-cancel-new-tag>Cancel</button>
             </div>
+            <label class="add-task-notes">
+                <span class="add-task-label">Notes (optional)</span>
+                <textarea name="notes" rows="4" placeholder="Anything extra — grocery list, links, reminders…"></textarea>
+            </label>
             <div class="modal-actions">
                 <button type="submit">Add task</button>
                 <button type="button" class="secondary" data-close-modal>Cancel</button>
@@ -204,4 +254,3 @@
         <ul class="tag-manage-list" data-tag-manage-list></ul>
     </div>
 </div>
-{% endif %}
