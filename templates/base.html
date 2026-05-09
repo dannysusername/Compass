@@ -40,5 +40,25 @@
         {% block content %}{% endblock %}
     </main>
     <script src="{{ '/static/upload.js' | static_v }}" defer></script>
+    {% if request.session.get("user_id") %}
+    <script>
+      // Detect the browser's IANA timezone and POST it so the server
+      // can render today/overdue/week dates in the user's actual local
+      // time instead of the hardcoded LOCAL_TZ default. Cheap fire-and-
+      // forget on every page load — server short-circuits when the
+      // value matches what's already stored.
+      (function () {
+        try {
+          var tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+          if (!tz) return;
+          var fd = new FormData();
+          fd.append('tz', tz);
+          fetch('/settings/timezone', {
+            method: 'POST', body: fd, credentials: 'same-origin',
+          }).catch(function () { /* network blip — try again next load */ });
+        } catch (e) { /* old browser, no Intl */ }
+      })();
+    </script>
+    {% endif %}
 </body>
 </html>

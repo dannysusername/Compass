@@ -60,11 +60,21 @@
     </p>
 
     <details style="margin-top: 20px">
-        <summary class="subtle" style="cursor: pointer">Regenerate subscription link</summary>
+        <summary class="subtle" style="cursor: pointer">Apple Calendar showing duplicates or stale items?</summary>
         <p class="hint" style="margin-top: 8px">
-            Rotating the link breaks all existing subscriptions immediately.
-            You'll have to re-subscribe in Apple Calendar with the new URL.
+            Apple Calendar caches subscribed feeds and sometimes adds a fresh
+            subscription every time you tap the <em>Subscribe</em> link, so duplicates
+            and ghost entries can build up.
         </p>
+        <p class="hint" style="margin-top: 8px"><strong>Fix:</strong></p>
+        <ol class="hint" style="margin: 0 0 8px 20px; padding: 0">
+            <li>In Apple Calendar, delete every "Compass" subscription you can find
+                (Mac: <em>Calendar &rarr; Settings &rarr; Accounts</em>; iOS:
+                <em>Settings &rarr; Calendar &rarr; Accounts &rarr; Subscribed</em>).</li>
+            <li>Hit <em>Regenerate link</em> below — that 404s any zombie
+                subscriptions still pointing at the old URL.</li>
+            <li>Tap the new <em>Subscribe</em> link above <strong>once</strong>.</li>
+        </ol>
         <form method="post" action="/settings/calendar/regenerate">
             <button type="submit" style="opacity: 0.7">Regenerate link</button>
         </form>

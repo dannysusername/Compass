@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "Compass",
+  "version": "0.2.0",
+  "description": "Quick-add tasks and view your Today list — from any tab.",
+  "permissions": ["storage", "sidePanel"],
+  "host_permissions": [
+    "http://localhost:8000/*",
+    "http://127.0.0.1:8000/*",
+    "http://192.168.86.42:8000/*"
+  ],
+  "optional_host_permissions": ["https://*/*"],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Compass — Quick Add"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "options_page": "options.html"
+}

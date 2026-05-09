@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <link rel="stylesheet" href="popup.css">
+    <link rel="stylesheet" href="sidepanel.css">
+    <title>Compass — Today</title>
+</head>
+<body>
+    <header class="popup-head sidepanel-head">
+        <em class="logo">Compass</em><span class="dot">.</span>
+        <span class="popup-sub" id="today-date">Today</span>
+        <button type="button" id="refresh-btn" class="muted-btn" title="Refresh">↻</button>
+    </header>
+
+    <main id="content">
+        <p class="muted loading">Loading…</p>
+    </main>
+
+    <!-- Editor view — hidden by default; shown in place of #content when
+         a task row is clicked. The side panel is too narrow for an
+         overlay modal, so we swap views instead of stacking. Alerts +
+         attachments aren't here in v1 (complex UI, deferred); the
+         partial-update endpoint leaves them untouched when not sent. -->
+    <section id="editor" class="editor-view" hidden>
+        <button type="button" id="editor-back" class="muted-btn" aria-label="Back to list">← Back</button>
+        <form id="edit-form" autocomplete="off">
+            <input type="hidden" name="task_id">
+
+            <label class="field">
+                <span class="label">Task</span>
+                <input type="text" name="title" required>
+            </label>
+
+            <label class="field">
+                <span class="label">Class</span>
+                <select name="class_id" id="edit-class">
+                    <option value="0">Personal (no class)</option>
+                </select>
+            </label>
+
+            <label class="field">
+                <span class="label">Due</span>
+                <input type="datetime-local" name="due_at">
+            </label>
+
+            <label class="field" id="edit-starts-label">
+                <span class="label">Starts on</span>
+                <input type="datetime-local" name="starts_at">
+            </label>
+
+            <label class="checkbox-field">
+                <input type="checkbox" name="is_all_day" value="1" id="edit-all-day">
+                <span>All day</span>
+            </label>
+
+            <label class="field">
+                <span class="label">Repeat</span>
+                <select name="rrule" id="edit-rrule">
+                    <option value="">Doesn't repeat</option>
+                    <option value="FREQ=DAILY">Daily</option>
+                    <option value="FREQ=WEEKLY">Weekly</option>
+                    <option value="FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR">Weekdays</option>
+                    <option value="FREQ=MONTHLY">Monthly</option>
+                </select>
+            </label>
+
+            <label class="field" id="edit-until-label" hidden>
+                <span class="label">End date (optional)</span>
+                <input type="datetime-local" name="rrule_until">
+            </label>
+
+            <label class="field">
+                <span class="label">Tag</span>
+                <select name="tag_id" id="edit-tag">
+                    <option value="">No tag</option>
+                </select>
+            </label>
+
+            <label class="field">
+                <span class="label">Notes</span>
+                <textarea name="notes" rows="3" placeholder="Optional"></textarea>
+            </label>
+
+            <div class="actions">
+                <button type="submit" class="primary">Save</button>
+                <button type="button" id="editor-cancel" class="muted">Cancel</button>
+            </div>
+
+            <div id="edit-status" class="status" hidden></div>
+            <p class="hint" style="margin-top: 14px; font-size: 10px; color: var(--ink-3)">
+                Reminders &amp; attachments: edit in <a href="#" id="edit-open-app">Compass</a>.
+            </p>
+        </form>
+    </section>
+
+    <footer class="sidepanel-foot">
+        <span class="hint">Quick-add via the toolbar icon</span>
+        <a href="#" id="open-app">Open Compass →</a>
+    </footer>
+
+    <!-- Recurring-delete picker. Hidden by default, slides up from the
+         bottom when the user X's a row whose data-rrule is non-empty.
+         Three options match the web app's delete dialog. -->
+    <div id="rec-delete" class="bottom-sheet" hidden>
+        <p class="sheet-title">This task repeats</p>
+        <p class="sheet-prompt" id="rec-delete-prompt">Pick which instances to delete.</p>
+        <div class="sheet-actions">
+            <button type="button" data-mode="this">Delete this date only</button>
+            <button type="button" data-mode="future">Delete this and all future</button>
+            <button type="button" data-mode="all" class="danger">Delete entire task</button>
+            <button type="button" data-mode="cancel" class="muted">Cancel</button>
+        </div>
+    </div>
+
+    <script type="module" src="sidepanel.js"></script>
+</body>
+</html>

@@ -12,7 +12,6 @@
 
 {% macro render_item(it) -%}
 {% set row_color = it.tag_color or it.sub_kind_color %}
-{% set has_notes = it.notes and it.notes|trim %}
 <li class="todo-row {% if it.completed %}done{% endif %} {% if row_color %}has-tag{% endif %} {% if it.is_range_day %}is-range-day{% endif %} {% if it.actionable is defined and not it.actionable %}is-context{% endif %}"
     {% if row_color %}style="--tag-color: {{ row_color }}"{% endif %}
     data-kind="{{ it.kind }}" data-id="{{ it.id }}" data-class-id="{{ it.class_id }}"
@@ -21,6 +20,8 @@
     data-starts-at="{{ it.starts_at.strftime('%Y-%m-%dT%H:%M') if it.starts_at else '' }}"
     data-tag-id="{{ it.tag_id or '' }}"
     data-sub-kind-id="{{ it.sub_kind_id or '' }}"
+    data-rrule="{{ it.rrule or '' }}"
+    data-is-all-day="{{ '1' if it.is_all_day else '' }}"
     data-notes="{{ it.notes or '' }}">
     <div class="todo-row-main" data-row-toggle aria-expanded="false" tabindex="0" role="button"
          aria-label="{{ it.title }} — tap for actions">
@@ -31,17 +32,18 @@
             <span class="todo-circle"></span>
         </button>
         <span class="todo-title">{{ it.title }}</span>
-        {% if it.tag_name %}<span class="todo-tag" style="--tag-color: {{ it.tag_color }}">{{ it.tag_name }}</span>{% endif %}
-        {% if it.sub_kind %}<span class="todo-tag"{% if it.sub_kind_color %} style="--tag-color: {{ it.sub_kind_color }}"{% endif %}>{{ it.sub_kind }}</span>{% endif %}
-        {% if it.is_range %}
+        {% if it.is_all_day %}
+            <span class="todo-when">All day</span>
+        {% elif it.is_range %}
             <span class="todo-range">{{ it.starts_at.strftime('%a %H:%M') }} → {{ it.due_at.strftime('%a %H:%M') }}</span>
         {% elif it.due_at and (it.due_at.hour or it.due_at.minute) %}
             <span class="todo-when">{{ it.due_at.strftime('%H:%M') }}</span>
         {% endif %}
-        {% if has_notes %}<span class="todo-notes-indicator" aria-hidden="true" title="Has notes">📝</span>{% endif %}
+        {% if it.tag_name %}<span class="todo-tag" style="--tag-color: {{ it.tag_color }}">{{ it.tag_name }}</span>{% endif %}
+        {% if it.sub_kind %}<span class="todo-tag"{% if it.sub_kind_color %} style="--tag-color: {{ it.sub_kind_color }}"{% endif %}>{{ it.sub_kind }}</span>{% endif %}
     </div>
     <div class="todo-drawer" hidden>
-        {% if has_notes %}
+        {% if it.notes and it.notes|trim %}
         <div class="todo-notes">{{ it.notes }}</div>
         {% endif %}
         <div class="todo-drawer-actions">
@@ -92,7 +94,7 @@
                   data-day-date="{{ day.date.strftime('%Y-%m-%d') }}">
             <button type="button" class="add-task-btn" data-add-for-date="{{ day.date.strftime('%Y-%m-%d') }}">+ Add task for this day</button>
             {% if day.items_by_class %}
-                <div class="class-block-list" data-class-block-list>
+                <div class="class-block-list" data-class-block-list data-day-date="{{ day.date.strftime('%Y-%m-%d') }}">
                 {% for slot in day.items_by_class.values() %}
                 <div class="class-block" data-bucket-key="{{ slot.cls.id }}">
                     <div class="class-block-head-row">
@@ -146,14 +148,17 @@
                 <span class="add-task-label">Task</span>
                 <input type="text" name="title" required>
             </label>
-            <label class="add-task-starts" data-task-starts hidden>
-                <span class="add-task-label">Starts on</span>
+            <label class="add-task-starts">
+                <span class="add-task-label">Starts on (optional)</span>
                 <input type="datetime-local" name="starts_at">
             </label>
-            <button type="button" class="link-btn add-task-range-toggle" data-toggle-task-starts>+ Add start date</button>
             <label class="add-task-due">
                 <span class="add-task-label">Due (optional)</span>
-                <input type="datetime-local" name="due_at">
+                <input type="datetime-local" name="due_at" data-task-due>
+            </label>
+            <label class="add-task-allday">
+                <input type="checkbox" name="is_all_day" value="1" data-task-all-day>
+                <span>All day</span>
             </label>
             <label class="add-task-class">
                 <span class="add-task-label">Class</span>
@@ -189,6 +194,47 @@
                 <button type="button" class="secondary small" data-cancel-new-tag>Cancel</button>
             </div>
             {% endif %}
+            <label class="add-task-rrule">
+                <span class="add-task-label">Repeat</span>
+                <select name="rrule" data-task-rrule>
+                    <option value="">Doesn't repeat</option>
+                    <option value="FREQ=DAILY">Daily</option>
+                    <option value="FREQ=WEEKLY">Weekly</option>
+                    <option value="FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR">Every weekday (Mon–Fri)</option>
+                    <option value="FREQ=MONTHLY">Monthly</option>
+                </select>
+            </label>
+            <label class="add-task-rrule-until" data-task-rrule-until hidden>
+                <span class="add-task-label">End date (optional)</span>
+                <input type="datetime-local" name="rrule_until">
+            </label>
+            <div class="add-task-alerts" data-task-alerts>
+                <span class="add-task-label">Reminders</span>
+                <div class="alerts-chips" data-alerts-chips></div>
+                <input type="hidden" name="alerts" data-alerts-value value="">
+                <div class="alerts-add">
+                    <select data-alerts-add-select>
+                        <option value="">+ Add reminder…</option>
+                        <option value="0">At time of event</option>
+                        <option value="5">5 min before</option>
+                        <option value="15">15 min before</option>
+                        <option value="30">30 min before</option>
+                        <option value="60">1 hour before</option>
+                        <option value="120">2 hours before</option>
+                        <option value="1440">1 day before</option>
+                        <option value="2880">2 days before</option>
+                        <option value="10080">1 week before</option>
+                    </select>
+                </div>
+            </div>
+            <div class="add-task-attachments" data-task-attachments-edit hidden>
+                <span class="add-task-label">Attachments</span>
+                <ul class="attachments-list" data-attachments-list></ul>
+                <label class="attachments-upload">
+                    <input type="file" data-attachments-input>
+                    <span class="link-btn">+ Add file</span>
+                </label>
+            </div>
             <label class="add-task-notes">
                 <span class="add-task-label">Notes (optional)</span>
                 <textarea name="notes" rows="4" placeholder="Anything extra — grocery list, links, reminders…"></textarea>
@@ -212,14 +258,17 @@
                 <span class="add-task-label">Task</span>
                 <input type="text" name="title" placeholder="e.g. Read chapter 4" required autofocus>
             </label>
-            <label class="add-task-starts" data-task-starts hidden>
-                <span class="add-task-label">Starts on</span>
+            <label class="add-task-starts">
+                <span class="add-task-label">Starts on (optional)</span>
                 <input type="datetime-local" name="starts_at">
             </label>
-            <button type="button" class="link-btn add-task-range-toggle" data-toggle-task-starts>+ Add start date</button>
             <label class="add-task-due">
                 <span class="add-task-label">Due (optional)</span>
-                <input type="datetime-local" name="due_at">
+                <input type="datetime-local" name="due_at" data-task-due>
+            </label>
+            <label class="add-task-allday">
+                <input type="checkbox" name="is_all_day" value="1" data-task-all-day>
+                <span>All day</span>
             </label>
             <label class="add-task-class">
                 <span class="add-task-label">Class</span>
@@ -253,6 +302,47 @@
                 <input type="color" value="#a83232" data-new-tag-color>
                 <button type="button" class="secondary small" data-cancel-new-tag>Cancel</button>
             </div>
+            <label class="add-task-rrule">
+                <span class="add-task-label">Repeat</span>
+                <select name="rrule" data-task-rrule>
+                    <option value="">Doesn't repeat</option>
+                    <option value="FREQ=DAILY">Daily</option>
+                    <option value="FREQ=WEEKLY">Weekly</option>
+                    <option value="FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR">Every weekday (Mon–Fri)</option>
+                    <option value="FREQ=MONTHLY">Monthly</option>
+                </select>
+            </label>
+            <label class="add-task-rrule-until" data-task-rrule-until hidden>
+                <span class="add-task-label">End date (optional)</span>
+                <input type="datetime-local" name="rrule_until">
+            </label>
+            <div class="add-task-alerts" data-task-alerts>
+                <span class="add-task-label">Reminders <span class="subtle-hint">(smart defaults by tag)</span></span>
+                <div class="alerts-chips" data-alerts-chips></div>
+                <input type="hidden" name="alerts" data-alerts-value value="">
+                <div class="alerts-add">
+                    <select data-alerts-add-select>
+                        <option value="">+ Add reminder…</option>
+                        <option value="0">At time of event</option>
+                        <option value="5">5 min before</option>
+                        <option value="15">15 min before</option>
+                        <option value="30">30 min before</option>
+                        <option value="60">1 hour before</option>
+                        <option value="120">2 hours before</option>
+                        <option value="1440">1 day before</option>
+                        <option value="2880">2 days before</option>
+                        <option value="10080">1 week before</option>
+                    </select>
+                </div>
+            </div>
+            <div class="add-task-attachments" data-task-attachments-add>
+                <span class="add-task-label">Attachments <span class="subtle-hint">(saved with the task)</span></span>
+                <ul class="attachments-list" data-pending-attachments-list></ul>
+                <label class="attachments-upload">
+                    <input type="file" data-pending-attachments-input>
+                    <span class="link-btn">+ Add file</span>
+                </label>
+            </div>
             <label class="add-task-notes">
                 <span class="add-task-label">Notes (optional)</span>
                 <textarea name="notes" rows="4" placeholder="Anything extra — grocery list, links, reminders…"></textarea>
@@ -262,6 +352,21 @@
                 <button type="button" class="secondary" data-close-modal>Cancel</button>
             </div>
         </form>
+    </div>
+</div>
+
+<div class="modal-overlay" id="delete-recurring-modal" hidden>
+    <div class="modal-dialog" role="dialog" aria-labelledby="delete-recurring-title-w">
+        <div class="modal-head">
+            <h2 id="delete-recurring-title-w">Delete recurring task</h2>
+            <button type="button" class="modal-close" data-close-modal aria-label="Close">×</button>
+        </div>
+        <p class="subtle" data-recurring-prompt>This task repeats. Pick which instances to delete.</p>
+        <div class="modal-actions modal-actions-stack">
+            <button type="button" data-delete-mode="this">Delete this date only</button>
+            <button type="button" data-delete-mode="future">Delete this and all future</button>
+            <button type="button" class="secondary" data-close-modal>Cancel</button>
+        </div>
     </div>
 </div>
 
@@ -312,16 +417,22 @@
         const dayModal = document.getElementById('day-modal');
         const addModal = document.getElementById('add-task-modal');
         if (!addModal) return;
-        // Default to end-of-day so a date-only pick still hits the right
-        // calendar cell (datetime-local needs HH:MM).
-        const dateInput = addModal.querySelector('input[name="due_at"]');
-        if (dateInput) dateInput.value = dateStr + 'T23:59';
+        // Apple-style defaults for "+ Add task for this day": 9-10 AM
+        // window on the chosen day. User can edit either field.
         const startsInput = addModal.querySelector('input[name="starts_at"]');
-        if (startsInput) startsInput.value = '';
-        const startsLabel = addModal.querySelector('[data-task-starts]');
-        if (startsLabel) startsLabel.hidden = true;
+        const dueInput = addModal.querySelector('input[name="due_at"]');
+        if (startsInput) {
+            if (startsInput.type === 'date') startsInput.value = dateStr;
+            else startsInput.value = dateStr + 'T09:00';
+        }
+        if (dueInput) {
+            if (dueInput.type === 'date') dueInput.value = dateStr;
+            else dueInput.value = dateStr + 'T10:00';
+        }
         const titleInput = addModal.querySelector('input[name="title"]');
         if (titleInput) titleInput.value = '';
+        const allDayCheckbox = addModal.querySelector('[data-task-all-day]');
+        if (allDayCheckbox) allDayCheckbox.checked = false;
         if (dayModal) dayModal.hidden = true;
         addModal.hidden = false;
         document.body.classList.add('modal-open');

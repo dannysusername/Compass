@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <link rel="stylesheet" href="popup.css">
+    <title>Compass — Settings</title>
+    <style>
+      /* Options page is wider than the popup. */
+      html, body { width: auto; max-width: 560px; }
+      body { padding: 28px 32px; }
+    </style>
+</head>
+<body>
+    <header class="popup-head">
+        <em class="logo">Compass</em><span class="dot">.</span>
+        <span class="popup-sub">Extension settings</span>
+    </header>
+
+    <form id="options-form">
+        <label class="field">
+            <span class="label">Compass server URL</span>
+            <input type="text" id="compass-url" placeholder="http://localhost:8000" autocomplete="off">
+        </label>
+        <p class="hint" style="font-size: 11px; color: var(--ink-3); margin: 0 0 16px">
+            Where the FastAPI server is running. <code>http://localhost:8000</code> when
+            running locally; your Heroku URL once deployed. Switch the host portion only —
+            the extension appends paths automatically.
+        </p>
+
+        <div class="actions">
+            <button type="submit" class="primary">Save</button>
+            <span id="status" class="status" hidden></span>
+        </div>
+    </form>
+
+    <script type="module" src="options.js"></script>
+</body>
+</html>

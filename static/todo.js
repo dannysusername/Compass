@@ -63,14 +63,94 @@
 
     // ---- Delete ----
 
+    // Show the recurring-delete dialog and resolve to one of:
+    //   'this'   — exclude just this occurrence
+    //   'future' — set rrule_until to right before this occurrence
+    //   'all'    — fall through to a normal delete-everything
+    //   null     — user cancelled
+    function showRecurringDeleteDialog(occurrenceLabel) {
+        const modal = document.getElementById('delete-recurring-modal');
+        if (!modal) return Promise.resolve('all');
+        const promptEl = modal.querySelector('[data-recurring-prompt]');
+        if (promptEl && occurrenceLabel) {
+            promptEl.textContent = `This task repeats. Pick which instances to delete starting ${occurrenceLabel}.`;
+        }
+        modal.hidden = false;
+        document.body.classList.add('modal-open');
+        return new Promise((resolve) => {
+            let done = false;
+            const finish = (val) => {
+                if (done) return;
+                done = true;
+                modal.hidden = true;
+                document.body.classList.remove('modal-open');
+                resolve(val);
+            };
+            modal.querySelectorAll('[data-delete-mode]').forEach((b) => {
+                b.onclick = () => finish(b.dataset.deleteMode);
+            });
+            modal.querySelectorAll('[data-close-modal]').forEach((b) => {
+                b.onclick = () => finish(null);
+            });
+        });
+    }
+
+    function removeRowsFromUI(kind, id) {
+        const sel =
+            `.todo-row[data-kind="${kind}"][data-id="${id}"], ` +
+            `.day-cell-item[data-kind="${kind}"][data-id="${id}"]`;
+        document.querySelectorAll(sel).forEach((el) => {
+            el.style.transition = 'opacity 0.15s ease, max-height 0.15s ease';
+            el.style.opacity = '0';
+            el.style.maxHeight = '0';
+            setTimeout(() => el.remove(), 160);
+        });
+        document.querySelectorAll('template[data-day-modal-content]').forEach((tpl) => {
+            tpl.content.querySelectorAll(sel).forEach((el) => el.remove());
+        });
+    }
+
     function bindDelete(btn) {
         if (btn.dataset.bound === '1') return;
         btn.dataset.bound = '1';
         btn.addEventListener('click', async () => {
+            const row = btn.closest('.todo-row');
             const kind = btn.dataset.kind || 'task';
             const label = kind === 'event' ? 'event' : 'task';
-            if (!confirm(`Delete this ${label}?`)) return;
             const id = btn.dataset.id;
+            const isRecurring = !!(row && kind === 'task' && row.dataset.rrule);
+
+            if (isRecurring) {
+                const occurrenceAt = row.dataset.dueAt || '';
+                const occurrenceLabel = occurrenceAt
+                    ? new Date(occurrenceAt).toLocaleDateString()
+                    : '';
+                const mode = await showRecurringDeleteDialog(occurrenceLabel);
+                if (!mode) return;
+                if (mode === 'this' || mode === 'future') {
+                    const path = mode === 'this' ? 'exclude' : 'end-after';
+                    const fd = new FormData();
+                    fd.append('occurrence_at', occurrenceAt);
+                    try {
+                        const r = await fetch(`/tasks/${id}/${path}`, {
+                            method: 'POST', body: fd,
+                            headers: { 'Accept': 'application/json' },
+                        });
+                        if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+                        // Server-side mutation changes which dates render —
+                        // softRefresh re-pulls and swaps the affected
+                        // sections so the rows disappear from every view.
+                        await softRefresh();
+                    } catch (err) {
+                        alert('Could not delete: ' + err.message);
+                    }
+                    return;
+                }
+                // mode === 'all' falls through to the standard delete below.
+            } else if (!confirm(`Delete this ${label}?`)) {
+                return;
+            }
+
             const url = kind === 'event'
                 ? `/events/${id}/delete`
                 : `/tasks/${id}/delete`;
@@ -80,27 +160,313 @@
                     headers: { 'Accept': 'application/json' },
                 });
                 if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
-                // Remove every copy of this item across the page (today
-                // list, week-view day modal, AND the calendar cells) so
-                // they stay in sync.
-                const sel =
-                    `.todo-row[data-kind="${kind}"][data-id="${id}"], ` +
-                    `.day-cell-item[data-kind="${kind}"][data-id="${id}"]`;
-                document.querySelectorAll(sel).forEach((el) => {
-                    el.style.transition = 'opacity 0.15s ease, max-height 0.15s ease';
-                    el.style.opacity = '0';
-                    el.style.maxHeight = '0';
-                    setTimeout(() => el.remove(), 160);
-                });
-                // Live-DOM rows fade out; template fragments aren't visible
-                // so we just yank them — keeps the day-modal honest on
-                // re-open.
-                document.querySelectorAll('template[data-day-modal-content]').forEach((tpl) => {
-                    tpl.content.querySelectorAll(sel).forEach((el) => el.remove());
-                });
+                removeRowsFromUI(kind, id);
             } catch (err) {
                 alert(`Could not delete ${label}: ` + err.message);
             }
+        });
+    }
+
+    // ---- Alert chips (modal) ----
+
+    function alertLabel(minutes) {
+        const m = parseInt(minutes, 10);
+        if (Number.isNaN(m)) return String(minutes);
+        if (m === 0) return 'At time';
+        if (m < 60) return `${m} min before`;
+        if (m === 60) return '1 hour before';
+        if (m < 1440) return `${m / 60} hours before`;
+        if (m === 1440) return '1 day before';
+        if (m < 10080) return `${m / 1440} days before`;
+        if (m === 10080) return '1 week before';
+        return `${m} min before`;
+    }
+
+    function getAlerts(form) {
+        const hidden = form.querySelector('[data-alerts-value]');
+        if (!hidden || !hidden.value) return [];
+        return hidden.value.split(',')
+            .map((x) => parseInt(x, 10))
+            .filter((n) => !Number.isNaN(n));
+    }
+
+    function setAlerts(form, list) {
+        const hidden = form.querySelector('[data-alerts-value]');
+        const chips = form.querySelector('[data-alerts-chips]');
+        if (!hidden || !chips) return;
+        // Dedupe + sort descending so "1 day, 1 hour, 15 min" reads naturally.
+        const seen = new Set();
+        const cleaned = list
+            .map((x) => parseInt(x, 10))
+            .filter((n) => !Number.isNaN(n) && n >= 0 && n <= 40320)
+            .filter((n) => { if (seen.has(n)) return false; seen.add(n); return true; })
+            .sort((a, b) => b - a);
+        hidden.value = cleaned.join(',');
+        chips.innerHTML = '';
+        cleaned.forEach((m) => {
+            const chip = document.createElement('span');
+            chip.className = 'alert-chip';
+            chip.dataset.minutes = String(m);
+            const label = document.createElement('span');
+            label.textContent = alertLabel(m);
+            const rm = document.createElement('button');
+            rm.type = 'button';
+            rm.className = 'alert-chip-remove';
+            rm.setAttribute('aria-label', `Remove ${alertLabel(m)} reminder`);
+            rm.textContent = '×';
+            rm.addEventListener('click', () => {
+                form.dataset.alertsTouched = '1';
+                setAlerts(form, getAlerts(form).filter((x) => x !== m));
+            });
+            chip.appendChild(label);
+            chip.appendChild(rm);
+            chips.appendChild(chip);
+        });
+    }
+
+    function bindAllDayBehavior(form) {
+        // When "All day" is checked: switch starts_at + due_at inputs to
+        // type="date" so they show only YYYY-MM-DD with no time component
+        // (per the user's "just put the date, no hours" preference). Also
+        // clear and disable starts_at — an all-day task is anchored to the
+        // due date alone. Idempotent.
+        if (form.dataset.allDayBound === '1') return;
+        form.dataset.allDayBound = '1';
+        const checkbox = form.querySelector('[data-task-all-day]');
+        const startsInput = form.querySelector('input[name="starts_at"]');
+        const startsLabel = startsInput ? startsInput.closest('label') : null;
+        const dueInput = form.querySelector('input[name="due_at"]');
+        if (!checkbox) return;
+
+        function toDate(input) {
+            // YYYY-MM-DDTHH:MM → YYYY-MM-DD; preserve empty values.
+            if (!input) return;
+            if (input.value && input.type === 'datetime-local') {
+                input.value = input.value.slice(0, 10);
+            }
+            input.type = 'date';
+        }
+        function toDateTime(input, defaultTime) {
+            if (!input) return;
+            if (input.value && input.type === 'date') {
+                input.value = input.value + 'T' + (defaultTime || '09:00');
+            }
+            input.type = 'datetime-local';
+        }
+
+        const sync = () => {
+            const on = !!checkbox.checked;
+            // Repeat also wants starts disabled (rrule + range is mutually
+            // exclusive — see bindRruleVisibility). Either condition is
+            // enough to force the field off; otherwise toggling All-day
+            // off would re-enable Starts-on while a Repeat was still set.
+            const rruleSelect = form.querySelector('[data-task-rrule]');
+            const hasRrule = !!(rruleSelect && rruleSelect.value);
+            if (on) {
+                // All-day: show date-only inputs. Starts is disabled
+                // because an all-day task lives on its due date alone.
+                if (startsInput) {
+                    startsInput.value = '';
+                    toDate(startsInput);
+                    startsInput.disabled = true;
+                }
+                toDate(dueInput);
+                // Default the due date to today when nothing's been chosen
+                // yet — saves the user from having to click into the
+                // picker just to confirm "yes, today". If they typed a
+                // different date already, leave it alone.
+                if (dueInput && !dueInput.value) {
+                    const d = new Date();
+                    const pad = (n) => String(n).padStart(2, '0');
+                    dueInput.value = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+                }
+            } else {
+                // Restore datetime inputs. Starts stays disabled if Repeat
+                // is set; otherwise re-enable + populate a default so the
+                // user isn't staring at a blank field.
+                if (startsInput) {
+                    startsInput.disabled = hasRrule;
+                    toDateTime(startsInput, '09:00');
+                    if (!hasRrule && !startsInput.value) {
+                        startsInput.value = _smartDefaultStart();
+                    } else if (hasRrule) {
+                        startsInput.value = '';
+                    }
+                }
+                toDateTime(dueInput, '10:00');
+                if (dueInput && !dueInput.value && startsInput && startsInput.value) {
+                    dueInput.value = _smartDefaultDue(startsInput.value);
+                }
+            }
+            if (startsLabel) startsLabel.classList.toggle('disabled', on || hasRrule);
+        };
+        sync();
+        checkbox.addEventListener('change', sync);
+    }
+
+    function bindRruleVisibility(form) {
+        if (form.dataset.rruleVisBound === '1') return;
+        form.dataset.rruleVisBound = '1';
+        const select = form.querySelector('[data-task-rrule]');
+        const untilLabel = form.querySelector('[data-task-rrule-until]');
+        if (!select || !untilLabel) return;
+        // Starts-on can't coexist with a Repeat: server-side _emit_task
+        // ignores starts_at when rrule is set (one task can repeat OR
+        // span a range, not both), and the iCal feed mirrors that. We
+        // grey out + clear the field here so what the user enters
+        // matches what the web app renders matches what Apple Calendar
+        // shows. Same disabled-label pattern as the All-day checkbox.
+        // Note: All-day might ALSO want starts disabled, so we OR the
+        // two conditions instead of unilaterally re-enabling.
+        const startsInput = form.querySelector('input[name="starts_at"]');
+        const startsLabel = startsInput ? startsInput.closest('label') : null;
+        const allDayCheckbox = form.querySelector('[data-task-all-day]');
+        const sync = () => {
+            const showing = !!select.value;
+            untilLabel.hidden = !showing;
+            if (!showing) {
+                const inp = untilLabel.querySelector('input');
+                if (inp) inp.value = '';
+            }
+            const allDayOn = !!(allDayCheckbox && allDayCheckbox.checked);
+            const disable = showing || allDayOn;
+            if (startsInput) {
+                startsInput.disabled = disable;
+                if (showing) startsInput.value = '';
+            }
+            if (startsLabel) startsLabel.classList.toggle('disabled', disable);
+        };
+        sync();
+        select.addEventListener('change', sync);
+    }
+
+    function bindAlertsAdder(form) {
+        if (form.dataset.alertsBound === '1') return;
+        form.dataset.alertsBound = '1';
+        const select = form.querySelector('[data-alerts-add-select]');
+        if (!select) return;
+        select.addEventListener('change', () => {
+            const v = select.value;
+            if (!v) return;
+            form.dataset.alertsTouched = '1';
+            setAlerts(form, [...getAlerts(form), parseInt(v, 10)]);
+            select.value = '';
+        });
+    }
+
+    // ---- Attachments (edit modal — talks to server) ----
+
+    function attachmentRowEl(att, onRemove) {
+        const li = document.createElement('li');
+        li.className = 'attachment-row';
+        li.dataset.attachmentId = String(att.id);
+        const name = document.createElement('span');
+        name.className = 'attachment-name';
+        name.textContent = att.original_name || att.filename;
+        li.appendChild(name);
+        const rm = document.createElement('button');
+        rm.type = 'button';
+        rm.className = 'attachment-remove';
+        rm.setAttribute('aria-label', `Remove ${att.original_name || att.filename}`);
+        rm.textContent = '×';
+        rm.addEventListener('click', async () => {
+            if (!confirm(`Remove "${att.original_name || att.filename}"?`)) return;
+            try {
+                const r = await fetch(`/attachments/${att.id}/delete`, {
+                    method: 'POST', headers: { 'Accept': 'application/json' },
+                });
+                if (!r.ok) throw new Error(`${r.status}`);
+                onRemove();
+            } catch (err) {
+                alert('Could not remove: ' + err.message);
+            }
+        });
+        li.appendChild(rm);
+        return li;
+    }
+
+    function renderAttachments(listEl, attachments, onChange) {
+        listEl.innerHTML = '';
+        attachments.forEach((att) => {
+            listEl.appendChild(attachmentRowEl(att, () => {
+                const next = attachments.filter((x) => x.id !== att.id);
+                renderAttachments(listEl, next, onChange);
+                onChange(next);
+            }));
+        });
+    }
+
+    function bindEditAttachments(form, taskId, initial) {
+        const wrap = form.querySelector('[data-task-attachments-edit]');
+        const listEl = form.querySelector('[data-attachments-list]');
+        const fileInput = form.querySelector('[data-attachments-input]');
+        if (!wrap || !listEl || !fileInput) return;
+        wrap.hidden = false;
+        let attachments = initial.slice();
+        const onChange = (next) => { attachments = next; };
+        renderAttachments(listEl, attachments, onChange);
+        // Replace the input element to clear listeners across re-opens.
+        const fresh = fileInput.cloneNode(true);
+        fileInput.parentNode.replaceChild(fresh, fileInput);
+        fresh.addEventListener('change', async () => {
+            const f = fresh.files && fresh.files[0];
+            if (!f) return;
+            const fd = new FormData();
+            fd.append('file', f);
+            try {
+                const r = await fetch(`/tasks/${taskId}/attachments`, {
+                    method: 'POST', body: fd,
+                    headers: { 'Accept': 'application/json' },
+                });
+                if (!r.ok) throw new Error(`${r.status}`);
+                const att = await r.json();
+                attachments = [...attachments, att];
+                renderAttachments(listEl, attachments, onChange);
+                onChange(attachments);
+            } catch (err) {
+                alert('Could not upload: ' + err.message);
+            } finally {
+                fresh.value = '';
+            }
+        });
+    }
+
+    // ---- Pending attachments (add modal — buffered until task created) ----
+
+    function bindPendingAttachments(form) {
+        if (form.dataset.pendingAttBound === '1') return;
+        form.dataset.pendingAttBound = '1';
+        const listEl = form.querySelector('[data-pending-attachments-list]');
+        const fileInput = form.querySelector('[data-pending-attachments-input]');
+        if (!listEl || !fileInput) return;
+        form._pendingFiles = form._pendingFiles || [];
+        function rerender() {
+            listEl.innerHTML = '';
+            form._pendingFiles.forEach((f, idx) => {
+                const li = document.createElement('li');
+                li.className = 'attachment-row';
+                const name = document.createElement('span');
+                name.className = 'attachment-name';
+                name.textContent = f.name;
+                li.appendChild(name);
+                const rm = document.createElement('button');
+                rm.type = 'button';
+                rm.className = 'attachment-remove';
+                rm.textContent = '×';
+                rm.addEventListener('click', () => {
+                    form._pendingFiles.splice(idx, 1);
+                    rerender();
+                });
+                li.appendChild(rm);
+                listEl.appendChild(li);
+            });
+        }
+        fileInput.addEventListener('change', () => {
+            for (const f of fileInput.files || []) {
+                form._pendingFiles.push(f);
+            }
+            fileInput.value = '';
+            rerender();
         });
     }
 
@@ -109,22 +475,58 @@
     function bindEditButton(btn) {
         if (btn.dataset.bound === '1') return;
         btn.dataset.bound = '1';
-        btn.addEventListener('click', () => {
+        btn.addEventListener('click', async () => {
             const row = btn.closest('.todo-row');
             const modal = document.getElementById('edit-task-modal');
             if (!row || !modal) return;
             const form = modal.querySelector('form[data-edit-task]');
             if (!form) return;
-            form.querySelector('input[name="task_id"]').value = row.dataset.id || '';
+            const taskId = row.dataset.id || '';
+            form.querySelector('input[name="task_id"]').value = taskId;
             form.querySelector('input[name="title"]').value = row.dataset.title || '';
             const dueAt = row.dataset.dueAt || '';
             const startsAt = row.dataset.startsAt || '';
             form.querySelector('input[name="due_at"]').value = dueAt;
             const startsInput = form.querySelector('input[name="starts_at"]');
-            const startsLabel = form.querySelector('[data-task-starts]');
             if (startsInput) startsInput.value = startsAt;
-            if (startsLabel) startsLabel.hidden = !startsAt;
-            syncStartsToggleLabel(form);
+            // All-day checkbox — pre-check if the task was saved that way.
+            // Dispatch change so the bound handler clears + disables the
+            // Starts-on field when this opens for an all-day task.
+            const allDayCheckbox = form.querySelector('[data-task-all-day]');
+            const origAllDay = row.dataset.isAllDay === '1';
+            if (allDayCheckbox) {
+                allDayCheckbox.checked = origAllDay;
+                form.dataset.origIsAllDay = origAllDay ? '1' : '';
+                allDayCheckbox.dispatchEvent(new Event('change'));
+            }
+            // Repeat dropdown — pre-select stored RRULE (or "Doesn't repeat").
+            const rruleSelect = form.querySelector('[data-task-rrule]');
+            const origRrule = row.dataset.rrule || '';
+            if (rruleSelect) {
+                rruleSelect.value = origRrule;
+                form.dataset.origRrule = origRrule;
+                // Sync end-date visibility against the freshly-set value.
+                rruleSelect.dispatchEvent(new Event('change'));
+            }
+            // Alerts + attachments + rrule_until come from the details
+            // endpoint (kept off every row's dataset to keep DOM size sane).
+            setAlerts(form, []);
+            const untilInput = form.querySelector('input[name="rrule_until"]');
+            if (untilInput) untilInput.value = '';
+            const attachWrap = form.querySelector('[data-task-attachments-edit]');
+            if (attachWrap) attachWrap.hidden = true;
+            try {
+                const r = await fetch(`/tasks/${taskId}/details.json`, {
+                    headers: { 'Accept': 'application/json' },
+                });
+                if (r.ok) {
+                    const d = await r.json();
+                    setAlerts(form, d.alerts || []);
+                    form.dataset.origAlerts = (d.alerts || []).join(',');
+                    if (untilInput) untilInput.value = d.rrule_until || '';
+                    bindEditAttachments(form, taskId, d.attachments || []);
+                }
+            } catch (_) { /* network blip; user can still save */ }
             // Notes textarea: populate from row's data-notes (comes through
             // as the actual text via Jinja's HTML escaping). Stored in
             // dataset.origNotes so we can detect a change at submit time.
@@ -169,17 +571,20 @@
         if (form.dataset.bound === '1') return;
         form.dataset.bound = '1';
         bindTagPicker(form);
-        bindTaskStartsToggle(form);
+        bindRruleVisibility(form);
+        bindAllDayBehavior(form);
+        bindAlertsAdder(form);
         form.addEventListener('submit', async (e) => {
             e.preventDefault();
             const id = form.querySelector('input[name="task_id"]').value;
             const title = (form.querySelector('input[name="title"]').value || '').trim();
             const due = form.querySelector('input[name="due_at"]').value;
-            const startsLabel = form.querySelector('[data-task-starts]');
-            const startsRaw = form.querySelector('input[name="starts_at"]').value;
-            // Hidden starts label = user opted out of the range, ignore the field's stale value.
-            const starts = (startsLabel && startsLabel.hidden) ? '' : startsRaw;
+            const starts = form.querySelector('input[name="starts_at"]').value || '';
             if (!id || !title) return;
+            if (starts && due && starts > due) {
+                alert('Cannot save event, the start date must be before the end date');
+                return;
+            }
             let tagId;
             try {
                 tagId = await resolveTagId(form);
@@ -189,10 +594,16 @@
             const origStartsAt = form.dataset.origStartsAt || '';
             const origNotes = form.dataset.origNotes || '';
             const origClassId = form.dataset.origClassId || '0';
+            const origRrule = form.dataset.origRrule || '';
+            const origAllDay = form.dataset.origIsAllDay || '';
             const notesField = form.querySelector('textarea[name="notes"]');
             const classSelect = form.querySelector('[data-edit-task-class]');
+            const rruleSelect = form.querySelector('[data-task-rrule]');
+            const allDayCheckbox = form.querySelector('[data-task-all-day]');
             const newNotes = notesField ? notesField.value : '';
             const newClassId = classSelect ? classSelect.value : origClassId;
+            const newRrule = rruleSelect ? rruleSelect.value : '';
+            const newAllDay = allDayCheckbox && allDayCheckbox.checked ? '1' : '';
             const tagChanged = tagId !== origTagId;
             const dateChanged = (due || '') !== origDueAt
                 || (starts || '') !== origStartsAt;
@@ -200,6 +611,11 @@
             // Class move means the row jumps to a different bucket on
             // home/today/week — softRefresh re-renders it in the right place.
             const classChanged = newClassId !== origClassId;
+            // Recurrence + all-day BOTH change which dates a task renders
+            // on (rrule expands across the window; all-day swaps the time
+            // for an "All day" cell). Treat them like dateChanged.
+            const rruleChanged = newRrule !== origRrule;
+            const allDayChanged = newAllDay !== origAllDay;
             const fd = new FormData();
             fd.append('title', title);
             if (due) fd.append('due_at', due);
@@ -210,6 +626,18 @@
             if (notesField) fd.append('notes', notesField.value || '');
             // class_id: '' (or '0' from the dropdown) means Personal.
             if (classSelect) fd.append('class_id', newClassId);
+            // Repeat: always send (even '') so a clear takes effect server-side.
+            if (rruleSelect) fd.append('rrule', rruleSelect.value || '');
+            // Alerts: send the joined chip list (could be empty = no alerts).
+            const alertsHidden = form.querySelector('[data-alerts-value]');
+            if (alertsHidden) fd.append('alerts', alertsHidden.value || '');
+            // All-day: always send (even unchecked) so the field can clear.
+            fd.append('is_all_day', allDayCheckbox && allDayCheckbox.checked ? '1' : '');
+            // Recurrence end-date: always send so a clear takes effect.
+            const untilLabel = form.querySelector('[data-task-rrule-until]');
+            const untilInput = form.querySelector('input[name="rrule_until"]');
+            const untilValue = (untilInput && !untilLabel?.hidden) ? (untilInput.value || '') : '';
+            fd.append('rrule_until', untilValue);
             try {
                 const r = await fetch(`/tasks/${id}/edit`, {
                     method: 'POST',
@@ -230,7 +658,8 @@
                 // overdue) or between calendar cells; tag swap changes
                 // colors and pill text. softRefresh swaps the affected
                 // sections without the full-reload flash.
-                if (tagChanged || dateChanged || notesChanged || classChanged) {
+                if (tagChanged || dateChanged || notesChanged || classChanged
+                    || rruleChanged || allDayChanged) {
                     await softRefresh();
                     return;
                 }
@@ -260,56 +689,151 @@
         });
     }
 
-    // ---- Drag to reorder ----
+    // ---- Drag to reorder + move across classes ----
+    //
+    // Drag is now bound on the [data-class-block-list] container instead of
+    // each .todo-list-draggable. That lets a row drag from one class block
+    // into another (cross-class move) and persist the class_id change.
+    // Events can only reorder within their source list — CalendarEvent's
+    // class_id isn't nullable, so we don't let them migrate.
 
-    function bindDrag(list) {
-        if (list.dataset.dragBound === '1') return;
-        list.dataset.dragBound = '1';
+    function bindDrag(container) {
+        if (container.dataset.dragBound === '1') return;
+        container.dataset.dragBound = '1';
         let dragRow = null;
+        let dragKind = null;
+        let sourceList = null;
+        let sourceClassKey = null;
         let pointerStart = null;
         let isDragging = false;
         const MOVE_THRESHOLD = 5;
 
-        function applyFlipReorder(insertBeforeRow) {
-            const currentNext = dragRow.nextSibling;
-            if (insertBeforeRow === dragRow) return;
-            if (insertBeforeRow && insertBeforeRow === currentNext) return;
-            if (!insertBeforeRow && currentNext === null) return;
+        const allLists = () =>
+            Array.from(container.querySelectorAll('.todo-list-draggable'));
 
-            const all = Array.from(list.querySelectorAll('.todo-row'));
+        function classKeyOfList(list) {
+            const block = list.closest('.class-block');
+            return block ? (block.dataset.bucketKey || null) : null;
+        }
+
+        function applyFlipReorder(targetList, insertBeforeRow) {
+            if (!dragRow || !targetList) return;
+            const currentParent = dragRow.parentNode;
+            const currentNext = dragRow.nextSibling;
+            // Skip if nothing would change
+            if (currentParent === targetList) {
+                if (insertBeforeRow === dragRow) return;
+                if (insertBeforeRow && insertBeforeRow === currentNext) return;
+                if (!insertBeforeRow && currentNext === null) return;
+            }
+            const all = Array.from(container.querySelectorAll('.todo-row'));
             const firstRects = new Map();
             all.forEach((c) => firstRects.set(c, c.getBoundingClientRect()));
-            if (insertBeforeRow) list.insertBefore(dragRow, insertBeforeRow);
-            else list.appendChild(dragRow);
+            if (insertBeforeRow) targetList.insertBefore(dragRow, insertBeforeRow);
+            else targetList.appendChild(dragRow);
             all.forEach((c) => {
                 const first = firstRects.get(c);
                 const last = c.getBoundingClientRect();
+                const dx = first.left - last.left;
                 const dy = first.top - last.top;
-                if (Math.abs(dy) < 1) return;
+                if (Math.abs(dx) < 1 && Math.abs(dy) < 1) return;
                 c.style.transition = 'none';
-                c.style.transform = `translateY(${dy}px)`;
+                c.style.transform = `translate(${dx}px, ${dy}px)`;
                 void c.offsetHeight;
                 c.style.transition = 'transform 0.18s cubic-bezier(0.22, 1, 0.36, 1)';
                 c.style.transform = '';
             });
         }
 
-        function moveTowards(clientY) {
-            if (!dragRow) return;
-            const others = Array.from(list.querySelectorAll('.todo-row:not(.dragging)'));
-            let insertBefore = null;
-            for (const target of others) {
-                const rect = target.getBoundingClientRect();
-                if (clientY < rect.top + rect.height / 2) { insertBefore = target; break; }
+        function findDropTarget(clientX, clientY) {
+            // Events stay in their source list — block cross-class drops.
+            const candidates = (dragKind === 'event' && sourceList)
+                ? [sourceList] : allLists();
+            // Prefer the list whose bounding box the cursor is over; fall
+            // back to the list whose center is closest.
+            let best = null;
+            let bestDist = Infinity;
+            for (const list of candidates) {
+                const rect = list.getBoundingClientRect();
+                const insideX = clientX >= rect.left && clientX <= rect.right;
+                let dist;
+                if (insideX) {
+                    dist = clientY < rect.top ? (rect.top - clientY)
+                         : (clientY > rect.bottom ? (clientY - rect.bottom) : 0);
+                } else {
+                    const cx = (rect.left + rect.right) / 2;
+                    const cy = (rect.top + rect.bottom) / 2;
+                    // Heavily penalise lists the cursor isn't over horizontally
+                    dist = Math.hypot(clientX - cx, clientY - cy) + 9999;
+                }
+                if (dist < bestDist) { bestDist = dist; best = list; }
             }
-            applyFlipReorder(insertBefore);
+            if (!best) return null;
+            const rows = Array.from(best.querySelectorAll('.todo-row:not(.dragging)'));
+            for (const target of rows) {
+                const rect = target.getBoundingClientRect();
+                if (clientY < rect.top + rect.height / 2) {
+                    return { list: best, before: target };
+                }
+            }
+            return { list: best, before: null };
         }
 
-        async function persistOrder() {
-            // Send both tasks and events so Grok-extracted items
-            // (quizzes, lectures, exams) reorder too — they have a position
-            // column on CalendarEvent, same as Task.
-            const items = Array.from(list.querySelectorAll('.todo-row'))
+        function moveTowards(clientX, clientY) {
+            if (!dragRow) return;
+            const drop = findDropTarget(clientX, clientY);
+            if (!drop) return;
+            applyFlipReorder(drop.list, drop.before);
+        }
+
+        // Persist accepts the captured state explicitly so a stray
+        // pointermove fired between pointerup and the awaited fetch can't
+        // mutate `dragRow` mid-flight (which was the cause of "row jumps
+        // to a random position after I drop it").
+        async function persistDrop(droppedRow, droppedSourceList, droppedSourceClassKey, droppedKind) {
+            if (!droppedRow) return;
+            const newList = droppedRow.parentNode;
+            const newClassKey = classKeyOfList(newList);
+            const taskId = droppedRow.dataset.id;
+            // The week tab's day modal shows ONE day's slice of items,
+            // including any multi-day tasks that span this day. Persisting
+            // a global `position` from here would re-sort that task on
+            // every other day too, which the user explicitly doesn't want.
+            // Inside the day modal, route the reorder to /tasks/reorder-day
+            // so it stores a DayItemPosition keyed on this day only —
+            // other days keep the global Task/Event.position.
+            // Cross-class moves still persist (changing class_id is a real
+            // edit, not an order change).
+            const inDayModal = !!container.closest('#day-modal');
+            const dayDate = container.dataset.dayDate || '';
+
+            // Step 1: cross-class move (tasks only). PATCH class_id only —
+            // edit_task does partial updates so we don't have to round-trip
+            // the rest of the task's fields. bucketKey "0" represents the
+            // synthetic Personal bucket; server treats class_id="" as NULL.
+            if (droppedKind === 'task' && newClassKey && newClassKey !== droppedSourceClassKey) {
+                const fd = new FormData();
+                fd.append('class_id', newClassKey === '0' ? '' : newClassKey);
+                try {
+                    const r = await fetch(`/tasks/${taskId}/edit`, {
+                        method: 'POST', body: fd,
+                        headers: { 'Accept': 'application/json' },
+                    });
+                    if (r.ok) {
+                        droppedRow.dataset.classId = newClassKey;
+                    } else if (droppedSourceList) {
+                        droppedSourceList.appendChild(droppedRow);
+                    }
+                } catch (err) {
+                    console.error('cross-class move failed:', err);
+                    if (droppedSourceList) droppedSourceList.appendChild(droppedRow);
+                }
+            }
+
+            // Step 2: persist row order. In the day modal, send to the
+            // per-day endpoint so only that day's order changes. Elsewhere
+            // (home/today, class page), use the global reorder endpoint.
+            const items = Array.from(container.querySelectorAll('.todo-row'))
                 .map((el) => {
                     const kind = el.dataset.kind;
                     const id = parseInt(el.dataset.id, 10);
@@ -317,52 +841,79 @@
                     return { kind, id };
                 })
                 .filter(Boolean);
-            if (items.length === 0) return;
-            try {
-                await fetch('/tasks/reorder', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-                    body: JSON.stringify({ items }),
-                });
-            } catch (err) {
-                console.error('reorder failed:', err);
-                return;
+            if (items.length > 0) {
+                const url = inDayModal ? '/tasks/reorder-day' : '/tasks/reorder';
+                const body = inDayModal
+                    ? JSON.stringify({ day: dayDate, items })
+                    : JSON.stringify({ items });
+                try {
+                    await fetch(url, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                        body,
+                    });
+                } catch (err) {
+                    console.error('reorder failed:', err);
+                }
             }
             // Week page: re-pull the calendar so day-cells AND each day's
-            // <template data-day-modal-content> reflect the new priority.
-            // Skip #day-modal so an open modal doesn't disappear mid-drag.
+            // <template data-day-modal-content> reflect the new state. The
+            // open day modal's body was cloned from the template at click
+            // time and lives under #day-modal (hoisted to <body>), NOT
+            // under .month-grid — so replacing .month-grid leaves the
+            // visible drag in place while updating the calendar pills and
+            // priming the next reopen with the persisted order.
             await refreshMonthGridOnly();
         }
 
         function onPointerMove(e) {
             if (!dragRow || !pointerStart) return;
+            const dx = e.clientX - pointerStart.x;
             const dy = e.clientY - pointerStart.y;
-            if (!isDragging && Math.abs(dy) < MOVE_THRESHOLD) return;
+            if (!isDragging && Math.hypot(dx, dy) < MOVE_THRESHOLD) return;
             if (!isDragging) {
                 isDragging = true;
                 dragRow.classList.add('dragging');
                 document.body.classList.add('cards-dragging');
             }
-            moveTowards(e.clientY);
+            moveTowards(e.clientX, e.clientY);
             e.preventDefault();
         }
         function onPointerUp() {
             if (!dragRow) return;
             const wasDragging = isDragging;
-            if (dragRow) dragRow.classList.remove('dragging');
-            document.body.classList.remove('cards-dragging');
+            const droppedRow = dragRow;
+            const droppedKind = dragKind;
+            const droppedSourceList = sourceList;
+            const droppedSourceClassKey = sourceClassKey;
+            // Clear state SYNCHRONOUSLY so any stale pointermove fired
+            // between this pointerup and the awaited fetch in persistDrop
+            // can't re-trigger applyFlipReorder and snap the row away from
+            // where the user dropped it.
             dragRow = null;
+            dragKind = null;
+            sourceList = null;
+            sourceClassKey = null;
             pointerStart = null;
             isDragging = false;
-            if (wasDragging) persistOrder();
+            droppedRow.classList.remove('dragging');
+            document.body.classList.remove('cards-dragging');
+            if (wasDragging) {
+                persistDrop(droppedRow, droppedSourceList, droppedSourceClassKey, droppedKind);
+            }
         }
 
-        list.querySelectorAll('.todo-drag-handle').forEach((handle) => {
+        container.querySelectorAll('.todo-drag-handle').forEach((handle) => {
+            if (handle.dataset.dragHandleBound === '1') return;
+            handle.dataset.dragHandleBound = '1';
             handle.addEventListener('pointerdown', (e) => {
                 if (e.button !== undefined && e.button !== 0) return;
                 const row = handle.closest('.todo-row');
-                if (!row) return;
+                if (!row || !container.contains(row)) return;
                 dragRow = row;
+                dragKind = row.dataset.kind || 'task';
+                sourceList = row.closest('.todo-list-draggable');
+                sourceClassKey = sourceList ? classKeyOfList(sourceList) : null;
                 pointerStart = { x: e.clientX, y: e.clientY };
                 isDragging = false;
                 e.preventDefault();
@@ -404,36 +955,6 @@
         return String(tag.id);
     }
 
-    function syncStartsToggleLabel(form) {
-        const btn = form.querySelector('[data-toggle-task-starts]');
-        const lbl = form.querySelector('[data-task-starts]');
-        if (!btn || !lbl) return;
-        btn.textContent = lbl.hidden ? '+ Add start date' : '− Remove start';
-    }
-
-    function bindTaskStartsToggle(form) {
-        // Reveal/hide the optional "Starts on" datetime-local input. The
-        // hidden state is what the submit handlers use to decide whether
-        // to send the starts_at value (so a stale value from a prior open
-        // doesn't accidentally get submitted after the user backed out).
-        if (form.dataset.startsBound === '1') {
-            syncStartsToggleLabel(form);
-            return;
-        }
-        form.dataset.startsBound = '1';
-        const toggleBtn = form.querySelector('[data-toggle-task-starts]');
-        const startsLabel = form.querySelector('[data-task-starts]');
-        const startsInput = form.querySelector('input[name="starts_at"]');
-        if (!toggleBtn || !startsLabel) return;
-        syncStartsToggleLabel(form);
-        toggleBtn.addEventListener('click', () => {
-            startsLabel.hidden = !startsLabel.hidden;
-            if (startsLabel.hidden && startsInput) startsInput.value = '';
-            else if (!startsLabel.hidden && startsInput) startsInput.focus();
-            syncStartsToggleLabel(form);
-        });
-    }
-
     function bindTagPicker(form) {
         if (form.dataset.tagBound === '1') return;
         form.dataset.tagBound = '1';
@@ -462,17 +983,25 @@
         if (form.dataset.bound === '1') return;
         form.dataset.bound = '1';
         bindTagPicker(form);
-        bindTaskStartsToggle(form);
+        bindRruleVisibility(form);
+        bindAllDayBehavior(form);
+        bindAlertsAdder(form);
+        bindPendingAttachments(form);
         form.addEventListener('submit', async (e) => {
             e.preventDefault();
             const titleInput = form.querySelector('input[name="title"]');
             const dueInput = form.querySelector('input[name="due_at"]');
             const startsInput = form.querySelector('input[name="starts_at"]');
-            const startsLabel = form.querySelector('[data-task-starts]');
             const classSelect = form.querySelector('[data-add-task-class]');
             const notesField = form.querySelector('textarea[name="notes"]');
             const title = (titleInput.value || '').trim();
             if (!title) return;
+            const startsVal = startsInput ? (startsInput.value || '') : '';
+            const dueVal = dueInput ? (dueInput.value || '') : '';
+            if (startsVal && dueVal && startsVal > dueVal) {
+                alert('Cannot save event, the start date must be before the end date');
+                return;
+            }
             // Empty class value = "Personal" — POST to /tasks (no class).
             // Numeric value = real class — POST to /classes/{id}/tasks.
             const classId = classSelect ? classSelect.value : '';
@@ -484,12 +1013,37 @@
             const fd = new FormData();
             fd.append('title', title);
             if (dueInput && dueInput.value) fd.append('due_at', dueInput.value);
-            if (startsInput && startsInput.value
-                && startsLabel && !startsLabel.hidden) {
+            if (startsInput && startsInput.value) {
                 fd.append('starts_at', startsInput.value);
             }
             if (tagId) fd.append('tag_id', tagId);
+            // All-day flag — checkbox value 1 when checked, omitted otherwise.
+            const allDayCheckbox = form.querySelector('[data-task-all-day]');
+            if (allDayCheckbox && allDayCheckbox.checked) {
+                fd.append('is_all_day', '1');
+            }
+            // Recurrence end date — only sent when Repeat is set AND the
+            // user picked a date. Server clears it whenever rrule is empty.
+            const untilLabel = form.querySelector('[data-task-rrule-until]');
+            const untilInput = form.querySelector('input[name="rrule_until"]');
+            if (untilInput && untilInput.value && untilLabel && !untilLabel.hidden) {
+                fd.append('rrule_until', untilInput.value);
+            }
             if (notesField && notesField.value.trim()) fd.append('notes', notesField.value);
+            // Repeat (allow-listed server-side, see _normalize_rrule).
+            const rruleSelect = form.querySelector('[data-task-rrule]');
+            if (rruleSelect && rruleSelect.value) fd.append('rrule', rruleSelect.value);
+            // Alerts: only send if the user explicitly added/removed any. An
+            // omitted field tells the server to apply smart defaults by tag.
+            const alertsHidden = form.querySelector('[data-alerts-value]');
+            const alertsTouched = form.dataset.alertsTouched === '1';
+            if (alertsHidden && alertsTouched) fd.append('alerts', alertsHidden.value || '');
+            // Capture the date values now (before any cleanup) so the
+            // future-date heads-up alert below can reference them, and
+            // critically: any error after this point won't have already
+            // wiped the form fields the user typed into.
+            const dueValueAtSubmit = dueInput ? dueInput.value : '';
+            const startsValueAtSubmit = startsInput ? startsInput.value : '';
             try {
                 const r = await fetch(url, {
                     method: 'POST',
@@ -501,13 +1055,26 @@
                     try { const j = await r.json(); if (j.detail) detail = j.detail; } catch (_) {}
                     throw new Error(detail);
                 }
-                const dueValue = dueInput ? dueInput.value : '';
-                const startsValue = startsInput ? startsInput.value : '';
-                titleInput.value = '';
-                if (dueInput) dueInput.value = '';
-                if (startsInput) startsInput.value = '';
-                if (startsLabel) startsLabel.hidden = true;
-                if (notesField) notesField.value = '';
+                const created = await r.json().catch(() => null);
+                // Upload any buffered attachments now that we have a task id.
+                if (created && created.id && form._pendingFiles && form._pendingFiles.length) {
+                    for (const f of form._pendingFiles) {
+                        const afd = new FormData();
+                        afd.append('file', f);
+                        try {
+                            await fetch(`/tasks/${created.id}/attachments`, {
+                                method: 'POST', body: afd,
+                                headers: { 'Accept': 'application/json' },
+                            });
+                        } catch (_) { /* keep going, others may still upload */ }
+                    }
+                    form._pendingFiles = [];
+                }
+                // Close the modal first — softRefresh will replace the
+                // entire #add-task-modal with a fresh empty one rendered by
+                // the server, so we don't need to manually clear fields.
+                // Doing it this order means any error in the cleanup below
+                // can't leave the modal stuck open with a half-cleared form.
                 const addModal = form.closest('.modal-overlay');
                 if (addModal) {
                     addModal.hidden = true;
@@ -518,7 +1085,7 @@
                 // correctly but filtered out — without feedback the user
                 // thinks the add silently failed. (For ranged tasks the
                 // start date is what determines if it shows today.)
-                const checkStart = startsValue || dueValue;
+                const checkStart = startsValueAtSubmit || dueValueAtSubmit;
                 if (checkStart) {
                     const t = new Date();
                     const todayStr = t.getFullYear() + '-' +
@@ -532,6 +1099,7 @@
             } catch (err) {
                 console.error('add-task failed:', err);
                 alert('Could not add task: ' + err.message);
+                // Form fields stay populated so the user can fix and resubmit.
             }
         });
     }
@@ -610,6 +1178,12 @@
             if (replaced) {
                 bindAll();
                 if (typeof window.rebindDayCells === 'function') window.rebindDayCells();
+                // Modals were hoisted to <body> at first load; the fresh
+                // copies fetched here are nested inside the today partial,
+                // so move them back to body so the X stays reachable.
+                if (typeof window.hoistModalsToBody === 'function') {
+                    window.hoistModalsToBody();
+                }
                 // Re-expand rows that were open before the re-render so
                 // edits don't visually destroy the user's open drawer.
                 expandedKeys.forEach((key) => {
@@ -807,29 +1381,57 @@
 
     // ---- Default due-date prefill ----
 
-    function _todayEndOfDayLocal() {
-        // "YYYY-MM-DDT23:59" — datetime-local format. Gives the user a
-        // sensible end-of-day deadline when they open the add-task modal,
-        // so they don't have to set a time and accidentally end up with
-        // 00:00 (start of day, technically already past).
-        const t = new Date();
-        const y = t.getFullYear();
-        const mo = String(t.getMonth() + 1).padStart(2, '0');
-        const d = String(t.getDate()).padStart(2, '0');
-        return `${y}-${mo}-${d}T23:59`;
+    function _formatLocal(d) {
+        const pad = (n) => String(n).padStart(2, '0');
+        return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
     }
 
-    // Delegated: any click that opens #add-task-modal prefills due_at to
-    // today end-of-day if the user hasn't typed anything yet. Skips the
-    // week-page "+ Add task for this day" path, which sets its own date.
+    function _smartDefaultStart() {
+        // Round CURRENT time UP to the next 30-min mark so events default to
+        // a slot that's actually in the future. Mirrors Apple Calendar's
+        // "next half hour" default. Returns YYYY-MM-DDTHH:MM.
+        const d = new Date();
+        d.setSeconds(0, 0);
+        const m = d.getMinutes();
+        if (m === 0 || m === 30) {
+            d.setMinutes(m + 30);
+        } else if (m < 30) {
+            d.setMinutes(30);
+        } else {
+            d.setMinutes(0);
+            d.setHours(d.getHours() + 1);
+        }
+        return _formatLocal(d);
+    }
+
+    function _smartDefaultDue(startStr) {
+        // Apple-style: due defaults to one hour after start, also on a
+        // 30-min boundary. start is YYYY-MM-DDTHH:MM in local time.
+        const d = new Date(startStr);
+        d.setHours(d.getHours() + 1);
+        return _formatLocal(d);
+    }
+
+    function _populateSmartDefaults(form) {
+        // Make sure starts_at + due_at are never empty when the modal opens.
+        // If they were left over from a previous open, refresh them too —
+        // a stale 9am from yesterday is more confusing than the user typing
+        // their own value.
+        const startsInput = form.querySelector('input[name="starts_at"]');
+        const dueInput = form.querySelector('input[name="due_at"]');
+        if (!startsInput || !dueInput) return;
+        const startStr = _smartDefaultStart();
+        if (!startsInput.value) startsInput.value = startStr;
+        if (!dueInput.value) dueInput.value = _smartDefaultDue(startsInput.value);
+    }
+
+    // Delegated: any click that opens #add-task-modal prefills sensible
+    // defaults (starts = next half-hour, due = +1 hour) if empty, mirroring
+    // Apple's "always have a value here" behavior.
     document.addEventListener('click', (e) => {
         const trig = e.target.closest('[data-open-modal="add-task-modal"]');
         if (!trig) return;
-        document.querySelectorAll(
-            '#add-task-modal form[data-add-task] input[name="due_at"]'
-        ).forEach((el) => {
-            if (!el.value) el.value = _todayEndOfDayLocal();
-        });
+        document.querySelectorAll('#add-task-modal form[data-add-task]').forEach(_populateSmartDefaults);
     });
 
     // ---- Wire up ----
@@ -837,8 +1439,13 @@
     // ---- Class-block drag (reorder bucket order on home/today) ----
 
     function bindClassBlockDrag(list) {
-        if (list.dataset.dragBound === '1') return;
-        list.dataset.dragBound = '1';
+        // Distinct flag from bindDrag — both functions wire onto the
+        // same [data-class-block-list] container, so sharing
+        // `dragBound` meant whichever ran first claimed the container
+        // and the other silently no-op'd. (Task drag won, class-block
+        // drag died.)
+        if (list.dataset.classDragBound === '1') return;
+        list.dataset.classDragBound = '1';
         let dragBlock = null;
         let pointerStart = null;
         let isDragging = false;
@@ -981,7 +1588,7 @@
         document.querySelectorAll('.todo-del').forEach(bindDelete);
         document.querySelectorAll('.todo-edit').forEach(bindEditButton);
         document.querySelectorAll('[data-row-toggle]').forEach(bindRowExpand);
-        document.querySelectorAll('.todo-list-draggable').forEach(bindDrag);
+        document.querySelectorAll('[data-class-block-list]').forEach(bindDrag);
         document.querySelectorAll('[data-class-block-list]').forEach(bindClassBlockDrag);
         document.querySelectorAll('form[data-add-task]').forEach(bindAddTaskForm);
         document.querySelectorAll('form[data-edit-task]').forEach(bindEditTaskForm);

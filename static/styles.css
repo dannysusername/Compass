@@ -1872,10 +1872,14 @@ section h2 .add-syllabus-btn,
     inset: 0;
     background: rgba(0, 0, 0, 0.45);
     display: flex;
-    align-items: center;
+    /* flex-start so a tall modal pins to the top of the viewport instead
+       of overflowing both above and below center — the X always lands on
+       a reachable spot. */
+    align-items: flex-start;
     justify-content: center;
-    z-index: 100;
+    z-index: 1000;
     padding: 24px;
+    overflow-y: auto;
 }
 .modal-overlay[hidden] { display: none; }
 body.modal-open { overflow: hidden; }
@@ -1896,7 +1900,10 @@ body.modal-open { overflow: hidden; }
     align-items: flex-start;
     justify-content: space-between;
     gap: 12px;
-    margin-bottom: 8px;
+    margin: -24px -28px 8px;
+    padding: 18px 28px 12px;
+    background: var(--paper);
+    border-bottom: 1px solid var(--rule);
 }
 .modal-head h2 {
     margin: 0;
@@ -1952,6 +1959,23 @@ body.modal-open { overflow: hidden; }
     font-style: normal;
 }
 .overdue-section .todo-section-head { color: var(--danger); }
+
+/* Overdue rows: red title + red drawer cap. Today and overdue share one
+   UL inside the class-block, so the red text is the only inline signal
+   the row is past-due (no divider, no per-row "overdue" badge). The
+   drawer cap names it explicitly when the user clicks in. */
+.todo-row.is-overdue .todo-title { color: var(--danger); }
+.todo-drawer-overdue {
+    margin-bottom: 8px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--rule);
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--danger);
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+}
 
 /* Add-task form with class picker (shared, both views).
    Stacked single-column layout so it fits snugly inside the ~360px sidebar
@@ -2420,6 +2444,195 @@ details.class-section > summary.class-section-summary .section-toggle-chevron {
     color: var(--muted);
     flex-shrink: 0;
     white-space: nowrap;
+}
+
+.subtle-hint {
+    font-size: 10px;
+    color: var(--muted);
+    text-transform: none;
+    letter-spacing: 0;
+    font-weight: 400;
+    margin-left: 4px;
+}
+
+/* All-day checkbox sits inline like a chip below the due field.
+   Specificity matters: `.add-task-form label` (used elsewhere) sets
+   display:flex; flex-direction:column, which would stretch this label
+   to the full form width and turn the entire row into a click target. */
+.add-task-form label.add-task-allday {
+    display: inline-flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+    align-self: flex-start;
+    width: max-content;
+    margin-top: -2px;
+    font-size: 12px;
+    color: var(--ink);
+    cursor: pointer;
+}
+.add-task-allday input[type="checkbox"] { margin: 0; cursor: pointer; }
+
+/* When All-day is checked, the Starts-on label is dimmed + non-interactive
+   to make clear that the field can't be edited while all-day is on. */
+.add-task-form label.disabled {
+    opacity: 0.45;
+    pointer-events: none;
+}
+.add-task-form label.disabled input[type="datetime-local"] {
+    background: var(--paper-2);
+}
+
+/* End-date field — only shown when Repeat is set; JS toggles `hidden`. */
+.add-task-rrule-until { display: flex; flex-direction: column; gap: 4px; }
+.add-task-rrule-until[hidden] { display: none; }
+
+/* Stacked modal-actions for the recurring-delete dialog: full-width
+   buttons one per row read more clearly than horizontal cluster. */
+.modal-actions-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    align-items: stretch;
+}
+.modal-actions-stack button { width: 100%; }
+
+/* Repeat / alerts / attachments — power-user fields collapsed visually so
+   they fit alongside title / due / class without overwhelming the modal. */
+.add-task-rrule { display: flex; flex-direction: column; gap: 4px; }
+.add-task-rrule select { width: 100%; }
+
+.add-task-alerts {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.alerts-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    min-height: 24px;
+}
+.alerts-chips:empty::before {
+    content: 'No reminders';
+    color: var(--muted);
+    font-size: 11px;
+    font-style: italic;
+}
+.alert-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 8px;
+    border: 1px solid var(--ink-2, var(--ink));
+    border-radius: 12px;
+    font-family: var(--mono);
+    font-size: 11px;
+    background: var(--paper);
+    color: var(--ink);
+}
+.alert-chip-remove {
+    background: none;
+    border: 0;
+    padding: 0 0 0 2px;
+    margin: 0;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+}
+.alert-chip-remove:hover { color: var(--rust); }
+.alerts-add select {
+    width: 100%;
+    font-size: 11px;
+}
+
+.add-task-attachments {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.attachments-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.attachment-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 6px;
+    background: var(--paper-2);
+    font-size: 12px;
+}
+.attachment-row .attachment-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.attachment-row a { color: var(--ink); text-decoration: underline; text-underline-offset: 2px; }
+.attachment-row a:hover { color: var(--rust); }
+.attachment-remove {
+    background: none;
+    border: 0;
+    padding: 0 4px;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 14px;
+}
+.attachment-remove:hover { color: var(--rust); }
+.attachments-upload {
+    display: inline-flex;
+    align-items: center;
+    cursor: pointer;
+}
+.attachments-upload input[type="file"] {
+    position: absolute;
+    width: 1px; height: 1px;
+    padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0,0,0,0);
+    border: 0;
+}
+
+/* Drawer extras — repeat / reminders / attachment summary. Tight, monospace,
+   left-aligned with the existing notes block. */
+.todo-drawer-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin: 0 0 10px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-2, var(--ink));
+}
+.todo-drawer-meta:empty { display: none; }
+.todo-drawer-meta-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+}
+.todo-drawer-meta-label {
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 10px;
+}
+.todo-drawer-meta .attachments-list {
+    flex: 1;
+    min-width: 200px;
+}
+
+/* Repeat / attachment indicators on the row — same muted styling as the
+   existing 📝 indicator. */
+.todo-row-indicator {
+    font-size: 12px;
+    opacity: 0.6;
+    margin-left: 2px;
 }
 
 .new-tag-form {

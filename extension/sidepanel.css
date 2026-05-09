@@ -1,0 +1,297 @@
+/* Side panel reuses popup.css for the design tokens (--paper, --ink,
+   --serif, etc.) and the .popup-head/.muted-link/.primary classes. This
+   file overrides for the side panel's wider/taller form factor and adds
+   the row-list styling the popup didn't need. */
+
+html, body {
+    width: 100%;       /* override popup's fixed 360px */
+    min-height: 100vh;
+}
+body {
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.sidepanel-head {
+    padding: 12px 16px 10px;
+    margin-bottom: 0;
+    border-bottom: 1.5px solid var(--ink);
+    position: sticky;
+    top: 0;
+    background: var(--paper);
+    z-index: 1;
+}
+
+.muted-btn {
+    margin-left: auto;
+    background: transparent;
+    color: var(--ink-3);
+    border: 1px solid var(--rule);
+    padding: 2px 8px;
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+    border-radius: 2px;
+}
+.muted-btn:hover { color: var(--ink); border-color: var(--ink); }
+
+#content {
+    flex: 1;
+    padding: 12px 14px 14px;
+    overflow-y: auto;
+}
+#content .loading,
+#content .empty,
+#content .muted {
+    color: var(--ink-3);
+    font-size: 13px;
+    text-align: center;
+    padding: 24px 8px;
+}
+#content .error { color: var(--danger); }
+
+/* Class block — class header + tasks list. */
+.class-block {
+    margin-bottom: 16px;
+}
+.class-block-head {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 6px 4px;
+    margin-bottom: 4px;
+    border-bottom: 1px solid var(--rule);
+}
+.class-code {
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--ink);
+}
+.class-name {
+    font-size: 12px;
+    color: var(--ink-3);
+    font-style: italic;
+}
+.class-block-head.is-personal .class-code { color: var(--ink-3); }
+
+/* Row vocabulary mirrors the web app's .todo-row but tighter for the
+   narrow column. Drag handle is omitted in v1 (read-only). */
+.todo-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+.todo-row {
+    display: block;
+    padding: 6px 4px;
+    border-bottom: 1px solid var(--rule);
+    --tag-color: var(--rule);
+}
+.todo-row:last-child { border-bottom: none; }
+.todo-row-main {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0; /* lets .todo-title truncate */
+}
+.todo-row-main.clickable { cursor: pointer; }
+.todo-row-main.clickable:hover .todo-title { color: var(--ink); }
+.todo-circle {
+    flex: 0 0 auto;
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    padding: 0;
+    border: 1.5px solid var(--rule);
+    border-radius: 50%;
+    background: transparent;
+    cursor: pointer;
+    transition: background 0.1s, border-color 0.1s;
+}
+.todo-circle:hover {
+    border-color: var(--ink);
+}
+.todo-row.done .todo-circle {
+    background: var(--ink-3);
+    border-color: var(--ink-3);
+}
+.todo-title {
+    flex: 1 1 auto;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: 14px;
+    color: var(--ink-2);
+}
+.todo-row.is-overdue .todo-title { color: var(--danger); }
+/* Done wins over overdue: a checked-off past-due task is "done", not
+   "still pending in red". Keep this rule LAST so its specificity tie
+   with .is-overdue resolves in its favor (last-rule-wins for equal
+   specificity). */
+.todo-row.done .todo-title {
+    color: var(--ink-3);
+    text-decoration: line-through;
+}
+
+.todo-when {
+    flex: 0 0 auto;
+    font-family: var(--mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--ink-3);
+}
+.todo-tag {
+    flex: 0 0 auto;
+    font-family: var(--mono);
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    padding: 1px 6px;
+    border-radius: 2px;
+    color: var(--tag-color, var(--ink));
+    border: 1px solid var(--tag-color, var(--rule));
+    background: transparent;
+}
+
+/* × delete button — fades in on row hover so the resting state stays
+   minimal. Always reachable via keyboard since aria-label names it. */
+.todo-del {
+    flex: 0 0 auto;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: var(--ink-3);
+    font-size: 16px;
+    line-height: 1;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.1s, color 0.1s;
+}
+.todo-row:hover .todo-del,
+.todo-del:focus-visible { opacity: 1; }
+.todo-del:hover { color: var(--danger); }
+
+/* Bottom-sheet for the recurring-delete picker. Sticks above the
+   footer, slides in via [hidden] toggle. Stacked buttons read more
+   clearly than horizontal in this narrow column. */
+.bottom-sheet {
+    position: sticky;
+    bottom: 0;
+    background: var(--paper-2);
+    border-top: 2px solid var(--ink);
+    padding: 14px 16px 12px;
+    z-index: 2;
+    box-shadow: 0 -4px 14px rgba(0, 0, 0, 0.18);
+}
+.bottom-sheet[hidden] { display: none; }
+.bottom-sheet .sheet-title {
+    margin: 0 0 4px;
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--ink);
+}
+.bottom-sheet .sheet-prompt {
+    margin: 0 0 12px;
+    font-size: 12px;
+    color: var(--ink-3);
+}
+.bottom-sheet .sheet-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.bottom-sheet button {
+    background: var(--paper);
+    color: var(--ink);
+    border: 1px solid var(--rule);
+    padding: 8px 12px;
+    font-family: var(--serif);
+    font-size: 13px;
+    cursor: pointer;
+    border-radius: 2px;
+    text-align: left;
+}
+.bottom-sheet button:hover {
+    border-color: var(--ink);
+}
+.bottom-sheet button.danger {
+    color: var(--danger);
+    border-color: rgba(178, 58, 58, 0.4);
+}
+.bottom-sheet button.danger:hover {
+    border-color: var(--danger);
+    background: rgba(178, 58, 58, 0.06);
+}
+.bottom-sheet button.muted {
+    color: var(--ink-3);
+}
+
+/* Editor view — replaces #content when a task row is clicked. Same
+   form-field vocabulary as popup.css but laid out vertically inside
+   the side panel column. */
+.editor-view {
+    flex: 1;
+    padding: 12px 16px 16px;
+    overflow-y: auto;
+}
+.editor-view .field { margin-bottom: 12px; }
+.editor-view .field.disabled,
+.editor-view .field.disabled input {
+    opacity: 0.45;
+    pointer-events: none;
+}
+.editor-view .actions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-top: 14px;
+}
+.editor-view button.muted {
+    background: transparent;
+    border: 1px solid var(--rule);
+    color: var(--ink-3);
+    padding: 8px 14px;
+    font-family: var(--serif);
+    font-size: 14px;
+    cursor: pointer;
+    border-radius: 2px;
+}
+.editor-view button.muted:hover {
+    color: var(--ink);
+    border-color: var(--ink);
+}
+#editor-back {
+    margin-bottom: 10px;
+}
+
+/* Footer with quick-add + open-app links */
+.sidepanel-foot {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 16px;
+    border-top: 1px solid var(--rule);
+    background: var(--paper);
+}
+.sidepanel-foot a,
+.sidepanel-foot .hint {
+    font-family: var(--mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--ink-3);
+    text-decoration: none;
+}
+.sidepanel-foot a:hover { color: var(--rust); }

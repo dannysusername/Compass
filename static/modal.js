@@ -3,7 +3,34 @@
 // Escape, hide it.
 
 (function () {
+    // Hoist every modal-overlay to <body> so it escapes any positioned /
+    // overflow / fixed ancestor that would otherwise trap it. The home
+    // page wraps the today list in `aside.home-todo-col` (sticky, overflow:
+    // auto) and the class page wraps it in `.task-fab-panel` (position:
+    // fixed) — both create stacking contexts that pin modals behind the
+    // header and clip the close button when content scrolls.
+    function hoistModals(root = document) {
+        root.querySelectorAll('.modal-overlay').forEach((m) => {
+            if (m.parentNode !== document.body) {
+                document.body.appendChild(m);
+            }
+        });
+    }
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => hoistModals());
+    } else {
+        hoistModals();
+    }
+    // Re-hoist after softRefresh swaps modal markup back into the today
+    // partial. Exposed for callers that mutate the DOM and want to re-run.
+    window.hoistModalsToBody = hoistModals;
+
     function open(modal) {
+        // Belt-and-suspenders: hoist this specific modal in case it was
+        // injected after page load (e.g. by softRefresh).
+        if (modal.parentNode !== document.body) {
+            document.body.appendChild(modal);
+        }
         modal.hidden = false;
         document.body.classList.add('modal-open');
         // Move focus to first focusable element inside.

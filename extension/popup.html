@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <link rel="stylesheet" href="popup.css">
+    <title>Compass — Quick Add</title>
+</head>
+<body>
+    <header class="popup-head">
+        <em class="logo">Compass</em><span class="dot">.</span>
+        <span class="popup-sub">Quick add</span>
+    </header>
+
+    <!-- Logged-out state: the popup can't render a login page itself
+         (chrome-extension:// origin can't run Compass templates), so we
+         deep-link to the main site in a new tab. After the user logs
+         in there, the cookie is set and the next popup open works. -->
+    <section id="logged-out" hidden>
+        <p class="muted">Sign in to Compass to add tasks.</p>
+        <button type="button" id="open-login" class="primary">Log in to Compass</button>
+        <p class="hint">
+            Connected to <code id="server-url-readout">…</code>.
+            <a href="#" id="open-options">Change</a>
+        </p>
+    </section>
+
+    <!-- Logged-in state: minimal task form. Mirrors the main /add-task
+         modal but pruned to the essentials so the popup stays small.
+         Repeat / All-day / Tag are advanced-toggle territory. -->
+    <section id="logged-in" hidden>
+        <form id="add-task-form" autocomplete="off">
+            <label class="field">
+                <span class="label">Task</span>
+                <input type="text" name="title" placeholder="e.g. Read chapter 4" required autofocus>
+            </label>
+
+            <label class="field">
+                <span class="label">Class</span>
+                <select name="class_id" id="class-select">
+                    <option value="">Personal (no class)</option>
+                </select>
+            </label>
+
+            <label class="field">
+                <span class="label">Due</span>
+                <input type="datetime-local" name="due_at" id="due-input">
+            </label>
+
+            <label class="checkbox-field">
+                <input type="checkbox" name="is_all_day" value="1" id="all-day">
+                <span>All day</span>
+            </label>
+
+            <details class="advanced">
+                <summary>More options</summary>
+                <label class="field">
+                    <span class="label">Tag</span>
+                    <select name="tag_id" id="tag-select">
+                        <option value="">No tag</option>
+                    </select>
+                </label>
+                <label class="field">
+                    <span class="label">Repeat</span>
+                    <select name="rrule">
+                        <option value="">Doesn't repeat</option>
+                        <option value="FREQ=DAILY">Daily</option>
+                        <option value="FREQ=WEEKLY">Weekly</option>
+                        <option value="FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR">Weekdays</option>
+                        <option value="FREQ=MONTHLY">Monthly</option>
+                    </select>
+                </label>
+                <label class="field">
+                    <span class="label">Notes</span>
+                    <textarea name="notes" rows="3" placeholder="Optional"></textarea>
+                </label>
+            </details>
+
+            <div class="actions">
+                <button type="submit" class="primary">Add task</button>
+                <a href="#" id="open-sidepanel" class="muted-link">Today list →</a>
+            </div>
+            <p class="hint" style="margin-top: 6px; font-size: 10px; color: var(--ink-3); text-align: right">
+                <a href="#" id="open-app" class="muted-link">Open Compass</a>
+            </p>
+
+            <div id="status" class="status" hidden></div>
+        </form>
+    </section>
+
+    <script type="module" src="popup.js"></script>
+</body>
+</html>

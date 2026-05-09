@@ -18,6 +18,7 @@ from fastapi import (
 from fastapi.responses import (
     FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response,
 )
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlmodel import (
@@ -121,6 +122,10 @@ class Task(SQLModel, table=True):
     `class_id` is nullable: a NULL class_id is a "Personal" task with no
     course association (e.g. groceries, errands). The home/today/week views
     bucket personal tasks under a synthetic "Personal" group.
+
+    `rrule` is an iCalendar RRULE fragment (no leading "RRULE:") describing
+    repetition — e.g. "FREQ=DAILY", "FREQ=WEEKLY", "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR".
+    Empty/None means non-recurring.
     """
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="user.id", index=True)
@@ -133,8 +138,48 @@ class Task(SQLModel, table=True):
     position: int = Field(default=0)  # drag-to-reorder priority
     created_at: datetime
     tag_id: Optional[int] = Field(default=None, foreign_key="tag.id")
+    rrule: Optional[str] = Field(default=None)
+    # Optional UNTIL date for recurring tasks. Stored UTC; the iCal feed
+    # serializes it into the RRULE as `UNTIL=YYYYMMDDTHHMMSSZ`.
+    rrule_until: Optional[datetime] = Field(default=None)
+    # JSON list of ISO datetimes to skip — populated when the user picks
+    # "Delete only this date" on a recurring row.
+    rrule_exdates: Optional[str] = Field(default=None)
+    is_all_day: bool = Field(default=False)
     cls: Optional[Class] = Relationship(back_populates="tasks")
     tag: Optional["Tag"] = Relationship(back_populates="tasks")
+    alerts: List["TaskAlert"] = Relationship(
+        back_populates="task",
+        sa_relationship_kwargs={"cascade": "all, delete-orphan"},
+    )
+    attachments: List["TaskAttachment"] = Relationship(
+        back_populates="task",
+        sa_relationship_kwargs={"cascade": "all, delete-orphan"},
+    )
+
+
+class TaskAlert(SQLModel, table=True):
+    """One reminder per row. Multiple rows mean multiple VALARM blocks on the
+    iCal event. `minutes_before` is positive (15, 60, 1440, 10080…) — the
+    feed converts to a negative TRIGGER offset."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    task_id: int = Field(foreign_key="task.id", index=True)
+    minutes_before: int
+    task: Optional["Task"] = Relationship(back_populates="alerts")
+
+
+class TaskAttachment(SQLModel, table=True):
+    """File the user attached to a task. Storage backend (local or R2) is
+    handled through `storage.py` — `filename` is the storage key; `original_name`
+    is what the user sees. Token-authenticated download for Apple Calendar
+    lives at `/calendar/{token}/attachments/{filename}`."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    task_id: int = Field(foreign_key="task.id", index=True)
+    filename: str
+    original_name: str
+    content_type: str
+    uploaded_at: datetime
+    task: Optional["Task"] = Relationship(back_populates="attachments")
 
 
 class Tag(SQLModel, table=True):
@@ -283,6 +328,33 @@ class User(SQLModel, table=True):
     # Personal bucket. Buckets not listed here append in default
     # alphabetical-by-code order.
     class_order_json: Optional[str] = Field(default=None)
+    # IANA timezone string ("America/Los_Angeles", "Europe/Berlin"...).
+    # When set, replaces the server-wide LOCAL_TZ default for THIS user's
+    # today/overdue/week date math + iCal feed. Auto-populated on every
+    # page load by base.html JS (Intl.DateTimeFormat resolved tz) and
+    # POSTed to /settings/timezone. NULL means use LOCAL_TZ — keeps the
+    # legacy single-user behavior intact for accounts that haven't loaded
+    # any page since the field was added.
+    timezone: Optional[str] = Field(default=None)
+
+
+class DayItemPosition(SQLModel, table=True):
+    """Per-day position override for a task or event on the week tab.
+
+    A multi-day task renders once per day it spans, so dragging it on
+    Friday's day modal must not change Saturday's order. We store an
+    override keyed on (user_id, kind, item_id, day_date); when the week
+    view collects items for a given day, it prefers the day-scoped
+    position over the global Task/CalendarEvent.position.
+
+    Other views (home/today, class page) keep using the global position —
+    drag there is "always today" so per-day overrides aren't needed."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    kind: str  # 'task' or 'event'
+    item_id: int = Field(index=True)
+    day_date: str = Field(index=True)  # YYYY-MM-DD, plain string for portability
+    position: int
 
 
 # ---- App setup ----
@@ -309,8 +381,13 @@ else:
 
 def _add_column_if_missing(conn, table: str, column: str, ddl: str) -> None:
     """Add a column to an existing SQLite table if it isn't already there.
-    SQLModel.create_all only creates missing tables, not missing columns."""
+    SQLModel.create_all only creates missing tables, not missing columns.
+    No-op when the table itself doesn't exist — fresh databases (and
+    test DBs) skip migrations for tables that were removed from the
+    model upstream."""
     rows = conn.exec_driver_sql(f"PRAGMA table_info({table})").fetchall()
+    if not rows:
+        return  # table doesn't exist; nothing to migrate
     existing = {r[1] for r in rows}  # row[1] = column name
     if column not in existing:
         conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
@@ -336,24 +413,18 @@ async def lifespan(app: FastAPI):
             _add_column_if_missing(conn, "task", "starts_at", "TIMESTAMP")
             _add_column_if_missing(conn, "tag", "is_system", "INTEGER NOT NULL DEFAULT 0")
             _add_column_if_missing(conn, "tag", "system_key", "TEXT")
-            # Phase 2: per-user data scoping. Add user_id to top-level
-            # tables and backfill all orphan rows to the oldest user, so
-            # anyone upgrading keeps their data instead of losing it to
-            # the user_id=NULL filter.
             _add_column_if_missing(conn, "class", "user_id", "INTEGER")
             _add_column_if_missing(conn, "task", "user_id", "INTEGER")
             _add_column_if_missing(conn, "tag", "user_id", "INTEGER")
-            # Phase 3: each user can supply their own xAI API key.
             _add_column_if_missing(conn, "user", "xai_api_key", "TEXT")
-            # Phase 4: per-user iCal subscription token (for Apple
-            # Calendar etc., which can't carry a session cookie).
             _add_column_if_missing(conn, "user", "calendar_token", "TEXT")
-            # Phase 6: per-user class display order on home/today views.
             _add_column_if_missing(conn, "user", "class_order_json", "TEXT")
-            # Phase 5: notes field on tasks; class_id becomes nullable
-            # so users can have non-class "Personal" tasks (groceries,
-            # errands, etc.).
+            _add_column_if_missing(conn, "user", "timezone", "TEXT")
             _add_column_if_missing(conn, "task", "notes", "TEXT")
+            _add_column_if_missing(conn, "task", "rrule", "TEXT")
+            _add_column_if_missing(conn, "task", "is_all_day", "INTEGER NOT NULL DEFAULT 0")
+            _add_column_if_missing(conn, "task", "rrule_until", "TIMESTAMP")
+            _add_column_if_missing(conn, "task", "rrule_exdates", "TEXT")
             # SQLite has no in-place ALTER COLUMN to drop NOT NULL, so
             # rebuild the task table when its class_id is still marked
             # NOT NULL. Idempotent — subsequent boots see notnull=0 and
@@ -428,6 +499,21 @@ app.add_middleware(
     https_only=(COMPASS_ENV == "production"),
     max_age=60 * 60 * 24 * 30,  # 30 days
 )
+# Browser-extension support: the popup/side-panel runs at
+# `chrome-extension://<id>` and calls the FastAPI server with credentials
+# (cookies) so the user's existing session rides along. Allow that origin
+# pattern + credentialed requests; the regex matches any Chromium ext id
+# (32 lowercase letters), which is safe because the extension still has
+# to be installed on the user's browser to make the call. Added AFTER
+# SessionMiddleware so it wraps as the outer layer (handles preflights
+# before session lookup runs).
+app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=r"^chrome-extension://[a-p]{32}$",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
@@ -496,12 +582,37 @@ def require_login(request: Request) -> User:
 
 @app.exception_handler(NotAuthenticatedError)
 async def _redirect_to_login(request: Request, exc: NotAuthenticatedError):
+    # Extension/API clients ask for JSON — they need a 401 they can detect,
+    # not a 303 to an HTML login page (a chrome-extension:// origin can't
+    # render Compass's login template anyway). HTML browsers still get the
+    # redirect.
+    accept = request.headers.get("accept", "")
+    if "application/json" in accept:
+        return JSONResponse({"error": "not_authenticated"}, status_code=401)
     return RedirectResponse("/login", status_code=303)
 
 
 # ---- Ownership helpers ----
 # Each loads a row by id and 404s if it doesn't belong to the given user.
 # Centralizes the per-user scoping so individual routes stay readable.
+
+def _lookup_owned_item(session: "Session", kind: str, eid: int, user_id: int):
+    """Bulk-ops cousin of `_own_task` / `_own_event`. Returns the row when
+    it exists AND belongs to `user_id`, otherwise None — never raises.
+    Routes that batch over user-supplied id lists (`/tasks/reorder`,
+    `/tasks/reorder-day`) want silent skip on bad ids, not a 404 that
+    aborts the whole request."""
+    if kind == "task":
+        row = session.get(Task, eid)
+        return row if row and row.user_id == user_id else None
+    if kind == "event":
+        ev = session.get(CalendarEvent, eid)
+        if ev is None:
+            return None
+        cls = session.get(Class, ev.class_id)
+        return ev if cls and cls.user_id == user_id else None
+    return None
+
 
 def _own_class(session: "Session", class_id: int, user_id: int) -> "Class":
     cls = session.get(Class, class_id)
@@ -532,6 +643,16 @@ def _own_tag(session: "Session", tag_id: int, user_id: int) -> "Tag":
     if not tag or tag.user_id != user_id:
         raise HTTPException(404, "Tag not found")
     return tag
+
+
+def _own_attachment(session: "Session", attachment_id: int, user_id: int) -> "TaskAttachment":
+    a = session.get(TaskAttachment, attachment_id)
+    if not a:
+        raise HTTPException(404, "Attachment not found")
+    t = session.get(Task, a.task_id)
+    if not t or t.user_id != user_id:
+        raise HTTPException(404, "Attachment not found")
+    return a
 
 
 def _own_document(session: "Session", doc_id: int, user_id: int) -> "Document":
@@ -967,6 +1088,31 @@ def settings_page(
     })
 
 
+@app.post("/settings/timezone")
+async def settings_set_timezone(request: Request, user: User = Depends(require_login)):
+    """Auto-saved on every page load via base.html JS. Validates the
+    string against ZoneInfo's known set so a malicious or misconfigured
+    client can't poison the user's saved timezone (we'd then render dates
+    in a bogus tz). Silent no-op when the new value matches what's stored
+    so we don't write to DB on every navigation."""
+    form = await request.form()
+    raw = (form.get("tz") or "").strip()
+    if not raw:
+        return JSONResponse({"saved": False, "reason": "empty"}, status_code=400)
+    try:
+        ZoneInfo(raw)
+    except Exception:
+        return JSONResponse({"saved": False, "reason": "invalid"}, status_code=400)
+    if user.timezone == raw:
+        return JSONResponse({"saved": True, "unchanged": True})
+    with Session(engine) as session:
+        u = session.get(User, user.id)
+        u.timezone = raw
+        session.add(u)
+        session.commit()
+    return JSONResponse({"saved": True})
+
+
 @app.post("/settings/calendar/regenerate")
 def settings_regenerate_calendar_token(request: Request, user: User = Depends(require_login)):
     """Rotate the iCal subscription token. Existing subscriptions break
@@ -1006,10 +1152,13 @@ def settings_save(
 
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request, user: User = Depends(require_login)):
-    today_start = _today_local()
+    tz = _user_tz(user)
+    today_start = _today_local(tz)
     today_end = today_start + timedelta(days=1)
-    today_items = _collect_items_in_range(today_start, today_end, user.id)
-    overdue = _collect_overdue(user.id)
+    today_items = _collect_items_in_range(today_start, today_end, user.id,
+                                          tz=tz, hide_completed=True)
+    overdue = _collect_overdue(user.id, tz=tz)
+    today_buckets = _merge_today_with_overdue(today_items, overdue, user.id)
     with Session(engine, expire_on_commit=False) as session:
         classes = session.exec(
             select(Class).where(Class.user_id == user.id).order_by(Class.code)
@@ -1020,8 +1169,7 @@ def home(request: Request, user: User = Depends(require_login)):
     return templates.TemplateResponse(request, "home.html", {
         "classes": classes,
         "today": today_start,
-        "today_items": today_items,
-        "overdue": overdue,
+        "today_buckets": today_buckets,
         "default_class_id": (classes[0].id if classes else None),
         "all_tags": all_tags,
     })
@@ -1040,6 +1188,20 @@ def add_class(
     return RedirectResponse(url="/", status_code=303)
 
 
+@app.get("/me.json")
+def me_json(user: User = Depends(require_login)):
+    """Light auth-check + identity endpoint. The browser extension hits
+    this on popup open: 200 means we have a valid session and can show
+    the quick-add form; 401 means show a 'Log in to Compass' button that
+    opens the main site in a tab. Avoids the redirect dance that a
+    chrome-extension:// origin can't follow."""
+    return JSONResponse({
+        "id": user.id,
+        "email": user.email,
+        "timezone": user.timezone,
+    })
+
+
 @app.get("/classes.json")
 def classes_json(user: User = Depends(require_login)):
     with Session(engine) as session:
@@ -1049,6 +1211,62 @@ def classes_json(user: User = Depends(require_login)):
         return JSONResponse([
             {"id": c.id, "code": c.code, "name": c.name} for c in classes
         ])
+
+
+def _serialize_item(it: dict) -> dict:
+    """Flatten a collector item dict into JSON-safe shape — datetimes as
+    ISO strings, plus an `is_personal` hint for the bucket header. Used
+    by `/today.json` for the browser extension's side panel."""
+    def iso(dt):
+        return dt.isoformat() if dt is not None else None
+    return {
+        "kind": it["kind"],
+        "id": it["id"],
+        "class_id": it["class_id"],
+        "title": it["title"],
+        "due_at": iso(it["due_at"]),
+        "starts_at": iso(it["starts_at"]),
+        "is_range": it["is_range"],
+        "is_range_day": it["is_range_day"],
+        "is_all_day": it["is_all_day"],
+        "completed": it["completed"],
+        "actionable": it.get("actionable", True),
+        "tag_color": it["tag_color"],
+        "tag_name": it["tag_name"],
+        "tag_id": it["tag_id"],
+        "sub_kind": it.get("sub_kind"),
+        "sub_kind_color": it.get("sub_kind_color"),
+        "notes": it.get("notes"),
+        "rrule": it.get("rrule"),
+    }
+
+
+@app.get("/today.json")
+def today_json(user: User = Depends(require_login)):
+    """JSON shape of today's view (today + overdue, merged + class-scoped).
+    Powers the browser extension's side panel; the HTML `/today` route
+    keeps doing its thing for the web app."""
+    tz = _user_tz(user)
+    today_start = _today_local(tz)
+    today_end = today_start + timedelta(days=1)
+    today_items = _collect_items_in_range(today_start, today_end, user.id,
+                                          tz=tz, hide_completed=True)
+    overdue = _collect_overdue(user.id, tz=tz)
+    today_buckets = _merge_today_with_overdue(today_items, overdue, user.id)
+    return JSONResponse({
+        "today": today_start.date().isoformat(),
+        "buckets": [
+            {
+                "class_id": slot["cls"].id,
+                "code": slot["cls"].code,
+                "name": getattr(slot["cls"], "name", "") or "",
+                "is_personal": getattr(slot["cls"], "is_personal", False),
+                "items": [_serialize_item(it) for it in slot["items"]],
+                "overdue_items": [_serialize_item(it) for it in slot["overdue_items"]],
+            }
+            for slot in today_buckets.values()
+        ],
+    })
 
 
 @app.get("/classes/{class_id}", response_class=HTMLResponse)
@@ -1062,10 +1280,13 @@ def class_detail(request: Request, class_id: int, user: User = Depends(require_l
         latest_syllabus = max(cls.syllabi, key=lambda s: s.parsed_at) if cls.syllabi else None
     # Floating tasks panel reuses the home page's today list. Add-task form
     # defaults to the current class.
-    today_start = _today_local()
+    tz = _user_tz(user)
+    today_start = _today_local(tz)
     today_end = today_start + timedelta(days=1)
-    today_items = _collect_items_in_range(today_start, today_end, user.id)
-    overdue = _collect_overdue(user.id)
+    today_items = _collect_items_in_range(today_start, today_end, user.id,
+                                          tz=tz, hide_completed=True)
+    overdue = _collect_overdue(user.id, tz=tz)
+    today_buckets = _merge_today_with_overdue(today_items, overdue, user.id)
     with Session(engine, expire_on_commit=False) as session:
         all_classes = session.exec(
             select(Class).where(Class.user_id == user.id).order_by(Class.code)
@@ -1079,8 +1300,7 @@ def class_detail(request: Request, class_id: int, user: User = Depends(require_l
         "documents": documents,
         "syllabus": latest_syllabus,
         "today": today_start,
-        "today_items": today_items,
-        "overdue": overdue,
+        "today_buckets": today_buckets,
         "all_classes": all_classes,
         "default_class_id": cls.id,
         "all_tags": all_tags,
@@ -1268,19 +1488,34 @@ import re as _re
 
 # ---- Routes: Tasks ----
 
-def _today_local() -> datetime:
-    """Today's date at midnight in the user's local timezone."""
-    now = datetime.now(LOCAL_TZ)
+def _user_tz(user) -> ZoneInfo:
+    """Resolve the IANA tz string on a User row to a ZoneInfo, falling
+    back to LOCAL_TZ on missing/invalid values. Used by the today/
+    overdue/week paths and the iCal feed so each account renders dates
+    in its own local time instead of the server's hardcoded LOCAL_TZ."""
+    raw = getattr(user, "timezone", None) if user is not None else None
+    if not raw:
+        return LOCAL_TZ
+    try:
+        return ZoneInfo(raw)
+    except Exception:
+        return LOCAL_TZ
+
+
+def _today_local(tz: ZoneInfo = LOCAL_TZ) -> datetime:
+    """Today's date at midnight in the given tz (default LOCAL_TZ)."""
+    now = datetime.now(tz)
     return now.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
-def _to_local(dt: Optional[datetime]) -> Optional[datetime]:
-    """Attach LOCAL_TZ if naive, else convert to LOCAL_TZ. None passes through."""
+def _to_local(dt: Optional[datetime], tz: ZoneInfo = LOCAL_TZ) -> Optional[datetime]:
+    """Attach tz if naive, else convert. None passes through. The default
+    tz is LOCAL_TZ so single-user / unscoped callers keep working."""
     if dt is None:
         return None
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=LOCAL_TZ)
-    return dt.astimezone(LOCAL_TZ)
+        dt = dt.replace(tzinfo=tz)
+    return dt.astimezone(tz)
 
 
 def _normalize_task_range(starts_at: str, due_at: str) -> tuple[Optional[datetime], Optional[datetime]]:
@@ -1299,9 +1534,326 @@ def _normalize_task_range(starts_at: str, due_at: str) -> tuple[Optional[datetim
     return starts_dt, due_dt
 
 
+# Smart default alerts by tag: keyed by lowercase tag name OR system_key.
+# Picked up at task-creation time when the client doesn't pass an explicit
+# alerts list. Users can override (add/remove) in the modal afterwards.
+_DEFAULT_ALERTS_BY_TAG = {
+    "exam":        [1440, 60],   # 1 day + 1 hour before
+    "midterm":     [1440, 60],
+    "final":       [1440, 60],
+    "quiz":        [1440],       # 1 day before
+    "project":     [1440],
+    "paper":       [1440],
+    "problem set": [60],
+    "assignment":  [60],
+    "deadline":    [60],
+    "milestone":   [1440],
+}
+_DEFAULT_ALERT_FALLBACK = [15]  # 15 min before — what we used to ship for everything
+
+
+def _default_alerts_for_tag(tag: Optional["Tag"]) -> list[int]:
+    if not tag:
+        return list(_DEFAULT_ALERT_FALLBACK)
+    for key in (tag.system_key, tag.name):
+        if not key:
+            continue
+        preset = _DEFAULT_ALERTS_BY_TAG.get(key.lower().strip())
+        if preset is not None:
+            return list(preset)
+    return list(_DEFAULT_ALERT_FALLBACK)
+
+
+def _replace_task_alerts(session: "Session", task_id: int, minutes_list: list[int]) -> None:
+    """Remove all existing alerts for the task and write the given list.
+    Dedupes and clamps to 0..40320 (4 weeks) so we don't store nonsense."""
+    for existing in session.exec(
+        select(TaskAlert).where(TaskAlert.task_id == task_id)
+    ).all():
+        session.delete(existing)
+    seen: set[int] = set()
+    for raw in minutes_list:
+        try:
+            m = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if m < 0 or m > 40320:
+            continue
+        if m in seen:
+            continue
+        seen.add(m)
+        session.add(TaskAlert(task_id=task_id, minutes_before=m))
+
+
+def _parse_alerts_form(raw: Optional[str]) -> Optional[list[int]]:
+    """Parse the comma-separated alerts string the client sends. Returns
+    None when the field isn't present at all (caller should fall back to
+    smart defaults), or a (possibly empty) list when the user explicitly
+    set it (including 'no alerts' = empty)."""
+    if raw is None:
+        return None
+    raw = raw.strip()
+    if not raw:
+        return []
+    out: list[int] = []
+    for chunk in raw.split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        try:
+            out.append(int(chunk))
+        except ValueError:
+            continue
+    return out
+
+
+# Allow-list of RRULE patterns the modal can send. Validating against this
+# prevents stored-XSS-style injection of weird RRULE fragments and keeps the
+# edit surface narrow. "Custom…" RRULEs aren't supported in v1.
+_ALLOWED_RRULES = {
+    "FREQ=DAILY",
+    "FREQ=WEEKLY",
+    "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR",
+    "FREQ=MONTHLY",
+}
+
+
+def _normalize_rrule(raw: Optional[str]) -> Optional[str]:
+    if not raw:
+        return None
+    s = raw.strip().upper()
+    if not s:
+        return None
+    return s if s in _ALLOWED_RRULES else None
+
+
+def _parse_exdates(raw: Optional[str]) -> set:
+    """Parse the JSON list of ISO datetime strings stored on
+    `Task.rrule_exdates` into a set of LOCAL_TZ-aware datetimes for fast
+    membership checks during expansion. Bad JSON / bad entries are ignored
+    silently — we'd rather emit too many occurrences than break the view."""
+    if not raw:
+        return set()
+    try:
+        items = json.loads(raw)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return set()
+    if not isinstance(items, list):
+        return set()
+    out = set()
+    for s in items:
+        dt = parse_iso_dt(s) if isinstance(s, str) else None
+        if dt is not None:
+            out.add(dt)
+    return out
+
+
+def _expand_rrule_in_window(
+    anchor: datetime,
+    rrule: Optional[str],
+    window_start: datetime,
+    window_end: datetime,
+    until: Optional[datetime] = None,
+    exdates: Optional[set] = None,
+) -> list[datetime]:
+    """Return every occurrence of a recurring task that falls in
+    [window_start, window_end). `anchor` is the original due_at.
+
+    No `rrule` → returns the anchor if it's in the window, else empty.
+    Iterates day-by-day (or month-by-month for FREQ=MONTHLY) so today/week
+    views can render an instance per occurrence. Capped at 2000 iterations
+    so a degenerate inputs can't burn the request.
+
+    `until` (optional) caps the recurrence — occurrences strictly after
+    this datetime are dropped. `exdates` is a set of LOCAL_TZ datetimes
+    to skip (typically populated when the user "deletes just this one"
+    on a recurring instance)."""
+    MAX = 2000
+    skip = exdates or set()
+    if anchor is None:
+        return []
+    if not rrule:
+        if window_start <= anchor < window_end and anchor not in skip:
+            if until is None or anchor <= until:
+                return [anchor]
+        return []
+
+    out: list[datetime] = []
+
+    def _accept(cur: datetime) -> bool:
+        if cur < window_start or cur >= window_end:
+            return False
+        if until is not None and cur > until:
+            return False
+        if cur in skip:
+            return False
+        return True
+
+    if rrule == "FREQ=DAILY":
+        # Fast-forward to window if the task started in the past, else
+        # we'd iterate years of history.
+        cur = anchor
+        if cur < window_start:
+            delta_days = (window_start.date() - cur.date()).days
+            cur = cur + timedelta(days=delta_days)
+        i = 0
+        while cur < window_end and i < MAX:
+            if until is not None and cur > until:
+                break
+            if _accept(cur):
+                out.append(cur)
+            cur = cur + timedelta(days=1)
+            i += 1
+
+    elif rrule == "FREQ=WEEKLY":
+        cur = anchor
+        if cur < window_start:
+            weeks = (window_start.date() - cur.date()).days // 7
+            cur = cur + timedelta(weeks=weeks)
+            while cur < window_start:
+                cur = cur + timedelta(days=7)
+        i = 0
+        while cur < window_end and i < MAX:
+            if until is not None and cur > until:
+                break
+            if _accept(cur):
+                out.append(cur)
+            cur = cur + timedelta(days=7)
+            i += 1
+
+    elif rrule == "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR":
+        # Step day-by-day, emit only Mon-Fri. Anchor's time-of-day applies
+        # to every occurrence — that matches RFC 5545 BYDAY semantics.
+        cur = anchor
+        if cur < window_start:
+            cur = window_start.replace(
+                hour=anchor.hour, minute=anchor.minute,
+                second=anchor.second, microsecond=anchor.microsecond,
+            )
+        i = 0
+        while cur < window_end and i < MAX:
+            if until is not None and cur > until:
+                break
+            if cur.weekday() < 5 and _accept(cur):
+                out.append(cur)
+            cur = cur + timedelta(days=1)
+            i += 1
+
+    elif rrule == "FREQ=MONTHLY":
+        # Same day-of-month each month; clamp to last day if the target
+        # month doesn't have it (e.g. Jan 31 → Feb 28).
+        import calendar as _cal
+        cur = anchor
+        i = 0
+        while cur < window_end and i < MAX:
+            if until is not None and cur > until:
+                break
+            if _accept(cur):
+                out.append(cur)
+            year, month = cur.year, cur.month + 1
+            if month > 12:
+                month, year = 1, year + 1
+            day = min(anchor.day, _cal.monthrange(year, month)[1])
+            cur = cur.replace(year=year, month=month, day=day)
+            i += 1
+
+    else:
+        # Unrecognized rrule — degrade to single-anchor occurrence.
+        if _accept(anchor):
+            out.append(anchor)
+
+    return out
+
+
+# Hex → CSS3 color name mapping for iCal COLOR (RFC 7986 requires CSS3 names).
+# Covers our system palette so Apple Calendar / other clients that respect
+# per-event color render the right shade. User-defined hex colors fall back
+# to the closest match in this small table — exact matches first, then
+# nearest-neighbor by RGB distance.
+_HEX_TO_CSS3 = {
+    "#a04528": "indianred",
+    "#2c5f7c": "steelblue",
+    "#7b3f61": "mediumvioletred",
+    "#9e7b2c": "darkgoldenrod",
+    "#5c8a3a": "olivedrab",
+    "#506b87": "slategray",
+    "#8a4f7a": "mediumvioletred",
+    "#6e6b35": "darkkhaki",
+    "#3a6b6e": "darkcyan",
+    "#a85f3a": "sienna",
+    "#4d6b4f": "darkseagreen",
+    "#7a5b8c": "mediumpurple",
+}
+
+_CSS3_NAMED = [
+    ("indianred", (205, 92, 92)),
+    ("firebrick", (178, 34, 34)),
+    ("crimson", (220, 20, 60)),
+    ("tomato", (255, 99, 71)),
+    ("coral", (255, 127, 80)),
+    ("orangered", (255, 69, 0)),
+    ("darkorange", (255, 140, 0)),
+    ("orange", (255, 165, 0)),
+    ("gold", (255, 215, 0)),
+    ("darkgoldenrod", (184, 134, 11)),
+    ("goldenrod", (218, 165, 32)),
+    ("darkkhaki", (189, 183, 107)),
+    ("olive", (128, 128, 0)),
+    ("olivedrab", (107, 142, 35)),
+    ("yellowgreen", (154, 205, 50)),
+    ("darkseagreen", (143, 188, 143)),
+    ("forestgreen", (34, 139, 34)),
+    ("seagreen", (46, 139, 87)),
+    ("teal", (0, 128, 128)),
+    ("darkcyan", (0, 139, 139)),
+    ("steelblue", (70, 130, 180)),
+    ("slategray", (112, 128, 144)),
+    ("royalblue", (65, 105, 225)),
+    ("mediumpurple", (147, 112, 219)),
+    ("purple", (128, 0, 128)),
+    ("mediumvioletred", (199, 21, 133)),
+    ("sienna", (160, 82, 45)),
+    ("saddlebrown", (139, 69, 19)),
+    ("gray", (128, 128, 128)),
+]
+
+
+def _hex_to_rgb(hex_color: str) -> Optional[tuple[int, int, int]]:
+    s = (hex_color or "").strip().lstrip("#")
+    if len(s) != 6:
+        return None
+    try:
+        return (int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16))
+    except ValueError:
+        return None
+
+
+def _hex_to_css3_color(hex_color: Optional[str]) -> Optional[str]:
+    """Return the CSS3 color name closest to the given hex. Used in the iCal
+    feed's COLOR property. Returns None for unparseable input."""
+    if not hex_color:
+        return None
+    direct = _HEX_TO_CSS3.get(hex_color.lower())
+    if direct:
+        return direct
+    rgb = _hex_to_rgb(hex_color)
+    if rgb is None:
+        return None
+    best = None
+    best_dist = None
+    for name, ref in _CSS3_NAMED:
+        d = sum((a - b) ** 2 for a, b in zip(rgb, ref))
+        if best_dist is None or d < best_dist:
+            best_dist = d
+            best = name
+    return best
+
+
 def _create_task_for_user(
     user: User, class_id: Optional[int], request: Request,
     title: str, due_at: str, starts_at: str, tag_id: str, notes: str,
+    rrule: str = "", alerts: Optional[list[int]] = None,
+    is_all_day: bool = False, rrule_until: str = "",
 ):
     """Shared body for both /tasks (no class) and /classes/{id}/tasks."""
     title = title.strip()
@@ -1315,13 +1867,17 @@ def _create_task_for_user(
         except ValueError:
             tag_pk = None
     notes_clean = (notes or "").strip() or None
+    rrule_clean = _normalize_rrule(rrule)
+    rrule_until_dt = parse_iso_dt(rrule_until) if (rrule_clean and rrule_until) else None
     with Session(engine) as session:
         if class_id is not None:
             _own_class(session, class_id, user.id)  # 404 if not the user's class
+        tag_obj: Optional[Tag] = None
         if tag_pk is not None:
-            tag = session.get(Tag, tag_pk)
-            if not tag or tag.user_id != user.id:
+            tag_obj = session.get(Tag, tag_pk)
+            if not tag_obj or tag_obj.user_id != user.id:
                 tag_pk = None
+                tag_obj = None
         task = Task(
             user_id=user.id,
             class_id=class_id,
@@ -1330,9 +1886,19 @@ def _create_task_for_user(
             starts_at=starts_dt,
             due_at=due_dt,
             tag_id=tag_pk,
+            rrule=rrule_clean,
+            rrule_until=rrule_until_dt,
+            is_all_day=bool(is_all_day),
             created_at=datetime.now(timezone.utc),
         )
         session.add(task)
+        session.flush()
+        # Alerts: client-provided list wins, even if empty (= "no alerts").
+        # Falling through to smart defaults only when the field was absent
+        # from the form entirely.
+        chosen_alerts = alerts if alerts is not None else _default_alerts_for_tag(tag_obj)
+        if due_dt is not None:
+            _replace_task_alerts(session, task.id, chosen_alerts)
         session.commit()
         session.refresh(task)
         if "application/json" in request.headers.get("accept", ""):
@@ -1346,28 +1912,46 @@ def _create_task_for_user(
     return RedirectResponse(redirect_to, status_code=303)
 
 
+def _parse_bool_form(raw: Optional[str]) -> bool:
+    if not raw:
+        return False
+    return str(raw).strip().lower() in ("1", "true", "on", "yes")
+
+
 @app.post("/classes/{class_id}/tasks")
 async def create_task(class_id: int, request: Request,
                       title: str = Form(...), due_at: str = Form(""),
                       starts_at: str = Form(""), tag_id: str = Form(""),
-                      notes: str = Form(""),
+                      notes: str = Form(""), rrule: str = Form(""),
+                      alerts: Optional[str] = Form(None),
+                      is_all_day: str = Form(""),
+                      rrule_until: str = Form(""),
                       user: User = Depends(require_login)):
     """Create a manual task on a class."""
     return _create_task_for_user(user, class_id, request,
-                                 title, due_at, starts_at, tag_id, notes)
+                                 title, due_at, starts_at, tag_id, notes,
+                                 rrule=rrule, alerts=_parse_alerts_form(alerts),
+                                 is_all_day=_parse_bool_form(is_all_day),
+                                 rrule_until=rrule_until)
 
 
 @app.post("/tasks")
 async def create_personal_task(request: Request,
                                title: str = Form(...), due_at: str = Form(""),
                                starts_at: str = Form(""), tag_id: str = Form(""),
-                               notes: str = Form(""),
+                               notes: str = Form(""), rrule: str = Form(""),
+                               alerts: Optional[str] = Form(None),
+                               is_all_day: str = Form(""),
+                               rrule_until: str = Form(""),
                                user: User = Depends(require_login)):
     """Create a Personal task (no class). Used by the home / today / week
     add-task forms when the user picks the 'Personal' option in the class
     dropdown."""
     return _create_task_for_user(user, None, request,
-                                 title, due_at, starts_at, tag_id, notes)
+                                 title, due_at, starts_at, tag_id, notes,
+                                 rrule=rrule, alerts=_parse_alerts_form(alerts),
+                                 is_all_day=_parse_bool_form(is_all_day),
+                                 rrule_until=rrule_until)
 
 
 @app.get("/tags.json")
@@ -1405,12 +1989,22 @@ async def create_tag(
         return JSONResponse({"id": tag.id, "name": tag.name, "color": tag.color})
 
 
+def _now_user_naive(user) -> datetime:
+    """Current wall-clock time in the user's local tz, with tzinfo
+    stripped. Used for `completed_at` so the SQLite roundtrip (which
+    drops tz) lands on a value `_to_local` reads back correctly —
+    every other naive datetime in the schema (`due_at`, `starts_at`,
+    `rrule_until`) follows the same convention. Storing UTC here was
+    the source of the late-night-completion-disappears bug."""
+    return datetime.now(_user_tz(user)).replace(tzinfo=None)
+
+
 @app.post("/tasks/{task_id}/toggle")
 def toggle_task(task_id: int, user: User = Depends(require_login)):
     """Flip a task between completed and pending. AJAX-only; returns JSON."""
     with Session(engine) as session:
         t = _own_task(session, task_id, user.id)
-        t.completed_at = None if t.completed_at else datetime.now(timezone.utc)
+        t.completed_at = None if t.completed_at else _now_user_naive(user)
         completed = t.completed_at is not None
         session.add(t)
         session.commit()
@@ -1422,7 +2016,7 @@ def toggle_event(event_id: int, user: User = Depends(require_login)):
     """Same toggle for syllabus-extracted CalendarEvents."""
     with Session(engine) as session:
         ev = _own_event(session, event_id, user.id)
-        ev.completed_at = None if ev.completed_at else datetime.now(timezone.utc)
+        ev.completed_at = None if ev.completed_at else _now_user_naive(user)
         completed = ev.completed_at is not None
         session.add(ev)
         session.commit()
@@ -1432,24 +2026,76 @@ def toggle_event(event_id: int, user: User = Depends(require_login)):
 @app.post("/tasks/{task_id}/edit")
 async def edit_task(task_id: int, request: Request,
                     user: User = Depends(require_login)):
-    """Update title, due_at, tag_id, and notes on a task.
+    """Update any subset of task fields. Only fields PRESENT in the
+    submitted form are touched — that lets partial-update callers (the
+    drag-to-different-class handler, future bulk operations) PATCH a
+    single column without clobbering the rest. The full edit modal
+    sends every field, so explicit clears (e.g. notes='', tag_id='')
+    still work as expected.
 
     Reads the form directly via `request.form()` because FastAPI's
     Form() collapses "" and "field absent" into the same value, which
-    breaks the "did the client intend to clear this?" semantics we need
-    for nullable fields like notes and tag_id."""
+    breaks the "did the client intend to clear this?" semantics."""
     form = await request.form()
-    title = (form.get("title") or "").strip()
-    if not title:
-        raise HTTPException(400, "Title required")
-    due_at = form.get("due_at") or ""
-    starts_at = form.get("starts_at") or ""
-    starts_dt, due_dt = _normalize_task_range(starts_at, due_at)
     with Session(engine) as session:
         t = _own_task(session, task_id, user.id)
-        t.title = title
-        t.starts_at = starts_dt
-        t.due_at = due_dt
+        # "Stop recurrence here" mode: the user opened a recurring task
+        # on a middle occurrence and switched Repeat from Daily/Weekly/
+        # etc. to Doesn't-repeat. Per the chosen UX, that should END the
+        # recurrence at this occurrence — past instances keep rendering
+        # via the original rrule, current + future drop. We detect this
+        # here so the due_at and rrule_until handlers below know to skip
+        # their normal updates (which would clobber the anchor / re-clear
+        # the cap we're about to set).
+        # The form's due_at carries the OCCURRENCE the user clicked Edit
+        # on, because the row's data-due-at is set to the expansion date
+        # for recurring tasks. Editing the FIRST occurrence falls through
+        # to the wipe path (cap_at <= anchor would yield zero renders);
+        # there the simpler "make this single-date" behavior is what the
+        # user actually wants.
+        tz = _user_tz(user)
+        cap_at_dt = parse_iso_dt(form.get("due_at") or "") if "due_at" in form else None
+        anchor_raw = t.due_at or t.starts_at
+        anchor_dt = _to_local(anchor_raw, tz) if anchor_raw else None
+        stop_recurrence = bool(
+            "rrule" in form
+            and not _normalize_rrule(form.get("rrule"))
+            and t.rrule
+            and cap_at_dt is not None
+            and anchor_dt is not None
+            and cap_at_dt > anchor_dt
+        )
+        if "title" in form:
+            title = (form.get("title") or "").strip()
+            if not title:
+                raise HTTPException(400, "Title required")
+            t.title = title
+        # due_at / starts_at: only modify the field(s) actually present
+        # in the form — preserves the other from the DB. Sending only
+        # due_at must NOT silently clobber starts_at and vice versa.
+        # (The create-time `_normalize_task_range` promotes a lone
+        # starts_at to due_at, which is wrong semantics for a partial
+        # edit: the user sent ONE field, expecting the other to stay.)
+        # In stop-recurrence mode we skip dates entirely; the form's
+        # due_at is the cap-occurrence, not a new anchor.
+        if ("due_at" in form or "starts_at" in form) and not stop_recurrence:
+            if "due_at" in form:
+                raw = (form.get("due_at") or "").strip()
+                t.due_at = parse_iso_dt(raw) if raw else None
+            if "starts_at" in form:
+                raw = (form.get("starts_at") or "").strip()
+                t.starts_at = parse_iso_dt(raw) if raw else None
+            # Swap inverted ranges (defensive, mirrors the create-time
+            # normaliser); collapse equal endpoints to single-date.
+            # _to_local normalizes naive (DB roundtrip strips tz) and
+            # tz-aware (parse_iso_dt output) values onto the same tz.
+            if t.starts_at and t.due_at:
+                s_cmp = _to_local(t.starts_at)
+                d_cmp = _to_local(t.due_at)
+                if s_cmp > d_cmp:
+                    t.starts_at, t.due_at = t.due_at, t.starts_at
+                elif s_cmp == d_cmp:
+                    t.starts_at = None
         if "tag_id" in form:
             raw_tag = (form.get("tag_id") or "").strip()
             if not raw_tag:
@@ -1463,6 +2109,33 @@ async def edit_task(task_id: int, request: Request,
                     t.tag_id = None
         if "notes" in form:
             t.notes = (form.get("notes") or "").strip() or None
+        if "rrule" in form:
+            if stop_recurrence:
+                # Cap the existing rrule one second before this occurrence
+                # — past instances keep rendering with the original rrule
+                # (so opening one shows Repeat = Daily, matching the user
+                # mental model), the current and future ones drop. Leave
+                # t.rrule itself alone; recurrence is capped, not removed.
+                t.rrule_until = cap_at_dt - timedelta(seconds=1)
+                t.rrule_exdates = None
+            else:
+                new_rrule = _normalize_rrule(form.get("rrule"))
+                # Switching off recurrence clears the per-occurrence cruft
+                # so a later "make it recurring again" doesn't inherit
+                # stale exdates or a long-expired UNTIL.
+                if not new_rrule and t.rrule:
+                    t.rrule_until = None
+                    t.rrule_exdates = None
+                t.rrule = new_rrule
+        if "rrule_until" in form and not stop_recurrence:
+            raw = (form.get("rrule_until") or "").strip()
+            t.rrule_until = parse_iso_dt(raw) if raw else None
+        if "is_all_day" in form:
+            t.is_all_day = _parse_bool_form(form.get("is_all_day"))
+        if "alerts" in form:
+            parsed = _parse_alerts_form(form.get("alerts"))
+            if parsed is not None:
+                _replace_task_alerts(session, t.id, parsed)
         if "class_id" in form:
             raw_class = (form.get("class_id") or "").strip()
             if not raw_class or raw_class == "0":
@@ -1598,29 +2271,243 @@ async def reorder_tasks(request: Request, user: User = Depends(require_login)):
         for pos, entry in enumerate(raw_items):
             if not isinstance(entry, dict):
                 continue
-            kind = entry.get("kind")
             try:
                 eid = int(entry.get("id"))
             except (TypeError, ValueError):
                 continue
-            if kind == "task":
-                row = session.get(Task, eid)
-                if row is None or row.user_id != user.id:
-                    continue
-            elif kind == "event":
-                row = session.get(CalendarEvent, eid)
-                if row is None:
-                    continue
-                cls = session.get(Class, row.class_id)
-                if not cls or cls.user_id != user.id:
-                    continue
-            else:
+            row = _lookup_owned_item(session, entry.get("kind"), eid, user.id)
+            if row is None:
                 continue
             row.position = pos
             session.add(row)
             updated += 1
         session.commit()
     return JSONResponse({"reordered": updated})
+
+
+@app.post("/tasks/reorder-day")
+async def reorder_tasks_for_day(request: Request, user: User = Depends(require_login)):
+    """Per-day position override (week tab day modal). Body shape:
+       {day: 'YYYY-MM-DD', items: [{kind:'task'|'event', id:int}, ...]}
+
+    Each item gets a DayItemPosition row at index N in the list — that
+    day's render uses these in place of the global Task/Event.position so
+    multi-day tasks can be reordered on one day without disturbing the
+    others. Items missing here fall back to the global position (handy
+    for partial reorders, though the client always sends the full list)."""
+    payload = await request.json()
+    day = (payload.get("day") or "").strip()
+    # Strict YYYY-MM-DD shape — `len == 10` would let "not-a-date" through.
+    # Garbage strings would never match in render-time lookups but would
+    # accumulate as DayItemPosition rows that nothing reads.
+    if not _re.match(r"^\d{4}-\d{2}-\d{2}$", day):
+        raise HTTPException(400, "day must be YYYY-MM-DD")
+    raw_items = payload.get("items")
+    if not isinstance(raw_items, list):
+        raise HTTPException(400, "items must be a list")
+    with Session(engine) as session:
+        # Replace any existing overrides for this user+day so the new list
+        # is authoritative — avoids stale rows from prior reorders.
+        existing = session.exec(
+            select(DayItemPosition).where(
+                DayItemPosition.user_id == user.id,
+                DayItemPosition.day_date == day,
+            )
+        ).all()
+        existing_by_key = {(r.kind, r.item_id): r for r in existing}
+        seen_keys: set[tuple[str, int]] = set()
+        updated = 0
+        for pos, entry in enumerate(raw_items):
+            if not isinstance(entry, dict):
+                continue
+            kind = entry.get("kind")
+            try:
+                eid = int(entry.get("id"))
+            except (TypeError, ValueError):
+                continue
+            if _lookup_owned_item(session, kind, eid, user.id) is None:
+                continue
+            key = (kind, eid)
+            seen_keys.add(key)
+            existing_row = existing_by_key.get(key)
+            if existing_row is None:
+                session.add(DayItemPosition(
+                    user_id=user.id, kind=kind, item_id=eid,
+                    day_date=day, position=pos,
+                ))
+            else:
+                existing_row.position = pos
+                session.add(existing_row)
+            updated += 1
+        # Drop overrides for items no longer in the list (e.g. a task
+        # that's been removed from this day) so they revert to global.
+        for key, row in existing_by_key.items():
+            if key not in seen_keys:
+                session.delete(row)
+        session.commit()
+    return JSONResponse({"reordered": updated})
+
+
+@app.get("/tasks/{task_id}/details.json")
+def task_details_json(task_id: int, user: User = Depends(require_login)):
+    """Pull the detail bundle the drawer + edit modal need: rrule, alert
+    offsets, and attachment list. Lets the drawer show what's set without
+    bloating every row's data attributes."""
+    with Session(engine) as session:
+        t = _own_task(session, task_id, user.id)
+        alerts = sorted(
+            (a.minutes_before for a in t.alerts), reverse=True
+        )
+        attachments = [
+            {
+                "id": a.id,
+                "filename": a.filename,
+                "original_name": a.original_name,
+                "content_type": a.content_type,
+            }
+            for a in sorted(t.attachments, key=lambda x: x.uploaded_at)
+        ]
+        return JSONResponse({
+            "id": t.id,
+            "rrule": t.rrule or "",
+            "rrule_until": (
+                t.rrule_until.strftime('%Y-%m-%dT%H:%M') if t.rrule_until else ""
+            ),
+            "alerts": alerts,
+            "attachments": attachments,
+        })
+
+
+@app.post("/tasks/{task_id}/attachments")
+async def upload_task_attachment(
+    task_id: int,
+    file: UploadFile = File(...),
+    user: User = Depends(require_login),
+):
+    """Attach a file to a task. Stored through the storage abstraction so
+    local dev (./uploads/) and prod (R2) work the same."""
+    content = await file.read()
+    validate_upload(content)
+    safe_name = safe_filename(file.filename or "attachment")
+    storage_key = f"task-{task_id}-{uuid.uuid4().hex[:8]}_{safe_name}"
+    content_type = file.content_type or "application/octet-stream"
+    with Session(engine) as session:
+        _own_task(session, task_id, user.id)
+        storage.save(storage_key, content, content_type=content_type)
+        att = TaskAttachment(
+            task_id=task_id,
+            filename=storage_key,
+            original_name=safe_name,
+            content_type=content_type,
+            uploaded_at=datetime.now(timezone.utc),
+        )
+        session.add(att)
+        session.commit()
+        session.refresh(att)
+        return JSONResponse({
+            "id": att.id,
+            "filename": att.filename,
+            "original_name": att.original_name,
+            "content_type": att.content_type,
+        })
+
+
+@app.post("/attachments/{attachment_id}/delete")
+def delete_task_attachment(attachment_id: int, user: User = Depends(require_login)):
+    with Session(engine) as session:
+        att = _own_attachment(session, attachment_id, user.id)
+        storage.delete(att.filename)
+        session.delete(att)
+        session.commit()
+    return JSONResponse({"deleted": attachment_id})
+
+
+@app.get("/calendar/{token}/attachments/{filename}")
+def serve_attachment_by_token(token: str, filename: str):
+    """Token-authenticated attachment download. Same secret-by-URL pattern
+    as the iCal feed — Apple Calendar can't carry session cookies, so the
+    user's `calendar_token` doubles as the auth key for ATTACH URIs in the
+    feed. Files are still scoped to the token owner's tasks."""
+    safe = safe_filename(filename)
+    with Session(engine) as session:
+        u = session.exec(select(User).where(User.calendar_token == token)).first()
+        if not u:
+            raise HTTPException(404)
+        att = session.exec(
+            select(TaskAttachment).where(TaskAttachment.filename == safe)
+        ).first()
+        if not att:
+            raise HTTPException(404)
+        # _own_attachment 404s on cross-user; reuse it instead of the
+        # hand-rolled task lookup + user_id compare.
+        _own_attachment(session, att.id, u.id)
+        if not storage.exists(safe):
+            raise HTTPException(404)
+        return storage.serve(safe, content_type=att.content_type)
+
+
+@app.post("/tasks/{task_id}/exclude")
+async def exclude_task_occurrence(
+    task_id: int, request: Request,
+    user: User = Depends(require_login),
+):
+    """Suppress a single occurrence of a recurring task. Reads
+    `occurrence_at` (ISO datetime) from the form and appends it to the
+    task's `rrule_exdates` JSON list. The expander + iCal feed both
+    honor that list so the deleted instance disappears."""
+    form = await request.form()
+    raw = (form.get("occurrence_at") or "").strip()
+    occ = parse_iso_dt(raw)
+    if occ is None:
+        raise HTTPException(400, "occurrence_at required")
+    with Session(engine) as session:
+        t = _own_task(session, task_id, user.id)
+        if not t.rrule:
+            raise HTTPException(400, "Not a recurring task")
+        existing = []
+        if t.rrule_exdates:
+            try:
+                parsed = json.loads(t.rrule_exdates)
+                if isinstance(parsed, list):
+                    existing = [s for s in parsed if isinstance(s, str)]
+            except (json.JSONDecodeError, TypeError):
+                existing = []
+        # Store as ISO with the LOCAL_TZ offset so re-parsing later lands
+        # on the same naive datetime the expander iterates against.
+        iso = occ.isoformat()
+        if iso not in existing:
+            existing.append(iso)
+        t.rrule_exdates = json.dumps(existing)
+        session.add(t)
+        session.commit()
+    return JSONResponse({"excluded": iso})
+
+
+@app.post("/tasks/{task_id}/end-after")
+async def end_recurrence_after(
+    task_id: int, request: Request,
+    user: User = Depends(require_login),
+):
+    """Stop a recurring task at — and including — a given occurrence.
+    Sets `rrule_until` to the moment just before the occurrence so the
+    expander caps there. Used by the 'Delete this and all future'
+    option on a recurring row's delete dialog."""
+    form = await request.form()
+    raw = (form.get("occurrence_at") or "").strip()
+    occ = parse_iso_dt(raw)
+    if occ is None:
+        raise HTTPException(400, "occurrence_at required")
+    with Session(engine) as session:
+        t = _own_task(session, task_id, user.id)
+        if not t.rrule:
+            raise HTTPException(400, "Not a recurring task")
+        # 1 second before the deleted occurrence — UNTIL is inclusive in
+        # RFC 5545 but we want the deleted instance to also disappear.
+        new_until = occ - timedelta(seconds=1)
+        t.rrule_until = new_until
+        session.add(t)
+        session.commit()
+    return JSONResponse({"until": new_until.isoformat()})
 
 
 @app.post("/tasks/{task_id}/delete")
@@ -1644,6 +2531,47 @@ def delete_task(task_id: int, request: Request, user: User = Depends(require_log
 PERSONAL_BUCKET = SimpleNamespace(id=0, code="Personal", name="", is_personal=True)
 
 
+def _merge_today_with_overdue(today_items: dict, overdue: dict, user_id: int) -> dict:
+    """Combine today's items + overdue into one {class_id: bucket} dict.
+    Each bucket carries both `items` (today) and `overdue_items` (past).
+    Templates render ONE class-block per class with a small "Overdue"
+    divider between the two lists, so a class that has both today and
+    overdue tasks doesn't end up with duplicated headers across separate
+    sections (the old "overdue-section then today-section" layout did).
+    Class display order is re-applied across the union of class ids so
+    overdue-only classes still slot into the user's preferred order.
+
+    Dedupes by `(kind, id)`: an open task due earlier today is in BOTH
+    `_collect_items_in_range` (today's date range) and `_collect_overdue`
+    (due_at < now), so without this filter it'd render twice — once in
+    `items`, once in `overdue_items` — and look exactly like a duplicate.
+    Past-due wins: the user wants the task called out under the Overdue
+    cap, not buried in the today list."""
+    overdue_keys: set[tuple[str, int]] = set()
+    for slot in overdue.values():
+        for it in slot["items"]:
+            overdue_keys.add((it["kind"], it["id"]))
+    merged: dict[int, dict] = {}
+    for cls_id, slot in today_items.items():
+        kept = [it for it in slot["items"]
+                if (it["kind"], it["id"]) not in overdue_keys]
+        merged[cls_id] = {
+            "cls": slot["cls"],
+            "items": kept,
+            "overdue_items": [],
+        }
+    for cls_id, slot in overdue.items():
+        if cls_id in merged:
+            merged[cls_id]["overdue_items"] = list(slot["items"])
+        else:
+            merged[cls_id] = {
+                "cls": slot["cls"],
+                "items": [],
+                "overdue_items": list(slot["items"]),
+            }
+    return _apply_class_order(merged, user_id)
+
+
 def _apply_class_order(out: dict, user_id: int) -> dict:
     """Re-key `out` (a {class_id: bucket} dict) into the user's preferred
     display order. Buckets not mentioned in the saved order append at the
@@ -1664,12 +2592,24 @@ def _apply_class_order(out: dict, user_id: int) -> dict:
     return {k: out[k] for k in ordered_keys}
 
 
-def _collect_items_in_range(start: datetime, end: datetime, user_id: int) -> dict:
+def _collect_items_in_range(start: datetime, end: datetime, user_id: int,
+                             day_for_overrides: Optional[str] = None,
+                             tz: ZoneInfo = LOCAL_TZ,
+                             hide_completed: bool = False) -> dict:
     """Return {class_id: {class, items: [{kind, id, title, due_at, completed, notes}]}}
     for tasks + events whose due/start datetime falls in [start, end). Scoped
     to the given user. Personal tasks (class_id IS NULL) bucket under
-    PERSONAL_BUCKET (key 0). Both open and completed items are included;
-    the template decides display."""
+    PERSONAL_BUCKET (key 0). Both open and completed items are included
+    by default; pass `hide_completed=True` (today/home views) to drop them.
+
+    `tz`: the timezone to anchor "today" / range comparisons in. Default
+    LOCAL_TZ keeps single-user paths working; per-user callers should
+    pass `_user_tz(user)`.
+
+    `day_for_overrides` (YYYY-MM-DD): when set, look up DayItemPosition
+    overrides for that date and use them as the sort key in place of the
+    global Task/Event.position. Used by the week page so reordering a
+    multi-day task in one day's modal doesn't shuffle other days."""
     out: dict[int, dict] = {}
 
     def _add(cls, kind: str, item_id: int, title: str,
@@ -1682,7 +2622,9 @@ def _collect_items_in_range(start: datetime, end: datetime, user_id: int) -> dic
              starts_at: Optional[datetime] = None,
              is_range: bool = False, is_range_day: bool = False,
              actionable: bool = True,
-             notes: Optional[str] = None):
+             notes: Optional[str] = None,
+             rrule: Optional[str] = None,
+             is_all_day: bool = False):
         slot = out.setdefault(cls.id, {"cls": cls, "items": []})
         slot["items"].append({
             "kind": kind,
@@ -1704,42 +2646,73 @@ def _collect_items_in_range(start: datetime, end: datetime, user_id: int) -> dic
             "tag_id": tag_id,
             "tag_is_system": tag_is_system,
             "notes": notes,
+            "rrule": rrule,
+            "is_all_day": is_all_day,
         })
 
     def _emit_task(cls, t):
-        """Walk one task into one or more _add() calls (range tasks emit
-        per-day, single-date tasks emit once if in window)."""
+        """Walk one task into one or more _add() calls.
+          - Recurring tasks emit one occurrence per match in the window.
+          - Range tasks (no rrule) emit one row per spanned day.
+          - Single-date tasks emit once if in window."""
+        if hide_completed and t.completed_at is not None:
+            # Keep "just-checked-off-today" rows visible (crossed out)
+            # for the rest of today — that's what a to-do list view
+            # actually means. Once tomorrow arrives, completed_at falls
+            # out of the [start, end) window and the row drops on the
+            # next page render. Completed-and-overdue tasks (completed
+            # before today) are hidden — they're not pending work.
+            completed_local = _to_local(t.completed_at, tz)
+            if not (start <= completed_local < end):
+                return
         tcolor = t.tag.color if t.tag else None
         tname = t.tag.name if t.tag else None
         tpk = t.tag.id if t.tag else None
         tsys = t.tag.is_system if t.tag else False
         tag_kw = dict(tag_color=tcolor, tag_name=tname,
-                      tag_id=tpk, tag_is_system=tsys, notes=t.notes)
+                      tag_id=tpk, tag_is_system=tsys, notes=t.notes,
+                      rrule=t.rrule)
         if t.due_at is None and t.starts_at is None:
-            if start <= _today_local() < end and not t.completed_at:
+            if start <= _today_local(tz) < end and not t.completed_at:
                 _add(cls, "task", t.id, t.title, None, False,
-                     t.position or 0, **tag_kw)
+                     t.position or 0, is_all_day=t.is_all_day, **tag_kw)
+            return
+        # Recurring tasks: expand rrule across the window. Range data is
+        # ignored for recurrence — a task can repeat OR span days, not both.
+        if t.rrule:
+            anchor = _to_local(t.due_at, tz) if t.due_at is not None else _to_local(t.starts_at, tz)
+            until_local = _to_local(t.rrule_until, tz) if t.rrule_until else None
+            exdates = _parse_exdates(t.rrule_exdates)
+            for occ in _expand_rrule_in_window(
+                anchor, t.rrule, start, end,
+                until=until_local, exdates=exdates,
+            ):
+                _add(cls, "task", t.id, t.title, occ,
+                     t.completed_at is not None, t.position or 0,
+                     is_all_day=t.is_all_day, **tag_kw)
             return
         if t.starts_at is not None and t.due_at is not None:
-            starts_local = _to_local(t.starts_at)
-            due_local = _to_local(t.due_at)
+            starts_local = _to_local(t.starts_at, tz)
+            due_local = _to_local(t.due_at, tz)
             last_date = due_local.date()
             d = starts_local.date()
             while d <= last_date:
-                day_start = datetime.combine(d, time.min, tzinfo=LOCAL_TZ)
+                day_start = datetime.combine(d, time.min, tzinfo=tz)
                 day_end = day_start + timedelta(days=1)
                 if day_start < end and day_end > start:
                     is_deadline = (d == last_date)
                     _add(cls, "task", t.id, t.title, due_local,
                          t.completed_at is not None, t.position or 0,
                          starts_at=starts_local, is_range=True,
-                         is_range_day=not is_deadline, **tag_kw)
+                         is_range_day=not is_deadline,
+                         is_all_day=t.is_all_day, **tag_kw)
                 d += timedelta(days=1)
             return
-        local_due = _to_local(t.due_at)
+        local_due = _to_local(t.due_at, tz)
         if start <= local_due < end:
             _add(cls, "task", t.id, t.title, local_due,
-                 t.completed_at is not None, t.position or 0, **tag_kw)
+                 t.completed_at is not None, t.position or 0,
+                 is_all_day=t.is_all_day, **tag_kw)
 
     with Session(engine, expire_on_commit=False) as session:
         sys_tag_by_key = {
@@ -1755,7 +2728,12 @@ def _collect_items_in_range(start: datetime, end: datetime, user_id: int) -> dic
             for ev in cls.events:
                 if ev.starts_at is None:
                     continue
-                local_when = _to_local(ev.starts_at)
+                if hide_completed and ev.completed_at is not None:
+                    # Same "just-completed-today" rule as tasks above.
+                    completed_local = _to_local(ev.completed_at, tz)
+                    if not (start <= completed_local < end):
+                        continue
+                local_when = _to_local(ev.starts_at, tz)
                 if start <= local_when < end:
                     sys_tag = sys_tag_by_key.get(ev.kind)
                     _add(cls, "event", ev.id, ev.title, local_when,
@@ -1770,26 +2748,49 @@ def _collect_items_in_range(start: datetime, end: datetime, user_id: int) -> dic
         ).all()
         for t in personal_tasks:
             _emit_task(PERSONAL_BUCKET, t)
+    # Per-day position overrides (week tab only). Map (kind, item_id) →
+    # override position; missing keys fall back to the row's global position.
+    overrides: dict[tuple[str, int], int] = {}
+    if day_for_overrides:
+        with Session(engine) as session:
+            for row in session.exec(
+                select(DayItemPosition).where(
+                    DayItemPosition.user_id == user_id,
+                    DayItemPosition.day_date == day_for_overrides,
+                )
+            ).all():
+                overrides[(row.kind, row.item_id)] = row.position
     # Sort: position first (user's drag priority), then due time.
     for slot in out.values():
         slot["items"].sort(key=lambda it: (
-            it["position"],
+            overrides.get((it["kind"], it["id"]), it["position"]),
             it["due_at"] is None,
-            it["due_at"] or datetime.max.replace(tzinfo=LOCAL_TZ),
+            it["due_at"] or datetime.max.replace(tzinfo=tz),
         ))
     return _apply_class_order(out, user_id)
 
 
-def _collect_overdue(user_id: int) -> dict:
+def _collect_overdue(user_id: int, tz: ZoneInfo = LOCAL_TZ) -> dict:
     """All non-completed tasks/events with due dates in the past, scoped to
-    the given user. Personal tasks (no class) bucket under PERSONAL_BUCKET."""
-    now = datetime.now(LOCAL_TZ)
+    the given user. Personal tasks (no class) bucket under PERSONAL_BUCKET.
+    `tz` anchors "now" / 30-day window in the user's local time."""
+    now = datetime.now(tz)
     out: dict[int, dict] = {}
 
     def _emit_overdue_task(cls, t):
         if t.completed_at or t.due_at is None:
             return
-        local_due = _to_local(t.due_at)
+        # Recurring tasks emit one row per occurrence via _emit_task in
+        # the per-day collector. Showing the anchor as "overdue" here
+        # would (a) double-up with today's expanded row when the dedupe
+        # in _merge_today_with_overdue picks one (overdue wins, hiding
+        # the actual today occurrence), and (b) ignore exdates/until,
+        # so excluded or capped occurrences would still show as overdue.
+        # Skipping recurring entirely keeps "overdue" meaning what users
+        # expect: a non-recurring missed deadline.
+        if t.rrule:
+            return
+        local_due = _to_local(t.due_at, tz)
         if not (local_due < now and local_due >= now - timedelta(days=30)):
             return
         out.setdefault(cls.id, {"cls": cls, "items": []})["items"].append({
@@ -1798,7 +2799,7 @@ def _collect_overdue(user_id: int) -> dict:
             "id": t.id,
             "class_id": cls.id, "title": t.title,
             "due_at": local_due, "completed": False,
-            "starts_at": _to_local(t.starts_at) if t.starts_at else None,
+            "starts_at": _to_local(t.starts_at, tz) if t.starts_at else None,
             "is_range": t.starts_at is not None,
             "is_range_day": False,
             "actionable": True,
@@ -1808,6 +2809,8 @@ def _collect_overdue(user_id: int) -> dict:
             "tag_id": t.tag.id if t.tag else None,
             "tag_is_system": t.tag.is_system if t.tag else False,
             "notes": t.notes,
+            "rrule": t.rrule,
+            "is_all_day": t.is_all_day,
         })
 
     with Session(engine, expire_on_commit=False) as session:
@@ -1830,7 +2833,7 @@ def _collect_overdue(user_id: int) -> dict:
                 # "overdue" — nothing to chase. Skip.
                 if not ev.actionable:
                     continue
-                local_when = _to_local(ev.starts_at)
+                local_when = _to_local(ev.starts_at, tz)
                 if local_when < now and local_when >= now - timedelta(days=30):
                     sys_tag = sys_tag_by_key.get(ev.kind)
                     out.setdefault(cls.id, {"cls": cls, "items": []})["items"].append({
@@ -1849,6 +2852,8 @@ def _collect_overdue(user_id: int) -> dict:
                         "tag_id": None,
                         "tag_is_system": False,
                         "notes": None,
+                        "rrule": None,
+                        "is_all_day": False,
                     })
         # Personal tasks (no class) — bucket under PERSONAL_BUCKET.
         for t in session.exec(
@@ -1856,17 +2861,20 @@ def _collect_overdue(user_id: int) -> dict:
         ).all():
             _emit_overdue_task(PERSONAL_BUCKET, t)
     for slot in out.values():
-        slot["items"].sort(key=lambda it: (it["position"], it["due_at"] or datetime.max.replace(tzinfo=LOCAL_TZ)))
+        slot["items"].sort(key=lambda it: (it["position"], it["due_at"] or datetime.max.replace(tzinfo=tz)))
     return _apply_class_order(out, user_id)
 
 
 @app.get("/today", response_class=HTMLResponse)
 def today_view(request: Request, user: User = Depends(require_login)):
     """Tasks and events due today, plus anything overdue."""
-    today_start = _today_local()
+    tz = _user_tz(user)
+    today_start = _today_local(tz)
     today_end = today_start + timedelta(days=1)
-    today_items = _collect_items_in_range(today_start, today_end, user.id)
-    overdue = _collect_overdue(user.id)
+    today_items = _collect_items_in_range(today_start, today_end, user.id,
+                                          tz=tz, hide_completed=True)
+    overdue = _collect_overdue(user.id, tz=tz)
+    today_buckets = _merge_today_with_overdue(today_items, overdue, user.id)
     with Session(engine, expire_on_commit=False) as session:
         all_classes = session.exec(
             select(Class).where(Class.user_id == user.id).order_by(Class.code)
@@ -1876,8 +2884,7 @@ def today_view(request: Request, user: User = Depends(require_login)):
         ).all()
     return templates.TemplateResponse(request, "today.html", {
         "today": today_start,
-        "today_items": today_items,
-        "overdue": overdue,
+        "today_buckets": today_buckets,
         "all_classes": all_classes,
         "all_tags": all_tags,
         "default_class_id": (all_classes[0].id if all_classes else None),
@@ -1888,7 +2895,8 @@ def today_view(request: Request, user: User = Depends(require_login)):
 def week_view(request: Request, user: User = Depends(require_login), month: Optional[str] = None):
     """Month-grid view (Mon-Sun, 6 weeks) for the requested YYYY-MM.
     Defaults to the current month."""
-    today_start = _today_local()
+    tz = _user_tz(user)
+    today_start = _today_local(tz)
     # Parse the requested month; fall back to today's month on bad input.
     target_year, target_month = today_start.year, today_start.month
     if month:
@@ -1899,14 +2907,18 @@ def week_view(request: Request, user: User = Depends(require_login), month: Opti
                 target_year, target_month = ty, tm
         except (ValueError, AttributeError):
             pass
-    first_of_month = datetime(target_year, target_month, 1, tzinfo=LOCAL_TZ)
+    first_of_month = datetime(target_year, target_month, 1, tzinfo=tz)
     # Grid starts on the Monday on-or-before the 1st.
     grid_start = first_of_month - timedelta(days=first_of_month.weekday())
     days = []
     for i in range(42):  # 6 weeks × 7 days
         day_start = grid_start + timedelta(days=i)
         day_end = day_start + timedelta(days=1)
-        items_by_class = _collect_items_in_range(day_start, day_end, user.id)
+        items_by_class = _collect_items_in_range(
+            day_start, day_end, user.id,
+            day_for_overrides=day_start.strftime("%Y-%m-%d"),
+            tz=tz,
+        )
         days.append({
             "date": day_start,
             "in_month": day_start.month == target_month,
@@ -1988,8 +3000,9 @@ def serve_upload(filename: str, user: User = Depends(require_login)):
     if not storage.exists(safe):
         raise HTTPException(404)
     with Session(engine) as session:
-        # File could be either a Document attachment or a Syllabus upload.
+        # File could be a Document, Syllabus, or TaskAttachment upload.
         owned = False
+        content_type: Optional[str] = None
         doc = session.exec(select(Document).where(Document.filename == safe)).first()
         if doc:
             cls = session.get(Class, doc.class_id)
@@ -2000,8 +3013,15 @@ def serve_upload(filename: str, user: User = Depends(require_login)):
                 cls = session.get(Class, syl.class_id)
                 owned = bool(cls and cls.user_id == user.id)
         if not owned:
+            att = session.exec(select(TaskAttachment).where(TaskAttachment.filename == safe)).first()
+            if att:
+                t = session.get(Task, att.task_id)
+                owned = bool(t and t.user_id == user.id)
+                content_type = att.content_type or None
+        if not owned:
             raise HTTPException(404)
-    content_type = "application/pdf" if safe.lower().endswith(".pdf") else None
+    if content_type is None:
+        content_type = "application/pdf" if safe.lower().endswith(".pdf") else None
     return storage.serve(safe, content_type=content_type)
 
 
@@ -2023,17 +3043,39 @@ def _build_ical_for_user(user_id: int, request: Optional[Request] = None) -> byt
     cal.add("prodid", "-//Compass//EN")
     cal.add("version", "2.0")
     cal.add("x-wr-calname", "Compass")
-    cal.add("x-wr-timezone", str(LOCAL_TZ))
-    cal.add("x-published-ttl", "PT1H")  # hint to clients: poll hourly
+    # Apple Calendar caches subscribed feeds aggressively — drop the poll
+    # hint to 15 minutes so deletes/edits land faster. icalendar has no
+    # default serializer for RFC 7986's REFRESH-INTERVAL, so x-published-ttl
+    # is the only hint we emit (newer clients also honor it).
+    cal.add("x-published-ttl", "PT15M")
 
-    def _attach_reminder(component, minutes_before: int = 15) -> None:
+    def _attach_reminder(component, minutes_before: int) -> None:
         alarm = Alarm()
         alarm.add("action", "DISPLAY")
         alarm.add("description", "Compass reminder")
         alarm.add("trigger", timedelta(minutes=-minutes_before))
         component.add_component(alarm)
 
+    def _apply_color(component, hex_color: Optional[str]) -> None:
+        css = _hex_to_css3_color(hex_color)
+        if css:
+            component.add("color", css)
+        if hex_color:
+            # Apple-specific extension; some clients honor it when COLOR is
+            # absent/ignored. Cheap to send alongside.
+            component.add("x-apple-calendar-color", hex_color)
+
     with Session(engine) as session:
+        # Single user lookup powers both the per-user timezone (calendar
+        # property + naive-datetime fallbacks) and the token-authenticated
+        # ATTACH URIs Apple Calendar fetches. Body still emits UTC for
+        # timed events, so wall-clock times stay correct regardless of tz.
+        feed_user = session.get(User, user_id)
+        user_zone = _user_tz(feed_user)
+        cal.add("x-wr-timezone", str(user_zone))
+        token = feed_user.calendar_token if feed_user else ""
+        base_url = str(request.base_url).rstrip("/") if request is not None else ""
+
         owned_class_ids = [
             c.id for c in session.exec(
                 select(Class).where(Class.user_id == user_id)
@@ -2041,6 +3083,14 @@ def _build_ical_for_user(user_id: int, request: Optional[Request] = None) -> byt
         ]
         if not owned_class_ids:
             return cal.to_ical()
+
+        sys_tag_by_key = {
+            t.system_key: t
+            for t in session.exec(
+                select(Tag).where(Tag.is_system == True, Tag.user_id == user_id)
+            ).all()
+            if t.system_key
+        }
 
         # Auto-extracted events from syllabi.
         events = session.exec(
@@ -2053,17 +3103,18 @@ def _build_ical_for_user(user_id: int, request: Optional[Request] = None) -> byt
             ie = ICalEvent()
             ie.add("uid", f"compass-event-{ev.id}@compass")
             ie.add("summary", f"[{ev.class_code}] {ev.title}")
-            starts = ev.starts_at if ev.starts_at.tzinfo else ev.starts_at.replace(tzinfo=LOCAL_TZ)
-            ie.add("dtstart", starts)
+            ie.add("dtstart", _to_local(ev.starts_at, user_zone))
             if ev.ends_at:
-                ends = ev.ends_at if ev.ends_at.tzinfo else ev.ends_at.replace(tzinfo=LOCAL_TZ)
-                ie.add("dtend", ends)
+                ie.add("dtend", _to_local(ev.ends_at, user_zone))
             ie.add("dtstamp", datetime.now(timezone.utc))
             ie.add("description", f"{ev.kind.title()} for {ev.class_code}")
+            sys_tag = sys_tag_by_key.get(ev.kind)
+            if sys_tag:
+                _apply_color(ie, sys_tag.color)
             # Only remind for things the user actually has to act on. A
             # lecture topic at 9am doesn't need a 8:45am ping.
             if ev.actionable and not ev.completed_at:
-                _attach_reminder(ie)
+                _attach_reminder(ie, 15)
             cal.add_component(ie)
 
         # Manual tasks (only those with a due date — undated backlog tasks
@@ -2088,11 +3139,26 @@ def _build_ical_for_user(user_id: int, request: Optional[Request] = None) -> byt
             code = class_codes.get(t.class_id) if t.class_id is not None else None
             prefix = f"[{code}] " if code else "[Personal] "
             ie.add("summary", f"{prefix}{t.title}")
-            due = t.due_at if t.due_at.tzinfo else t.due_at.replace(tzinfo=LOCAL_TZ)
-            if t.starts_at is not None:
-                # Range task — render as a multi-day event.
-                starts = t.starts_at if t.starts_at.tzinfo else t.starts_at.replace(tzinfo=LOCAL_TZ)
-                ie.add("dtstart", starts)
+            due = _to_local(t.due_at, user_zone)
+            if t.is_all_day:
+                # All-day events use VALUE=DATE in iCal — Apple Calendar
+                # renders them as a banner across the day instead of a
+                # timed slot. Pass `datetime.date` so icalendar serializes
+                # it as DTSTART;VALUE=DATE:YYYYMMDD.
+                ie.add("dtstart", due.date())
+            elif t.rrule:
+                # Recurring task: match the web app's `_emit_task` rule —
+                # rrule trumps range (a task repeats OR spans days, not
+                # both). Emit a single-instant DTSTART at due_at so Apple
+                # expands the recurrence on the same anchor; without this
+                # we'd emit DTSTART=starts_at + DTEND=due_at + RRULE,
+                # which Apple turns into a multi-day banner repeating
+                # daily — every occurrence is the FULL span, all stacked
+                # on top of each other (looks like a flood of dupes).
+                ie.add("dtstart", due)
+            elif t.starts_at is not None:
+                # Non-recurring range task — render as a multi-day event.
+                ie.add("dtstart", _to_local(t.starts_at, user_zone))
                 ie.add("dtend", due)
             else:
                 ie.add("dtstart", due)
@@ -2100,7 +3166,48 @@ def _build_ical_for_user(user_id: int, request: Optional[Request] = None) -> byt
             # User notes flow through to Apple Calendar's event description.
             # Falls back to a marker so the field isn't blank.
             ie.add("description", t.notes or "Compass task")
-            _attach_reminder(ie)
+            _apply_color(ie, t.tag.color if t.tag else None)
+            # Recurrence: pass through the stored RRULE fragment if set,
+            # tacking on UNTIL when the user set a stop date. Apple
+            # Calendar uses both to know when to stop showing instances.
+            if t.rrule:
+                from icalendar import vRecur
+                rrule_str = t.rrule
+                if t.rrule_until:
+                    until_utc = _to_local(t.rrule_until, user_zone).astimezone(timezone.utc)
+                    rrule_str = f"{rrule_str};UNTIL={until_utc.strftime('%Y%m%dT%H%M%SZ')}"
+                try:
+                    ie.add("rrule", vRecur.from_ical(rrule_str))
+                except Exception:
+                    pass  # malformed stored RRULE — silently drop, don't break the feed
+                # EXDATE per excluded occurrence — Apple Calendar honors
+                # these to suppress individual instances.
+                for ex in _parse_exdates(t.rrule_exdates):
+                    ie.add("exdate", _to_local(ex, user_zone))
+            # Alerts: emit one VALARM per stored offset. Empty list = no
+            # reminders (user explicitly opted out). Falls back to a 15-min
+            # default for legacy tasks that pre-date the alerts table.
+            alert_offsets = [a.minutes_before for a in t.alerts]
+            if alert_offsets:
+                for m in alert_offsets:
+                    _attach_reminder(ie, m)
+            else:
+                # Legacy task with no alerts row at all → preserve the old
+                # 15-min default so existing subscriptions don't lose alarms.
+                # New tasks always get explicit alert rows (smart defaults).
+                _attach_reminder(ie, 15)
+            # Attachments: emit ATTACH;FMTTYPE=...;VALUE=URI for each.
+            # Apple Calendar shows these as paperclip items the user can
+            # tap to download. URLs use the calendar_token so subscribers
+            # don't need a session cookie.
+            if t.attachments and base_url and token:
+                for att in t.attachments:
+                    uri = f"{base_url}/calendar/{token}/attachments/{att.filename}"
+                    ie.add(
+                        "attach",
+                        uri,
+                        parameters={"FMTTYPE": att.content_type or "application/octet-stream"},
+                    )
             cal.add_component(ie)
 
     return cal.to_ical()
