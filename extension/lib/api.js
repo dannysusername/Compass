@@ -59,14 +59,34 @@ export const api = {
     classes: () => request("/classes.json"),
     tags: () => request("/tags.json"),
     today: () => request("/today.json"),
+    week: (days = 7) => request(`/week.json?days=${days}`),
+    month: (m) => request("/month.json" + (m ? `?month=${m}` : "")),
+    classDetail: (id) => request(`/classes/${id}.json`),
     addPersonalTask: (form) =>
         request("/tasks", { method: "POST", body: form }),
     addClassTask: (classId, form) =>
         request(`/classes/${classId}/tasks`, { method: "POST", body: form }),
+    addAttachment: (taskId, file) => {
+        const fd = new FormData();
+        fd.append("file", file);
+        return request(`/tasks/${taskId}/attachments`, { method: "POST", body: fd });
+    },
     taskDetails: (id) =>
         request(`/tasks/${id}/details.json`),
     editTask: (id, form) =>
         request(`/tasks/${id}/edit`, { method: "POST", body: form }),
+    reorderTasks: (items) =>
+        request("/tasks/reorder", {
+            method: "POST",
+            body: JSON.stringify({ items }),
+            headers: { "Content-Type": "application/json" },
+        }),
+    reorderClasses: (order) =>
+        request("/classes/reorder", {
+            method: "POST",
+            body: JSON.stringify({ order }),
+            headers: { "Content-Type": "application/json" },
+        }),
     toggleTask: (id) =>
         request(`/tasks/${id}/toggle`, { method: "POST" }),
     toggleEvent: (id) =>

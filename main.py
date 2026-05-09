@@ -1269,6 +1269,181 @@ def today_json(user: User = Depends(require_login)):
     })
 
 
+@app.get("/week.json")
+def week_json(user: User = Depends(require_login), days: int = 7):
+    """Rolling N-day window starting today, JSON shape. Powers the side
+    panel's Week tab. Each day carries its own bucket list (one entry
+    per class with at least one item that day). Caps `days` at 14 so a
+    pathological caller can't ask for an unbounded window."""
+    days = max(1, min(days, 14))
+    tz = _user_tz(user)
+    today_start = _today_local(tz)
+    out_days = []
+    for i in range(days):
+        day_start = today_start + timedelta(days=i)
+        day_end = day_start + timedelta(days=1)
+        items_by_class = _collect_items_in_range(
+            day_start, day_end, user.id,
+            tz=tz,
+            day_for_overrides=day_start.strftime("%Y-%m-%d"),
+        )
+        out_days.append({
+            "date": day_start.date().isoformat(),
+            "is_today": i == 0,
+            "buckets": [
+                {
+                    "class_id": slot["cls"].id,
+                    "code": slot["cls"].code,
+                    "name": getattr(slot["cls"], "name", "") or "",
+                    "is_personal": getattr(slot["cls"], "is_personal", False),
+                    "items": [_serialize_item(it) for it in slot["items"]],
+                }
+                for slot in items_by_class.values()
+            ],
+        })
+    return JSONResponse({
+        "today": today_start.date().isoformat(),
+        "days": out_days,
+    })
+
+
+@app.get("/month.json")
+def month_json(user: User = Depends(require_login), month: Optional[str] = None):
+    """All days in the requested YYYY-MM, JSON shape. Powers the
+    extension side panel's Month view — vertical list of day-cards with
+    prev/next month nav. Same per-day bucket shape as `/week.json`."""
+    tz = _user_tz(user)
+    today_start = _today_local(tz)
+    target_year, target_month = today_start.year, today_start.month
+    if month:
+        try:
+            y, m = month.split("-")
+            ty, tm = int(y), int(m)
+            if 1 <= tm <= 12:
+                target_year, target_month = ty, tm
+        except (ValueError, AttributeError):
+            pass
+    anchor = datetime(target_year, target_month, 1, tzinfo=tz)
+    next_first = (anchor.replace(day=28) + timedelta(days=4)).replace(day=1)
+    n_days = (next_first - anchor).days
+    out_days = []
+    for i in range(n_days):
+        day_start = anchor + timedelta(days=i)
+        day_end = day_start + timedelta(days=1)
+        items_by_class = _collect_items_in_range(
+            day_start, day_end, user.id,
+            tz=tz,
+            day_for_overrides=day_start.strftime("%Y-%m-%d"),
+        )
+        out_days.append({
+            "date": day_start.date().isoformat(),
+            "is_today": day_start.date() == today_start.date(),
+            "buckets": [
+                {
+                    "class_id": slot["cls"].id,
+                    "code": slot["cls"].code,
+                    "name": getattr(slot["cls"], "name", "") or "",
+                    "is_personal": getattr(slot["cls"], "is_personal", False),
+                    "items": [_serialize_item(it) for it in slot["items"]],
+                }
+                for slot in items_by_class.values()
+            ],
+        })
+    if target_month == 1:
+        prev_y, prev_m = target_year - 1, 12
+    else:
+        prev_y, prev_m = target_year, target_month - 1
+    if target_month == 12:
+        next_y, next_m = target_year + 1, 1
+    else:
+        next_y, next_m = target_year, target_month + 1
+    return JSONResponse({
+        "month": f"{target_year:04d}-{target_month:02d}",
+        "label": anchor.strftime("%B %Y"),
+        "today": today_start.date().isoformat(),
+        "days": out_days,
+        "prev_month": f"{prev_y:04d}-{prev_m:02d}",
+        "next_month": f"{next_y:04d}-{next_m:02d}",
+    })
+
+
+@app.get("/classes/{class_id}.json")
+def class_detail_json(class_id: int, user: User = Depends(require_login)):
+    """Class-scoped event + task list for the browser extension's class
+    detail surface. Events come back sorted chronologically; tasks are
+    sorted by drag-priority then due date. Past events are included so
+    the side panel can show the full course schedule (the UI decides
+    whether to collapse them)."""
+    tz = _user_tz(user)
+    with Session(engine, expire_on_commit=False) as session:
+        cls = _own_class(session, class_id, user.id)
+        # System-tag lookup for event sub_kind color/name (mirrors the
+        # collector). Cached per-call; cheap.
+        sys_tag_by_key = {
+            t.system_key: t
+            for t in session.exec(
+                select(Tag).where(Tag.is_system == True, Tag.user_id == user.id)
+            ).all()
+            if t.system_key
+        }
+        events = sorted(
+            (e for e in cls.events if e.starts_at is not None),
+            key=lambda e: e.starts_at,
+        )
+        tasks = sorted(
+            (t for t in cls.tasks if t.completed_at is None),
+            key=lambda t: (t.position or 0, t.due_at or datetime.max),
+        )
+        def _ev_dict(ev):
+            sys_tag = sys_tag_by_key.get(ev.kind)
+            return {
+                "kind": "event",
+                "id": ev.id,
+                "class_id": ev.class_id,
+                "title": ev.title,
+                "due_at": _to_local(ev.starts_at, tz).isoformat() if ev.starts_at else None,
+                "starts_at": None,
+                "is_range": False,
+                "is_range_day": False,
+                "is_all_day": False,
+                "completed": ev.completed_at is not None,
+                "actionable": ev.actionable,
+                "sub_kind": sys_tag.name if sys_tag else ev.kind,
+                "sub_kind_color": sys_tag.color if sys_tag else None,
+                "tag_color": None, "tag_name": None, "tag_id": None,
+                "notes": None,
+                "rrule": None,
+            }
+        def _t_dict(t):
+            return {
+                "kind": "task",
+                "id": t.id,
+                "class_id": t.class_id,
+                "title": t.title,
+                "due_at": _to_local(t.due_at, tz).isoformat() if t.due_at else None,
+                "starts_at": _to_local(t.starts_at, tz).isoformat() if t.starts_at else None,
+                "is_range": t.starts_at is not None,
+                "is_range_day": False,
+                "is_all_day": t.is_all_day,
+                "completed": False,
+                "actionable": True,
+                "sub_kind": None, "sub_kind_color": None,
+                "tag_color": t.tag.color if t.tag else None,
+                "tag_name": t.tag.name if t.tag else None,
+                "tag_id": t.tag.id if t.tag else None,
+                "notes": t.notes,
+                "rrule": t.rrule,
+            }
+        return JSONResponse({
+            "class": {
+                "id": cls.id, "code": cls.code, "name": cls.name,
+                "is_personal": False,
+            },
+            "events": [_ev_dict(ev) for ev in events],
+            "tasks": [_t_dict(t) for t in tasks],
+        })
+
+
 @app.get("/classes/{class_id}", response_class=HTMLResponse)
 def class_detail(request: Request, class_id: int, user: User = Depends(require_login)):
     with Session(engine) as session:

@@ -1,8 +1,8 @@
 # Compass browser extension
 
-Quick-add tasks to your Compass calendar from any tab. Talks to the
-existing Compass FastAPI server — no database, no auth, no logic of its
-own; the extension is a thin client.
+Quick-add tasks and view your Today / Month list from any tab. Talks to
+the existing Compass FastAPI server — no database, no auth, no logic of
+its own; the extension is a thin client.
 
 ## Install (development)
 
@@ -17,32 +17,30 @@ own; the extension is a thin client.
 
 ## First use
 
-1. Click the Compass icon. The popup will say "Sign in to Compass".
-2. Click **Log in to Compass** — it opens `http://localhost:8000/login` in a tab.
-3. Log in there.
-4. Click the Compass icon again — the quick-add form appears.
+1. Click the Compass icon. The side panel opens with an inline login form.
+2. Type your Compass email + password, hit **Log in**.
+3. The panel swaps into the app — Today by default, Month tab next to it.
 
-The popup uses your existing browser cookie, so once you're logged in to
-Compass in any tab, the extension is authenticated.
+The session cookie that lands on the Compass origin during login is
+shared with the Compass website, so logging in here also logs you in
+on `localhost:8000`.
 
 ## Settings
 
 Right-click the Compass icon → **Options** to change the server URL. The
-default is `http://localhost:8000`. When you eventually deploy to Heroku,
-change it here and grant the permission prompt — no rebuild needed.
+default is `http://localhost:8000`. When you deploy to Heroku, change it
+here and grant the host-permission prompt — no rebuild needed.
 
 ## Files
 
-- `manifest.json` — Manifest V3. host_permissions for the local Compass URLs, sidePanel permission, background service worker.
-- `popup.html` / `popup.js` / `popup.css` — the quick-add form (icon click).
-- `sidepanel.html` / `sidepanel.js` / `sidepanel.css` — the Today list (opened from the popup's "Today list →" link). Read-only in this iteration.
+- `manifest.json` — Manifest V3. host_permissions for the local Compass URLs, sidePanel permission, background service worker. The toolbar icon opens the side panel directly (no popup).
+- `sidepanel.html` / `sidepanel.js` / `sidepanel.css` — the entire app surface: inline login, Today + Month views, full add-task form, task editor, class-detail drill-down.
+- `popup.css` — design tokens (--paper, --ink, --serif). Loaded by `sidepanel.html`. Named `popup.css` for historical reasons; there is no popup any more.
 - `options.html` / `options.js` — settings page (Compass URL).
-- `background.js` — service worker, fallback path for opening the side panel.
+- `background.js` — service worker. Sets `openPanelOnActionClick` so toolbar clicks open the side panel; also wires the right-click "Add to Compass" context menu.
 - `lib/api.js` — fetch wrapper + auth detection. All network goes here.
 
 ## Surfaces
 
-- **Popup** — quick-add. Click the toolbar icon, type a task, hit Add.
-- **Side panel** — pinned Today list. Open from the popup's "Today list →" link. Stays alongside whatever browsing you're doing. Read-only for now (toggle/edit/delete coming next).
-
-Future phases: Week view + per-class detail in the side panel.
+- **Side panel** — the only surface. Opens directly when you click the toolbar icon. Inline login when logged out; Today + Month views, full add-task form (every field the website's modal exposes — class, dates, all-day, repeat + end date, tag, reminder chips, attachments, notes), task editor, class-detail drill-down, drag-to-reorder.
+- **Right-click → "Add to Compass"** — works on any page or with text selected. Posts straight to `/tasks` (Personal task) using your existing session cookie. Toolbar icon flashes a green ✓ on success or red ! on failure (most likely cause: not logged into Compass).

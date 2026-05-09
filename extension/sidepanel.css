@@ -36,6 +36,101 @@ body {
 }
 .muted-btn:hover { color: var(--ink); border-color: var(--ink); }
 
+/* View tabs — segmented control between Today and Week. Sits between
+   the header (sticky) and the quick-add. Underline on .active marks
+   the current view (Apple-clean, no big colored fills). */
+.view-tabs {
+    display: flex;
+    gap: 0;
+    padding: 0 16px;
+    background: var(--paper);
+    border-bottom: 1px solid var(--rule);
+}
+.view-tab {
+    flex: 0 0 auto;
+    background: transparent;
+    border: none;
+    padding: 8px 14px;
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--ink-3);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px; /* overlap parent's bottom border */
+}
+.view-tab:hover { color: var(--ink); }
+.view-tab.active {
+    color: var(--ink);
+    border-bottom-color: var(--rust);
+}
+
+/* Week view — one section per day, day header above each. Today's
+   section gets a subtle highlight so it's findable while scrolling. */
+.day-block { margin-bottom: 18px; }
+.day-block-head {
+    margin: 0 0 6px;
+    padding: 4px 0;
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--ink-3);
+    border-bottom: 1px solid var(--rule);
+}
+.day-block.is-today .day-block-head { color: var(--ink); }
+.day-block.is-today { padding-left: 8px; border-left: 2px solid var(--rust); }
+.day-empty {
+    margin: 4px 0 8px;
+    font-size: 12px;
+    color: var(--ink-3);
+    opacity: 0.6;
+}
+
+/* Floating + button (FAB). Anchored to the bottom-right of the side
+   panel; survives scrolling because it's position: fixed. Hidden when
+   any non-list view is showing (editor, class detail, add-task view) —
+   see the show/hide pairs in sidepanel.js for the toggles. */
+#add-task-fab {
+    position: fixed;
+    right: 18px;
+    bottom: 56px; /* clears the .sidepanel-foot height */
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    border: none;
+    background: var(--ink);
+    color: var(--paper);
+    font-size: 28px;
+    font-weight: 300;
+    line-height: 1;
+    cursor: pointer;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18);
+    z-index: 3; /* above #content; below the bottom-sheet (z-index: 2 vs sticky) */
+    transition: background 0.1s, transform 0.1s;
+}
+#add-task-fab:hover {
+    background: var(--rust);
+    transform: translateY(-1px);
+}
+#add-task-fab:active { transform: translateY(0); }
+
+/* Add-task view — extends .editor-view (same view-swap pattern), with
+   a heading because there's no row-context to lean on like the editor
+   has. */
+.add-task-head {
+    margin: 4px 0 12px;
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--ink);
+}
+
 #content {
     flex: 1;
     padding: 12px 14px 14px;
@@ -57,12 +152,46 @@ body {
 }
 .class-block-head {
     display: flex;
-    align-items: baseline;
+    align-items: center;
     gap: 8px;
     padding: 6px 4px;
     margin-bottom: 4px;
     border-bottom: 1px solid var(--rule);
 }
+
+/* Class header drag handle. Same three-line glyph as the row drag
+   handle but slightly larger so it reads as a class-level affordance.
+   Visible on hover; pointerdown starts a class-block reorder drag in
+   sidepanel.js (Today view only). */
+.class-block-drag {
+    flex: 0 0 auto;
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    cursor: grab;
+    opacity: 0;
+    transition: opacity 0.1s;
+    background-image:
+        linear-gradient(to bottom,
+            transparent 1px, var(--ink-3) 1px, var(--ink-3) 3px,
+            transparent 3px, transparent 5px,
+            var(--ink-3) 5px, var(--ink-3) 7px,
+            transparent 7px, transparent 9px,
+            var(--ink-3) 9px, var(--ink-3) 11px,
+            transparent 11px);
+    background-size: 100% 100%;
+    background-repeat: no-repeat;
+}
+.class-block-head:hover .class-block-drag { opacity: 1; }
+.class-block.dragging {
+    opacity: 0.55;
+    background: var(--paper-2);
+}
+/* Week view: each day has its own class-blocks, but reordering them
+   doesn't map to a sensible server-side change (User.class_order_json
+   is global, not per-day). Hide the handle so the affordance can't
+   lie about what'll happen. */
+.day-block .class-block-drag { display: none; }
 .class-code {
     font-family: var(--mono);
     font-size: 11px;
@@ -87,7 +216,12 @@ body {
 }
 .todo-row {
     display: block;
-    padding: 6px 4px;
+    /* Left-edge tag stripe: 3px solid in the task's tag color. Tasks
+       without a tag inherit --tag-color: var(--rule) below, so the
+       stripe still draws as a faint grey rule and doubles as a row
+       separator on the left. */
+    padding: 6px 4px 6px 9px;
+    border-left: 3px solid var(--tag-color, var(--rule));
     border-bottom: 1px solid var(--rule);
     --tag-color: var(--rule);
 }
@@ -100,6 +234,41 @@ body {
 }
 .todo-row-main.clickable { cursor: pointer; }
 .todo-row-main.clickable:hover .todo-title { color: var(--ink); }
+/* Drag handle — three thin horizontal lines, visible on row hover.
+   Pointerdown on this starts a drag (see bindDrag in sidepanel.js).
+   Sits to the left of the toggle circle so accidental clicks on the
+   circle / title / × all keep working. */
+.todo-drag-handle {
+    flex: 0 0 auto;
+    display: inline-block;
+    width: 12px;
+    height: 14px;
+    cursor: grab;
+    opacity: 0;
+    transition: opacity 0.1s;
+    background-image:
+        linear-gradient(to bottom,
+            transparent 2px, var(--ink-3) 2px, var(--ink-3) 3px,
+            transparent 3px, transparent 6px,
+            var(--ink-3) 6px, var(--ink-3) 7px,
+            transparent 7px, transparent 10px,
+            var(--ink-3) 10px, var(--ink-3) 11px,
+            transparent 11px);
+    background-size: 100% 100%;
+    background-repeat: no-repeat;
+}
+.todo-row:hover .todo-drag-handle { opacity: 1; }
+/* Drag is disabled in week view (a row's day is determined by due_at,
+   not where the user drops it). Hide the affordance so the UI doesn't
+   suggest something it won't actually do. */
+.day-block .todo-drag-handle { display: none; }
+.todo-row.dragging {
+    opacity: 0.55;
+    background: var(--paper-2);
+}
+body.cards-dragging,
+body.cards-dragging * { cursor: grabbing !important; user-select: none; }
+
 .todo-circle {
     flex: 0 0 auto;
     display: inline-block;
@@ -141,23 +310,13 @@ body {
 .todo-when {
     flex: 0 0 auto;
     font-family: var(--mono);
-    font-size: 10px;
-    text-transform: uppercase;
-    letter-spacing: 0.1em;
+    font-size: 11px;
     color: var(--ink-3);
-}
-.todo-tag {
-    flex: 0 0 auto;
-    font-family: var(--mono);
-    font-size: 9px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.12em;
-    padding: 1px 6px;
-    border-radius: 2px;
-    color: var(--tag-color, var(--ink));
-    border: 1px solid var(--tag-color, var(--rule));
-    background: transparent;
+    /* Compact 12h-short labels ("5p", "5:30p", "9:15a") need a stable
+       max-width so the title's truncation point doesn't jump as the
+       time string lengthens — biggest possible "10:30p" is ~36px. */
+    max-width: 40px;
+    text-align: right;
 }
 
 /* × delete button — fades in on row hover so the resting state stays
@@ -238,6 +397,56 @@ body {
     color: var(--ink-3);
 }
 
+/* Class header label — wraps code+name in a button when the bucket
+   is a real class (not Personal). Tap → showClassDetail. Personal
+   stays a plain span and is non-interactive. */
+.class-block-label {
+    background: transparent;
+    border: none;
+    padding: 0;
+    margin: 0;
+    cursor: pointer;
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+}
+.class-block-label:hover .class-code { color: var(--rust); }
+span.class-block-label { cursor: default; }
+span.class-block-label:hover .class-code { color: inherit; }
+
+/* Class-detail view — full-class surface shown in place of #content
+   when the user taps a class header. Same view-swap pattern as the
+   editor (sibling of #content; only one visible at a time). */
+.class-detail-view {
+    flex: 1;
+    padding: 12px 16px 16px;
+    overflow-y: auto;
+}
+.class-detail-head {
+    margin: 8px 0 14px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--rule);
+}
+.class-detail-head h2 {
+    margin: 0;
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--ink);
+}
+.class-detail-head .muted {
+    margin: 2px 0 0;
+    font-size: 13px;
+    color: var(--ink-3);
+    font-style: italic;
+}
+.class-detail-section { margin-bottom: 16px; }
+
 /* Editor view — replaces #content when a task row is clicked. Same
    form-field vocabulary as popup.css but laid out vertically inside
    the side panel column. */
@@ -275,6 +484,217 @@ body {
 #editor-back {
     margin-bottom: 10px;
 }
+
+/* Login view — inline email/password form shown when /me.json returns
+   401 at boot. Sits in place of the rest of the side panel; #logged-in
+   is hidden until the cookie lands. The popup.css rule for #logged-out
+   centers everything by default (it was for the popup's CTA layout) —
+   override here so the login form's labels + fields read left-aligned. */
+.login-view, #logged-out {
+    flex: 1;
+    padding: 18px 18px 24px;
+    overflow-y: auto;
+    text-align: left;
+}
+.login-view .login-blurb {
+    margin: 0 0 14px;
+    font-size: 13px;
+    color: var(--ink-3);
+    text-align: left;
+}
+.login-view .actions {
+    margin-top: 8px;
+}
+.login-view .actions button.primary {
+    flex: 1 1 auto;
+    width: 100%;
+    text-align: center;
+}
+.login-view .hint {
+    margin-top: 12px;
+    font-size: 11px;
+    color: var(--ink-3);
+}
+.login-view .hint code {
+    font-family: var(--mono);
+    font-size: 11px;
+    background: var(--paper-2);
+    padding: 1px 5px;
+    border-radius: 2px;
+}
+.login-view .hint a {
+    color: var(--ink);
+    text-decoration: underline;
+    margin-left: 4px;
+}
+
+/* Month view — vertical scroll of day-cards. The ‹ Month › nav header
+   is sticky-ish (sits at the top of #content). Each day-card is a self-
+   contained block: weekday + date header, then class-bucketed task list
+   the same way Today renders, so the row vocabulary stays consistent. */
+.month-nav {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 4px 0 12px;
+    border-bottom: 1px solid var(--rule);
+    margin-bottom: 10px;
+}
+.month-nav-btn {
+    flex: 0 0 auto;
+    margin: 0;
+    padding: 2px 10px;
+    font-size: 16px;
+    line-height: 1;
+}
+.month-nav-label {
+    flex: 1 1 auto;
+    text-align: center;
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    color: var(--ink);
+}
+
+.month-day-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+.month-day-card {
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    padding: 8px 10px 6px;
+    background: var(--paper);
+}
+.month-day-card.is-today {
+    border-color: var(--rust);
+    border-left-width: 3px;
+    padding-left: 8px;
+}
+.month-day-head {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    margin-bottom: 4px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid var(--rule);
+}
+.month-day-dow {
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--ink-3);
+}
+.month-day-num {
+    font-family: var(--serif);
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--ink);
+}
+.month-day-today {
+    margin-left: auto;
+    font-family: var(--mono);
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--rust);
+}
+.month-day-empty {
+    margin: 4px 0 2px;
+    font-size: 11px;
+    color: var(--ink-3);
+    opacity: 0.6;
+}
+
+/* Reminder chips inside the quick-add form. Mirrors the .alert-chip
+   look from static/styles.css so the side panel and the website read
+   the same. */
+.alerts-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 4px 0;
+}
+.alerts-chips:empty { display: none; }
+.alert-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 4px 2px 8px;
+    border: 1px solid var(--rule);
+    border-radius: 12px;
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--ink-3);
+    background: var(--paper);
+}
+.alert-chip-remove {
+    background: transparent;
+    border: none;
+    color: var(--ink-3);
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+    padding: 0 2px;
+}
+.alert-chip-remove:hover { color: var(--danger); }
+
+/* Pending attachments list — files the user picked before the task is
+   created. POST'd to /tasks/{id}/attachments after the create call. */
+.attachments-list {
+    list-style: none;
+    margin: 0 0 6px;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.attachments-list:empty { display: none; }
+.attachment-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--ink-2);
+    padding: 3px 4px;
+    background: var(--paper-2);
+    border-radius: 2px;
+}
+.attachment-row span:first-child {
+    flex: 1 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.attachments-upload {
+    cursor: pointer;
+    display: inline-block;
+}
+.link-btn {
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--rust);
+    cursor: pointer;
+    background: transparent;
+    border: none;
+    padding: 0;
+}
+.link-btn:hover { color: var(--ink); }
+
+/* Add-task form's starts_at greyed-out behavior already matches the
+   editor (the form lives inside .editor-view, which has its own
+   .field.disabled rule). Nothing extra needed here. */
 
 /* Footer with quick-add + open-app links */
 .sidepanel-foot {

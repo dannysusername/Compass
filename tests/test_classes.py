@@ -76,3 +76,59 @@ def test_class_detail_returns_404_for_other_user(auth_client, second_user_client
     cls = create_class(auth_client)
     r = second_user_client.get(f"/classes/{cls.id}", follow_redirects=False)
     assert r.status_code == 404
+
+
+# ---- /classes/{id}.json (extension class-detail surface) ------------------
+
+def test_class_detail_json_returns_owned_class(auth_client):
+    cls = create_class(auth_client, code="CIS101", name="Intro CIS")
+    create_task(auth_client, class_id=cls.id, title="Read chapter 1",
+                due_at="2030-06-15T17:00")
+    r = auth_client.get(f"/classes/{cls.id}.json")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["class"]["code"] == "CIS101"
+    assert body["class"]["name"] == "Intro CIS"
+    titles = [t["title"] for t in body["tasks"]]
+    assert "Read chapter 1" in titles
+
+
+def test_class_detail_json_omits_completed_tasks(auth_client):
+    cls = create_class(auth_client)
+    open_t = create_task(auth_client, class_id=cls.id, title="Open")
+    done_t = create_task(auth_client, class_id=cls.id, title="Done")
+    auth_client.post(f"/tasks/{done_t['id']}/toggle",
+                     headers={"Accept": "application/json"})
+    body = auth_client.get(f"/classes/{cls.id}.json").json()
+    titles = [t["title"] for t in body["tasks"]]
+    assert "Open" in titles
+    assert "Done" not in titles, "completed tasks should not appear in class detail"
+
+
+def test_class_detail_json_includes_events_sorted(auth_client):
+    cls = create_class(auth_client)
+    from sqlmodel import Session
+    from datetime import datetime
+    with Session(main.engine) as s:
+        s.add(main.CalendarEvent(
+            class_id=cls.id, class_code=cls.code, title="Quiz Z",
+            kind="quiz", actionable=True,
+            starts_at=datetime(2030, 7, 1),
+        ))
+        s.add(main.CalendarEvent(
+            class_id=cls.id, class_code=cls.code, title="Quiz A",
+            kind="quiz", actionable=True,
+            starts_at=datetime(2030, 6, 1),
+        ))
+        s.commit()
+    body = auth_client.get(f"/classes/{cls.id}.json").json()
+    titles = [e["title"] for e in body["events"]]
+    assert titles == ["Quiz A", "Quiz Z"], (
+        f"events should be chronological, got {titles}"
+    )
+
+
+def test_class_detail_json_404_for_other_user(auth_client, second_user_client):
+    cls = create_class(auth_client)
+    r = second_user_client.get(f"/classes/{cls.id}.json")
+    assert r.status_code == 404

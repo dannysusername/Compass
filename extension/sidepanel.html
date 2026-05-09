@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <link rel="stylesheet" href="popup.css">
     <link rel="stylesheet" href="sidepanel.css">
-    <title>Compass — Today</title>
+    <title>Compass</title>
 </head>
 <body>
     <header class="popup-head sidepanel-head">
@@ -13,9 +13,70 @@
         <button type="button" id="refresh-btn" class="muted-btn" title="Refresh">↻</button>
     </header>
 
+    <!-- Logged-out: inline email/password form. Submitting POSTs /login
+         directly so the user lands in the app without bouncing through a
+         browser tab. Hidden by default; sidepanel.js shows it on 401. -->
+    <section id="logged-out" class="login-view" hidden>
+        <p class="login-blurb">Sign in to Compass to view and add tasks.</p>
+        <form id="login-form" autocomplete="on">
+            <label class="field">
+                <span class="label">Email</span>
+                <input type="email" name="email" autocomplete="email" required>
+            </label>
+            <label class="field">
+                <span class="label">Password</span>
+                <input type="password" name="password" autocomplete="current-password" required>
+            </label>
+            <div class="actions">
+                <button type="submit" class="primary">Log in</button>
+            </div>
+            <div id="login-status" class="status" hidden></div>
+            <p class="hint">
+                Server: <code id="login-server-url">…</code>
+                <a href="#" id="login-open-options">Change</a>
+            </p>
+            <p class="hint">
+                No account? <a href="#" id="login-open-signup">Sign up on Compass</a>
+            </p>
+        </form>
+    </section>
+
+    <!-- Logged-in: every existing surface lives in here. Hidden until
+         /me.json confirms the user has a session. -->
+    <div id="logged-in" hidden>
+
+    <!-- View tabs. Toggle which dataset (#content) renders against:
+         /today.json (today + overdue, class-bucketed) or /month.json
+         (full calendar month as day-cards). Quick-add and editor are shared. -->
+    <nav class="view-tabs">
+        <button type="button" class="view-tab active" data-view="today">Today</button>
+        <button type="button" class="view-tab" data-view="month">Month</button>
+    </nav>
+
     <main id="content">
         <p class="muted loading">Loading…</p>
     </main>
+
+    <!-- Class-detail view — shown in place of #content when a class
+         header is tapped. Renders all that class's events + tasks (no
+         today/overdue filtering); back button returns to the list. -->
+    <section id="class-detail" class="class-detail-view" hidden>
+        <button type="button" id="class-detail-back" class="muted-btn" aria-label="Back">← Back</button>
+        <header class="class-detail-head">
+            <h2 id="class-detail-code"></h2>
+            <p id="class-detail-name" class="muted"></p>
+        </header>
+        <section class="class-detail-section">
+            <h3 class="day-block-head">Tasks</h3>
+            <ul class="todo-list" id="class-detail-tasks"></ul>
+            <p id="class-detail-tasks-empty" class="muted day-empty" hidden>No open tasks.</p>
+        </section>
+        <section class="class-detail-section">
+            <h3 class="day-block-head">Events</h3>
+            <ul class="todo-list" id="class-detail-events"></ul>
+            <p id="class-detail-events-empty" class="muted day-empty" hidden>No events.</p>
+        </section>
+    </section>
 
     <!-- Editor view — hidden by default; shown in place of #content when
          a task row is clicked. The side panel is too narrow for an
@@ -94,10 +155,104 @@
         </form>
     </section>
 
+    <!-- Add-task view — opens when the floating + button is tapped.
+         Same view-swap pattern as #editor. Pre-fills smart defaults
+         (next 30-min mark for starts_at, +1h for due_at) so submitting
+         immediately produces a valid hour-long event today. Mirrors the
+         website's add-task modal field-for-field so behavior is
+         consistent across surfaces. -->
+    <section id="add-task-view" class="editor-view" hidden>
+        <button type="button" id="add-task-back" class="muted-btn" aria-label="Cancel">← Cancel</button>
+        <h2 class="add-task-head">New task</h2>
+        <form id="add-task-form" autocomplete="off">
+            <label class="field">
+                <span class="label">Task</span>
+                <input type="text" name="title" placeholder="What needs doing?" required>
+            </label>
+            <label class="field">
+                <span class="label">Class</span>
+                <select name="class_id" id="add-class">
+                    <option value="">Personal (no class)</option>
+                </select>
+            </label>
+            <label class="field" id="add-starts-label">
+                <span class="label">Starts on</span>
+                <input type="datetime-local" name="starts_at">
+            </label>
+            <label class="field">
+                <span class="label">Due</span>
+                <input type="datetime-local" name="due_at">
+            </label>
+            <label class="checkbox-field">
+                <input type="checkbox" name="is_all_day" value="1" id="add-all-day">
+                <span>All day</span>
+            </label>
+            <label class="field">
+                <span class="label">Tag (optional)</span>
+                <select name="tag_id" id="add-tag">
+                    <option value="">No tag</option>
+                </select>
+            </label>
+            <label class="field">
+                <span class="label">Repeat</span>
+                <select name="rrule" id="add-rrule">
+                    <option value="">Doesn't repeat</option>
+                    <option value="FREQ=DAILY">Daily</option>
+                    <option value="FREQ=WEEKLY">Weekly</option>
+                    <option value="FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR">Weekdays</option>
+                    <option value="FREQ=MONTHLY">Monthly</option>
+                </select>
+            </label>
+            <label class="field" id="add-until-label" hidden>
+                <span class="label">End date (optional)</span>
+                <input type="datetime-local" name="rrule_until">
+            </label>
+            <div class="field">
+                <span class="label">Reminders</span>
+                <div class="alerts-chips" id="add-alerts-chips"></div>
+                <input type="hidden" name="alerts" id="add-alerts-value" value="">
+                <select id="add-alerts-add">
+                    <option value="">+ Add reminder…</option>
+                    <option value="0">At time of event</option>
+                    <option value="5">5 min before</option>
+                    <option value="15">15 min before</option>
+                    <option value="30">30 min before</option>
+                    <option value="60">1 hour before</option>
+                    <option value="120">2 hours before</option>
+                    <option value="1440">1 day before</option>
+                    <option value="2880">2 days before</option>
+                    <option value="10080">1 week before</option>
+                </select>
+            </div>
+            <div class="field">
+                <span class="label">Attachments</span>
+                <ul class="attachments-list" id="add-attachments-list"></ul>
+                <label class="attachments-upload">
+                    <input type="file" id="add-attachments-input" multiple hidden>
+                    <span class="link-btn">+ Add file</span>
+                </label>
+            </div>
+            <label class="field">
+                <span class="label">Notes</span>
+                <textarea name="notes" rows="3" placeholder="Optional"></textarea>
+            </label>
+            <div class="actions">
+                <button type="submit" class="primary">Add task</button>
+                <button type="button" id="add-task-cancel" class="muted">Cancel</button>
+            </div>
+            <div id="add-task-status" class="status" hidden></div>
+        </form>
+    </section>
+
     <footer class="sidepanel-foot">
-        <span class="hint">Quick-add via the toolbar icon</span>
+        <span class="hint" id="logged-in-as"></span>
         <a href="#" id="open-app">Open Compass →</a>
     </footer>
+
+    <!-- Floating + button. Fixed to the bottom-right of the side panel,
+         survives scrolling. Click → showAddTask() opens the add-task
+         view above. Hidden whenever a non-list view is active. -->
+    <button type="button" id="add-task-fab" aria-label="Add task" title="Add task">+</button>
 
     <!-- Recurring-delete picker. Hidden by default, slides up from the
          bottom when the user X's a row whose data-rrule is non-empty.
@@ -112,6 +267,8 @@
             <button type="button" data-mode="cancel" class="muted">Cancel</button>
         </div>
     </div>
+
+    </div><!-- /#logged-in -->
 
     <script type="module" src="sidepanel.js"></script>
 </body>
