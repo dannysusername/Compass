@@ -104,7 +104,7 @@ This pattern is duplicated across `_today_list.html` and `week.html` (each has i
 The drawer state is preserved across `softRefresh()` in `static/todo.js` so edit-saves don't visually destroy the open drawer.
 
 ### Database engine
-Reads `DATABASE_URL` first (Heroku sets `postgres://...`, rewritten to `postgresql+psycopg://`), falls back to local `compass.db` (SQLite). The `IS_SQLITE` flag gates SQLite-only `_add_column_if_missing` migrations in the lifespan; Postgres deploys rely on `SQLModel.metadata.create_all` from a fresh DB.
+Reads `DATABASE_URL` first (Heroku sets `postgres://...`, rewritten to `postgresql+psycopg://`), falls back to local `compass.db` (SQLite). The `IS_SQLITE` flag gates SQLite-only `_add_column_if_missing` migrations in the lifespan; Postgres deploys rely on `SQLModel.metadata.create_all` from a fresh DB. On Postgres, the engine is constructed with `connect_args={"prepare_threshold": None}` to disable psycopg3's prepared-statement cache — required when `DATABASE_URL` points at Neon's pooled (`-pooler`) endpoint, where pgbouncer transaction-mode pooling invalidates prepared statements across transactions. Without this you get `prepared statement "p1" does not exist` errors under any real load. Safe no-op on direct/unpooled connections.
 
 ### Storage abstraction (`storage.py`)
 Syllabus PDFs and class documents go through `storage.save / read / delete / exists / serve` — never `UPLOAD_DIR / filename` directly. `STORAGE_BACKEND=local` (default, dev) writes to `./uploads/`; `STORAGE_BACKEND=s3` uses an S3-compatible bucket (Cloudflare R2 in prod). Heroku's filesystem is ephemeral so prod must use S3. `extract_pdf_text` accepts either a `Path` or `bytes` so callers don't round-trip through a tempfile when storage is remote.

@@ -376,7 +376,11 @@ if IS_SQLITE:
     engine = create_engine(_db_url, connect_args={"check_same_thread": False})
 else:
     # Postgres: pool_pre_ping survives Heroku's idle-connection drops.
-    engine = create_engine(_db_url, pool_pre_ping=True)
+    # prepare_threshold=None disables psycopg3's prepared-statement cache —
+    # required when DATABASE_URL points at Neon's pooled (-pooler) endpoint,
+    # since pgbouncer in transaction mode invalidates prepared statements
+    # between transactions. Safe no-op on direct connections.
+    engine = create_engine(_db_url, pool_pre_ping=True, connect_args={"prepare_threshold": None})
 
 
 def _add_column_if_missing(conn, table: str, column: str, ddl: str) -> None:
