@@ -1,0 +1,217 @@
+/* Compass popup — matches the main app's serif/paper aesthetic but
+   reflowed for a 360px-wide popup. Design tokens mirror static/styles.css
+   so visual identity is one-to-one. */
+
+:root {
+    --paper:    #F4F1E8;
+    --paper-2:  #ECE7D9;
+    --paper-3:  #E2DCCA;
+    --ink:      #1F3D7A;
+    --ink-2:    #2B2B2B;
+    --ink-3:    #4A4A4A;
+    --rust:     #A04528;
+    --rule:     rgba(31, 61, 122, 0.18);
+    --danger:   #B23A3A;
+    --serif:    "Iowan Old Style", "Source Serif 4", "Source Serif Pro",
+                "Charter", Georgia, "Times New Roman", Times, serif;
+    --mono:     "JetBrains Mono", "SF Mono", "IBM Plex Mono",
+                "Cascadia Mono", "Roboto Mono", "Courier New", monospace;
+}
+@media (prefers-color-scheme: dark) {
+    :root {
+        --paper:    #14181F;
+        --paper-2:  #1C2230;
+        --paper-3:  #262E40;
+        --ink:      #E8E2D0;
+        --ink-2:    #F0EBD9;
+        --ink-3:    #C4C0B0;
+        --rust:     #E89668;
+        --rule:     rgba(232, 226, 208, 0.18);
+        --danger:   #E27575;
+    }
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--paper);
+    color: var(--ink-2);
+    font-family: var(--serif);
+    font-size: 14px;
+    width: 360px;
+}
+
+body {
+    padding: 14px 18px 16px;
+}
+
+/* Header */
+.popup-head {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    margin-bottom: 14px;
+    padding-bottom: 10px;
+    border-bottom: 1.5px solid var(--ink);
+}
+.logo {
+    font-family: var(--serif);
+    font-style: italic;
+    font-size: 22px;
+    color: var(--ink);
+}
+.dot {
+    color: var(--rust);
+    font-weight: 700;
+    font-size: 22px;
+}
+.popup-sub {
+    margin-left: auto;
+    font-family: var(--mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    color: var(--ink-3);
+}
+
+/* Form fields */
+.field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 10px;
+}
+.label {
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--ink-3);
+}
+input[type="text"],
+input[type="date"],
+input[type="datetime-local"],
+select,
+textarea {
+    background: var(--paper);
+    color: var(--ink-2);
+    border: 1px solid var(--rule);
+    border-radius: 2px;
+    padding: 8px 10px;
+    font-family: var(--serif);
+    font-size: 14px;
+    width: 100%;
+}
+input:focus, select:focus, textarea:focus {
+    outline: none;
+    border-color: var(--ink);
+}
+textarea { resize: vertical; }
+
+.checkbox-field {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 6px 0 12px;
+    font-size: 13px;
+    color: var(--ink-3);
+    cursor: pointer;
+}
+.checkbox-field input { margin: 0; cursor: pointer; }
+
+/* Advanced details disclosure */
+.advanced {
+    margin: 8px 0 14px;
+    border-top: 1px solid var(--rule);
+    padding-top: 10px;
+}
+.advanced > summary {
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--ink-3);
+    cursor: pointer;
+    list-style: none;
+    margin-bottom: 8px;
+}
+.advanced > summary::-webkit-details-marker { display: none; }
+.advanced > summary::before {
+    content: "+ ";
+    color: var(--rust);
+}
+.advanced[open] > summary::before { content: "− "; }
+
+/* Buttons + actions */
+.actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-top: 12px;
+}
+button.primary {
+    background: var(--ink);
+    color: var(--paper);
+    border: 1px solid var(--ink);
+    padding: 8px 18px;
+    font-family: var(--serif);
+    font-size: 14px;
+    cursor: pointer;
+    border-radius: 2px;
+}
+button.primary:hover {
+    background: var(--rust);
+    border-color: var(--rust);
+}
+.muted-link {
+    font-family: var(--mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--ink-3);
+    text-decoration: none;
+}
+.muted-link:hover { color: var(--rust); }
+
+/* Logged-out CTA */
+#logged-out {
+    text-align: center;
+    padding: 8px 0 4px;
+}
+#logged-out .muted {
+    color: var(--ink-3);
+    margin: 0 0 12px;
+}
+#logged-out .hint {
+    margin-top: 14px;
+    font-size: 11px;
+    color: var(--ink-3);
+}
+#logged-out code {
+    font-family: var(--mono);
+    font-size: 11px;
+    background: var(--paper-2);
+    padding: 1px 5px;
+    border-radius: 2px;
+}
+#logged-out a {
+    color: var(--ink);
+    text-decoration: underline;
+}
+
+/* Status message after submit */
+.status {
+    margin-top: 10px;
+    padding: 6px 8px;
+    font-family: var(--mono);
+    font-size: 11px;
+    border-radius: 2px;
+}
+.status.pending { background: var(--paper-2); color: var(--ink-3); }
+.status.success { background: var(--paper-2); color: var(--ink); }
+.status.error   { background: rgba(178, 58, 58, 0.12); color: var(--danger); }

@@ -3,7 +3,25 @@
     "allow": [
       "WebFetch(domain:docs.x.ai)",
       "Bash(powershell *)",
-      "Bash(.venv/Scripts/python.exe -m uvicorn main:app --host 127.0.0.1 --port 8011 --no-access-log)"
+      "Bash(.venv/Scripts/python.exe -m uvicorn main:app --host 127.0.0.1 --port 8011 --no-access-log)",
+      "Bash(.venv/Scripts/python.exe *)",
+      "Bash(curl -s http://127.0.0.1:8765/login -o /dev/null -w \"%{http_code}\\\\n\")",
+      "Bash(rm -f /tmp/cj5.txt)",
+      "Bash(curl -s -c /tmp/cj5.txt -X POST -H \"Content-Type: application/x-www-form-urlencoded\" http://127.0.0.1:8765/login -d \"email=u2@x.com&password=password123\" -o /dev/null)",
+      "Bash(curl -s -b /tmp/cj5.txt -X POST http://127.0.0.1:8765/tasks/22/exclude --data-urlencode \"occurrence_at=2026-05-15T09:00\" -H \"Accept: application/json\")",
+      "Bash(curl -s -b /tmp/cj5.txt http://127.0.0.1:8765/tasks/22/details.json)",
+      "Bash(netstat -ano)",
+      "Bash(awk '{print $NF}')",
+      "Bash(xargs -I{} taskkill //PID {} //F)",
+      "PowerShell(.venv/Scripts/python.exe _diag.py)",
+      "Bash(git diff *)",
+      "Read(//c/temp/**)"
+    ],
+    "deny": [
+      "Bash(git push:*)",
+      "Bash(git push)",
+      "PowerShell(git push:*)",
+      "PowerShell(git push)"
     ]
   }
 }

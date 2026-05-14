@@ -615,6 +615,15 @@ details.class-detail-section > summary:hover {
     opacity: 0.45;
     pointer-events: none;
 }
+/* The browser's default [hidden] rule is `display: none`, but our
+   .field { display: flex } from popup.css has higher specificity and
+   silently overrides it — so any <label class="field" hidden> stayed
+   visible. Re-assert the hide for any element with [hidden] inside the
+   form layout. (Two-class specificity beats single-class .field.) */
+.field[hidden],
+[hidden] {
+    display: none !important;
+}
 .editor-view .actions {
     display: flex;
     gap: 8px;
@@ -766,6 +775,176 @@ details.class-detail-section > summary:hover {
     font-size: 11px;
     color: var(--ink-3);
     opacity: 0.6;
+}
+
+/* + Add button on a busy day-card. Pushes to the right; coexists with
+   the optional "today" pill (when both, the today pill is pushed by
+   margin-left:auto and the + sits adjacent without re-stealing the auto). */
+.month-day-add {
+    margin-left: auto;
+    width: 22px;
+    height: 22px;
+    border: 1px solid var(--rule);
+    border-radius: 50%;
+    background: var(--paper);
+    color: var(--ink-2);
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+.month-day-add:hover {
+    border-color: var(--ink-3);
+    color: var(--ink);
+}
+.month-day-today + .month-day-add {
+    margin-left: 6px;
+}
+
+/* Empty day "strip" — single-line row in the month list, dim, tappable
+   to open the add-task form pre-filled with that day. */
+.month-day-strip {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+.month-day-strip-btn {
+    width: 100%;
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 4px 10px;
+    background: transparent;
+    border: 1px dashed transparent;
+    border-radius: 3px;
+    cursor: pointer;
+    text-align: left;
+    color: var(--ink-3);
+    opacity: 0.7;
+}
+.month-day-strip-btn:hover {
+    border-color: var(--rule);
+    opacity: 1;
+    background: var(--paper);
+}
+.month-day-strip-dow {
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    width: 28px;
+    flex: 0 0 auto;
+}
+.month-day-strip-num {
+    font-family: var(--serif);
+    font-size: 13px;
+    font-weight: 700;
+    width: 22px;
+    flex: 0 0 auto;
+}
+.month-day-strip-hint {
+    margin-left: auto;
+    font-family: var(--mono);
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    opacity: 0;
+    transition: opacity 0.1s;
+}
+.month-day-strip-btn:hover .month-day-strip-hint {
+    opacity: 1;
+}
+
+/* Today button in the month-nav row. Sits to the right of next month;
+   hidden when already on the current month. */
+.month-nav-today {
+    margin-left: 6px;
+    padding: 2px 8px;
+    font-family: var(--mono);
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    line-height: 1.6;
+}
+
+/* Existing-attachment row inside the edit modal — slightly different
+   look from a buffered new-file pending row so the user can tell what's
+   already saved vs what's about to upload. */
+.attachment-existing .attachment-link {
+    color: var(--ink);
+    text-decoration: none;
+    border-bottom: 1px dotted var(--ink-3);
+}
+.attachment-existing .attachment-link:hover {
+    border-bottom-color: var(--ink);
+}
+.attachment-pending {
+    opacity: 0.85;
+    font-style: italic;
+}
+.attachment-pending-delete .attachment-link {
+    text-decoration: line-through;
+    opacity: 0.55;
+    pointer-events: none;
+}
+/* Yellow warn variant for partial-save banners (attachment uploads
+   failed but the task itself saved). */
+.status.warn {
+    color: #8A6A00;
+    background: #FFF4D1;
+    border: 1px solid #E2C770;
+    padding: 6px 8px;
+    border-radius: 3px;
+}
+.status.warn button {
+    margin-left: 6px;
+    padding: 2px 8px;
+    font-size: 10px;
+}
+
+/* Toast banner — fixed at the top of the panel for ~3s after a save.
+   Used to confirm a background save when the user has tabbed away from
+   the form. */
+.toast {
+    position: fixed;
+    top: 8px;
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 6px 14px;
+    border-radius: 16px;
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+    z-index: 1000;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+}
+.toast-success {
+    background: #2F6E3A;
+    color: #fff;
+}
+.toast-error {
+    background: #B23A3A;
+    color: #fff;
+}
+
+/* "OVERDUE" cap shown at the top of the edit modal when the task being
+   edited has a past due_at. Matches the red row-title color so the
+   visual signal is consistent across surfaces. */
+.overdue-cap {
+    display: inline-block;
+    margin: 4px 0 12px;
+    padding: 3px 8px;
+    background: #B23A3A;
+    color: #fff;
+    font-family: var(--mono);
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.18em;
+    border-radius: 2px;
 }
 
 /* Reminder chips inside the quick-add form. Mirrors the .alert-chip

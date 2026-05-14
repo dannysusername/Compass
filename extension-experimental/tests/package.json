@@ -1,0 +1,16 @@
+{
+  "name": "compass-extension-tests",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Property-based browser tests for the Compass side-panel extension. Uses fast-check to enumerate the form's state space and Playwright to verify each state's invariants in real Chromium.",
+  "scripts": {
+    "_comment": "npx/playwright bin invocation breaks loader setup on Windows + Git Bash; calling cli.js directly via node fixes it.",
+    "test": "node node_modules/@playwright/test/cli.js test",
+    "test:headed": "node node_modules/@playwright/test/cli.js test --headed",
+    "test:ui": "node node_modules/@playwright/test/cli.js test --ui"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.48.0",
+    "fast-check": "^3.23.0"
+  }
+}

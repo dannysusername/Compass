@@ -34,10 +34,15 @@ function renderRow(it, isOverdue) {
 
     const main = document.createElement("div");
     main.className = "todo-row-main";
-    // Row body click → open editor (tasks only — events have no edit
-    // route in the web app, so we mirror that). Circle and × buttons
-    // already stopPropagation so they don't trigger this.
-    if (it.kind === "task") {
+    // Row body click → open editor. Tasks → showEditor; events →
+    // showEventEditor. Both flows ignore button clicks (× delete,
+    // toggle) that bubble up.
+    if (it.kind === "task" || it.kind === "event") {
+        // Stash the event sub_kind on the row's dataset so the event
+        // editor can pre-fill the kind field on open.
+        if (it.kind === "event") {
+            li.dataset.subKind = it.sub_kind || "";
+        }
         main.classList.add("clickable");
         main.addEventListener("click", (e) => {
             // Defensive: ignore clicks that bubbled from inner buttons.
@@ -50,7 +55,8 @@ function renderRow(it, isOverdue) {
                 li.classList.remove("just-dragged");
                 return;
             }
-            showEditor(li);
+            if (it.kind === "task") showEditor(li);
+            else showEventEditor(li);
         });
     }
 
@@ -198,8 +204,10 @@ function renderEmpty(target) {
 // a hard gate, not a competing affordance.
 function showLogin() {
     const loggedOut = document.getElementById("logged-out");
+    const signup = document.getElementById("signup-view");
     const loggedIn = document.getElementById("logged-in");
     if (loggedOut) loggedOut.hidden = false;
+    if (signup) signup.hidden = true;
     if (loggedIn) loggedIn.hidden = true;
     // Surface the configured server URL so a user pointing at the wrong
     // host can fix it before guessing why their password "doesn't work."
@@ -211,10 +219,23 @@ function showLogin() {
     if (emailInput) emailInput.focus();
 }
 
-function showApp() {
+function showSignup() {
     const loggedOut = document.getElementById("logged-out");
+    const signup = document.getElementById("signup-view");
     const loggedIn = document.getElementById("logged-in");
     if (loggedOut) loggedOut.hidden = true;
+    if (signup) signup.hidden = false;
+    if (loggedIn) loggedIn.hidden = true;
+    const emailInput = document.querySelector("#signup-form input[name='email']");
+    if (emailInput) emailInput.focus();
+}
+
+function showApp() {
+    const loggedOut = document.getElementById("logged-out");
+    const signup = document.getElementById("signup-view");
+    const loggedIn = document.getElementById("logged-in");
+    if (loggedOut) loggedOut.hidden = true;
+    if (signup) signup.hidden = true;
     if (loggedIn) loggedIn.hidden = false;
 }
 
@@ -425,6 +446,9 @@ function setDateInput(input, isoOrEmpty, isAllDay) {
 // change mid-session, and this side panel is long-lived. Both the editor
 // AND the FAB add-task form get populated from the same data so they
 // stay in sync without refetching.
+// /me.json payload, populated in boot() and after login/signup. Settings
+// surface keys off this — email, masked xAI key, calendar URLs.
+let cachedMe = null;
 let classesPromise = null;
 let tagsPromise = null;
 async function ensureEditorLists() {
@@ -441,6 +465,10 @@ async function ensureEditorLists() {
     // Add-task form's tag dropdown.
     const addTagSel = $("#add-tag");
     if (addTagSel) fillTagSelect(addTagSel, tags);
+    // Inline "+ New tag" mini-form on both selects (idempotent — guarded
+    // by a dataset flag).
+    bindInlineNewTag(editForm.tag_id, editForm);
+    if (addTagSel) bindInlineNewTag(addTagSel, $("#add-task-form"));
 }
 
 // Tag selects: System tags grouped above user tags (matches the website's
@@ -473,6 +501,77 @@ function fillTagSelect(sel, tags) {
         });
         sel.appendChild(g);
     }
+    // "+ New tag…" sentinel — picking it reveals an inline create form
+    // adjacent to the select. Mirrors the website's add-task modal.
+    const newOpt = document.createElement("option");
+    newOpt.value = "__new__";
+    newOpt.textContent = "+ New tag…";
+    sel.appendChild(newOpt);
+}
+
+// Inline tag-create flow attached to a tag <select>. When the user picks
+// "__new__", a small {name, color, Create} form appears below; on
+// success the new tag is added to the select, selected, and the form
+// hides again. Bind once per <select>.
+function bindInlineNewTag(sel, formContainer) {
+    if (!sel || !formContainer) return;
+    if (sel.dataset.inlineTagBound === "1") return;
+    sel.dataset.inlineTagBound = "1";
+    // Build the inline mini-form lazily and inject it after the select's
+    // parent <label> so it lives in the form's normal flow.
+    const wrap = document.createElement("div");
+    wrap.className = "inline-new-tag hidden";
+    wrap.innerHTML = `
+        <div class="new-tag-row">
+            <input type="text" class="inline-new-tag-name" placeholder="Tag name" maxlength="60">
+            <input type="color" class="inline-new-tag-color" value="#A04528">
+            <button type="button" class="primary inline-new-tag-create">Create</button>
+        </div>
+        <div class="status inline-new-tag-status" hidden></div>
+    `;
+    sel.parentElement.parentElement.insertBefore(wrap, sel.parentElement.nextSibling);
+
+    const nameInput = wrap.querySelector(".inline-new-tag-name");
+    const colorInput = wrap.querySelector(".inline-new-tag-color");
+    const createBtn = wrap.querySelector(".inline-new-tag-create");
+    const statusEl = wrap.querySelector(".inline-new-tag-status");
+
+    sel.addEventListener("change", () => {
+        if (sel.value === "__new__") {
+            wrap.classList.remove("hidden");
+            nameInput.value = "";
+            colorInput.value = "#A04528";
+            statusEl.hidden = true;
+            nameInput.focus();
+        } else {
+            wrap.classList.add("hidden");
+        }
+    });
+
+    createBtn.addEventListener("click", async () => {
+        const name = (nameInput.value || "").trim();
+        if (!name) { nameInput.focus(); return; }
+        statusEl.textContent = "Creating…";
+        statusEl.className = "status pending";
+        statusEl.hidden = false;
+        try {
+            const tag = await api.createTag({ name, color: colorInput.value });
+            // Bust cache + refresh ALL tag selects in the doc so the
+            // new tag is immediately pickable elsewhere too.
+            tagsPromise = null;
+            const fresh = await api.tags();
+            document.querySelectorAll("select[name='tag_id']").forEach((s) => {
+                fillTagSelect(s, fresh);
+            });
+            sel.value = String(tag.id);
+            wrap.classList.add("hidden");
+            statusEl.hidden = true;
+        } catch (err) {
+            if (err instanceof NotAuthenticated) { showLogin(); return; }
+            statusEl.textContent = err.message || "Couldn't create.";
+            statusEl.className = "status error";
+        }
+    });
 }
 
 function fillClassSelect(sel, classes) {
@@ -555,6 +654,10 @@ editForm.addEventListener("submit", async (e) => {
     fd.append("title", title);
     if (due) fd.append("due_at", due);
     if (starts) fd.append("starts_at", starts);
+    if (editForm.tag_id.value === "__new__") {
+        setEditStatus("Pick a tag (or finish creating the new one).", "error");
+        return;
+    }
     fd.append("tag_id", editForm.tag_id.value || "");
     fd.append("notes", editForm.notes.value || "");
     fd.append("class_id", editForm.class_id.value);
@@ -590,24 +693,66 @@ function setEditStatus(text, kind) {
 // detail's only-one-visible-at-a-time, never stacked.
 const classDetailView = $("#class-detail");
 
+// Cached class id of the currently-open detail surface — re-render
+// (after upload / delete) and the doc-upload form's submit handler both
+// need to know which class they're acting on.
+let currentClassId = null;
+
 async function showClassDetail(classId) {
     listView.hidden = true;
     editorView.hidden = true;
     classDetailView.hidden = false;
+    currentClassId = classId;
     const fab = document.getElementById("add-task-fab");
     if (fab) fab.hidden = true;
     const tasksUl = $("#class-detail-tasks");
     const eventsUl = $("#class-detail-events");
+    const docsUl = $("#class-detail-docs");
     tasksUl.innerHTML = "";
     eventsUl.innerHTML = "";
+    docsUl.innerHTML = "";
     $("#class-detail-tasks-empty").hidden = true;
     $("#class-detail-events-empty").hidden = true;
+    $("#class-detail-docs-empty").hidden = true;
+    $("#class-detail-syllabus-section").hidden = true;
     $("#class-detail-code").textContent = "Loading…";
     $("#class-detail-name").textContent = "";
     try {
         const data = await api.classDetail(classId);
         $("#class-detail-code").textContent = data.class.code;
         $("#class-detail-name").textContent = data.class.name || "";
+
+        // Syllabus section: inline iframe + open-in-tab + download links.
+        // Hide the section entirely when there's no syllabus rather than
+        // showing an empty-stuffed frame.
+        if (data.syllabus && data.syllabus.filename) {
+            const url = await api.fileUrl(data.syllabus.filename);
+            $("#class-detail-pdf").src = url;
+            const openTab = $("#class-pdf-open-tab");
+            const dl = $("#class-pdf-download");
+            openTab.href = url;
+            // Anchor click in chrome-extension:// origin won't actually
+            // navigate the panel — open in a real tab instead.
+            openTab.onclick = (e) => {
+                e.preventDefault();
+                chrome.tabs.create({ url });
+            };
+            dl.href = url;
+            dl.setAttribute("download", data.syllabus.filename);
+            $("#class-detail-syllabus-section").hidden = false;
+        }
+
+        // Documents list. Title is a clickable text — opens the file in
+        // a new tab (chrome.tabs.create, since the side panel can't
+        // navigate cross-origin). × deletes after confirm.
+        if (data.documents && data.documents.length) {
+            for (const d of data.documents) {
+                docsUl.appendChild(await renderDocRow(d));
+            }
+        } else {
+            $("#class-detail-docs-empty").hidden = false;
+        }
+
         if (data.tasks.length === 0) {
             $("#class-detail-tasks-empty").hidden = false;
         } else {
@@ -629,12 +774,90 @@ async function showClassDetail(classId) {
     }
 }
 
+async function renderDocRow(d) {
+    const li = document.createElement("li");
+    li.dataset.docId = String(d.id);
+    const url = await api.fileUrl(d.filename);
+    const link = document.createElement("a");
+    link.className = "doc-link";
+    link.href = url;
+    link.textContent = d.title || d.filename;
+    link.title = d.filename;
+    link.addEventListener("click", (e) => {
+        // Open in a real tab so Chrome's PDF viewer / native handler kicks
+        // in. Anchor click inside chrome-extension:// origin doesn't
+        // navigate the panel anyway.
+        e.preventDefault();
+        chrome.tabs.create({ url });
+    });
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "doc-del";
+    del.setAttribute("aria-label", `Delete ${d.title || d.filename}`);
+    del.textContent = "×";
+    del.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        if (!confirm(`Delete "${d.title || d.filename}"?`)) return;
+        try {
+            await api.deleteDoc(d.id);
+            li.remove();
+            const remaining = $("#class-detail-docs").querySelectorAll("li").length;
+            if (remaining === 0) $("#class-detail-docs-empty").hidden = false;
+        } catch (err) {
+            if (err instanceof NotAuthenticated) { showLogin(); return; }
+            alert("Couldn't delete: " + err.message);
+        }
+    });
+    li.appendChild(link);
+    li.appendChild(del);
+    return li;
+}
+
 function hideClassDetail() {
     classDetailView.hidden = true;
     listView.hidden = false;
+    currentClassId = null;
+    // Stop the PDF stream when the surface closes — nothing's reading it.
+    const pdf = document.getElementById("class-detail-pdf");
+    if (pdf) pdf.src = "";
     const fab = document.getElementById("add-task-fab");
     if (fab) fab.hidden = false;
 }
+
+// Doc upload form submit. Re-renders the whole class-detail surface so
+// the new doc lands at the top of the list (server returns it sorted
+// newest-first) and the empty-state copy goes away if needed.
+const docUploadForm = document.getElementById("class-detail-doc-upload");
+function setDocUploadStatus(text, kind) {
+    const el = $("#class-detail-doc-status");
+    if (!text) { el.hidden = true; return; }
+    el.textContent = text;
+    el.className = "status " + (kind || "");
+    el.hidden = false;
+}
+docUploadForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (!currentClassId) return;
+    const fileInput = $("#class-detail-doc-file");
+    const file = fileInput.files[0];
+    if (!file) return;
+    const title = (docUploadForm.title.value || "").trim();
+    setDocUploadStatus("Uploading…", "pending");
+    try {
+        await api.uploadDoc(currentClassId, file, title);
+        docUploadForm.reset();
+        setDocUploadStatus("Uploaded ✓", "success");
+        setTimeout(() => setDocUploadStatus("", ""), 800);
+        await showClassDetail(currentClassId);
+    } catch (err) {
+        if (err instanceof NotAuthenticated) {
+            showLogin();
+            hideClassDetail();
+            return;
+        }
+        setDocUploadStatus("Couldn't upload: " + err.message, "error");
+    }
+});
 
 $("#class-detail-back").addEventListener("click", hideClassDetail);
 $("#editor-back").addEventListener("click", hideEditor);
@@ -660,6 +883,7 @@ $("#edit-open-app").addEventListener("click", async (e) => {
 // "snappy" enough for the side panel's narrow column.
 let dragRow = null;
 let dragSourceClassId = null;
+let dragScope = null;
 let pointerStart = null;
 let isDragging = false;
 const DRAG_THRESHOLD = 5;
@@ -669,19 +893,40 @@ function classIdOfList(list) {
     return block ? (block.dataset.classId || "0") : "0";
 }
 
-listView.addEventListener("pointerdown", (e) => {
-    // Drag is meaningful only in the today view — a task's day in week
-    // view is determined by its due_at, not by which day section the
-    // row is dropped into. Allowing the gesture would let users drag a
-    // row "to Friday" but the next refresh snaps it back to its actual
-    // day, which reads as broken. Easiest fix: don't start the drag.
-    if (currentView !== "today") return;
+// Drag scope = the DOM element that defines the universe a row can move
+// inside of. Rows can't cross this boundary. Determines which reorder
+// endpoint runs on drop.
+//   - month: scope = the .month-day-card the row started in. Per-day
+//     reorder via /tasks/reorder-day, with cross-class allowed inside the
+//     same day (one day-card hosts multiple class-blocks).
+//   - classes drill-down: scope = the source UL itself (#class-detail-tasks
+//     or #class-detail-events). /tasks/reorder for the rows inside.
+//   - today: scope = listView (#content). Cross-class allowed; /tasks/reorder.
+function dragScopeFor(row) {
+    const monthCard = row.closest(".month-day-card");
+    if (monthCard) return { kind: "month", el: monthCard };
+    const classDetail = row.closest("#class-detail");
+    if (classDetail) {
+        // Tasks and events are separate ULs in the class-detail surface;
+        // scope drag to whichever list the row started in so events
+        // can't end up in the tasks UL or vice versa.
+        return { kind: "classes", el: row.parentNode };
+    }
+    return { kind: "today", el: listView };
+}
+
+// Single delegated pointerdown listener so drag works across all three
+// surfaces (today list, month day-cards, class-detail) without binding
+// per-surface. The scope check happens only after we know we have a
+// real drag handle to grab.
+document.addEventListener("pointerdown", (e) => {
     const handle = e.target.closest(".todo-drag-handle");
     if (!handle) return;
     const row = handle.closest(".todo-row");
     if (!row) return;
     dragRow = row;
     dragSourceClassId = classIdOfList(row.parentNode);
+    dragScope = dragScopeFor(row);
     pointerStart = { x: e.clientX, y: e.clientY };
     isDragging = false;
     e.preventDefault();
@@ -697,10 +942,16 @@ document.addEventListener("pointermove", (e) => {
         dragRow.classList.add("dragging");
         document.body.classList.add("cards-dragging");
     }
-    // Find the closest UL: prefer one the cursor is vertically inside;
-    // fall back to nearest by edge distance. Lets the user drag UP/DOWN
-    // freely between class blocks.
-    const lists = Array.from(listView.querySelectorAll(".class-block ul.todo-list"));
+    // Drop-target candidates are constrained to the drag scope. In
+    // month: every UL inside this day-card. In classes: the source UL
+    // only (single-list scope). In today: every class-block UL in
+    // listView.
+    let lists;
+    if (dragScope.kind === "classes") {
+        lists = [dragScope.el];
+    } else {
+        lists = Array.from(dragScope.el.querySelectorAll("ul.todo-list"));
+    }
     if (lists.length === 0) return;
     let bestList = null;
     let bestDist = Infinity;
@@ -731,11 +982,13 @@ document.addEventListener("pointerup", async () => {
     const droppedRow = dragRow;
     const wasDragging = isDragging;
     const sourceClassId = dragSourceClassId;
+    const scope = dragScope;
     // Clear state synchronously so a stray pointermove between drop and
     // the await below can't re-trigger reordering on a row the user
     // already let go of.
     dragRow = null;
     dragSourceClassId = null;
+    dragScope = null;
     pointerStart = null;
     isDragging = false;
     droppedRow.classList.remove("dragging");
@@ -744,25 +997,50 @@ document.addEventListener("pointerup", async () => {
     // Mark this row 'just-dragged' so the row-body click handler that
     // fires on the same pointer gesture doesn't open the editor.
     droppedRow.classList.add("just-dragged");
-    await persistDragDrop(droppedRow, sourceClassId);
+    await persistDragDrop(droppedRow, sourceClassId, scope);
 });
 
-async function persistDragDrop(row, sourceClassId) {
+async function persistDragDrop(row, sourceClassId, scope) {
     // Step 1: cross-class move (tasks only — events stay tied to their
-    // class). The server's edit_task accepts '' or '0' as Personal.
-    const newClassId = classIdOfList(row.parentNode);
-    if (row.dataset.kind === "task" && newClassId !== sourceClassId) {
-        const fd = new FormData();
-        fd.append("class_id", newClassId === "0" ? "" : newClassId);
-        try {
-            await api.editTask(row.dataset.id, fd);
-            row.dataset.classId = newClassId;
-        } catch (err) {
-            console.error("cross-class move failed:", err);
+    // class). Allowed in today + month (same day, different class-block);
+    // skipped in classes drill-down where there's only one class anyway.
+    if (scope.kind !== "classes" && row.dataset.kind === "task") {
+        const newClassId = classIdOfList(row.parentNode);
+        if (newClassId !== sourceClassId) {
+            const fd = new FormData();
+            fd.append("class_id", newClassId === "0" ? "" : newClassId);
+            try {
+                await api.editTask(row.dataset.id, fd);
+                row.dataset.classId = newClassId;
+            } catch (err) {
+                console.error("cross-class move failed:", err);
+            }
         }
     }
-    // Step 2: persist global order across every visible row.
-    const items = Array.from(listView.querySelectorAll(".todo-row"))
+    // Step 2: persist order via the right endpoint for the scope.
+    if (scope.kind === "month") {
+        // Per-day position override — only the day's rows go in the
+        // payload. Day date comes from the .month-day-card data
+        // attribute; without it we can't address the right day.
+        const day = scope.el.dataset.dayDate;
+        if (!day) return;
+        const items = Array.from(scope.el.querySelectorAll(".todo-row"))
+            .map((el) => ({
+                kind: el.dataset.kind,
+                id: parseInt(el.dataset.id, 10),
+            }))
+            .filter((it) => (it.kind === "task" || it.kind === "event") && !Number.isNaN(it.id));
+        try {
+            await api.reorderTasksDay(day, items);
+        } catch (err) {
+            console.error("reorder-day failed:", err);
+        }
+        return;
+    }
+    // today + classes: global Task/Event.position via /tasks/reorder.
+    // Items come from the scope element so classes drill-down only
+    // includes its class's rows, not tasks from other classes.
+    const items = Array.from(scope.el.querySelectorAll(".todo-row"))
         .map((el) => ({
             kind: el.dataset.kind,
             id: parseInt(el.dataset.id, 10),
@@ -1087,7 +1365,12 @@ addForm.addEventListener("submit", async (e) => {
     if (addForm.is_all_day.checked) fd.append("is_all_day", "1");
     if (addForm.rrule.value) fd.append("rrule", addForm.rrule.value);
     if (addForm.rrule_until.value) fd.append("rrule_until", addForm.rrule_until.value);
-    if (addForm.tag_id.value) fd.append("tag_id", addForm.tag_id.value);
+    if (addForm.tag_id.value && addForm.tag_id.value !== "__new__") {
+        fd.append("tag_id", addForm.tag_id.value);
+    } else if (addForm.tag_id.value === "__new__") {
+        setAddStatus("Pick a tag (or finish creating the new one).", "error");
+        return;
+    }
     // Alerts: send the field even when empty so the server treats it as
     // "user explicitly chose no reminders" instead of falling back to
     // smart defaults. Matches `_create_task_for_user`'s alerts handling.
@@ -1141,12 +1424,40 @@ addForm.addEventListener("submit", async (e) => {
 let currentView = "today";
 let currentMonth = null;
 
+// Hide every sub-view (editor / add-task / add-class / event editor /
+// class detail / settings / syllabus upload) and show the list +
+// floating + button. Tab clicks call this so a half-open sub-view
+// doesn't trap the user. Cancel buttons still work — they're just an
+// alternate route back to the same place.
+function returnToList() {
+    listView.hidden = false;
+    if (typeof editorView !== "undefined" && editorView) editorView.hidden = true;
+    if (typeof classDetailView !== "undefined" && classDetailView) classDetailView.hidden = true;
+    if (typeof addView !== "undefined" && addView) addView.hidden = true;
+    if (typeof addClassView !== "undefined" && addClassView) addClassView.hidden = true;
+    if (typeof eventEditorView !== "undefined" && eventEditorView) eventEditorView.hidden = true;
+    if (typeof settingsView !== "undefined" && settingsView) settingsView.hidden = true;
+    if (typeof syllabusView !== "undefined" && syllabusView) syllabusView.hidden = true;
+    // Stop any in-flight syllabus poll if the user navigates away mid-parse.
+    if (typeof syllabusPollTimer !== "undefined" && syllabusPollTimer) {
+        clearTimeout(syllabusPollTimer);
+        syllabusPollTimer = null;
+    }
+    // Clear PDF iframe to stop streaming if the class-detail surface was up.
+    const pdf = document.getElementById("class-detail-pdf");
+    if (pdf) pdf.src = "";
+    const fab = document.getElementById("add-task-fab");
+    if (fab) fab.hidden = false;
+    currentClassId = null;
+}
+
 function setView(view) {
-    if (view !== "today" && view !== "month") return;
+    if (view !== "today" && view !== "month" && view !== "classes") return;
     currentView = view;
     document.querySelectorAll(".view-tab").forEach((btn) => {
         btn.classList.toggle("active", btn.dataset.view === view);
     });
+    returnToList();
     load();
 }
 
@@ -1162,6 +1473,8 @@ document.querySelectorAll(".view-tab").forEach((btn) => {
 function renderMonthDay(day) {
     const card = document.createElement("li");
     card.className = "month-day-card" + (day.is_today ? " is-today" : "");
+    // Drag-to-reorder reads this to scope the per-day reorder POST.
+    card.dataset.dayDate = day.date;
     const head = document.createElement("header");
     head.className = "month-day-head";
     const d = new Date(day.date + "T00:00:00");
@@ -1225,10 +1538,81 @@ function renderMonthNav(data) {
 }
 
 // ---- Load ----
+// ---- Classes list renderer ---------------------------------------------
+// Vertical list of class cards. Each card → showClassDetail(c.id) which
+// already exists for the today-list class-header tap path. Empty state
+// punches through to the website where users add classes today.
+function renderClassesList(target, classes) {
+    target.innerHTML = "";
+    // "+ Add class" / "+ Upload syllabus" buttons sit above the list. They
+    // appear even on the empty state so users can take action right away.
+    const actions = document.createElement("div");
+    actions.className = "classes-actions";
+    const addBtn = document.createElement("button");
+    addBtn.type = "button";
+    addBtn.textContent = "+ Add class";
+    addBtn.addEventListener("click", showAddClass);
+    const uploadBtn = document.createElement("button");
+    uploadBtn.type = "button";
+    uploadBtn.textContent = "+ Upload syllabus";
+    if (cachedMe && !cachedMe.xai_api_key_set) {
+        uploadBtn.classList.add("is-disabled");
+        uploadBtn.title = "Set your xAI API key in Settings first";
+    }
+    uploadBtn.addEventListener("click", () => {
+        if (cachedMe && !cachedMe.xai_api_key_set) {
+            showSettings();
+            setXaiStatus("Set your xAI API key first to parse syllabi.", "error");
+            return;
+        }
+        showSyllabusUpload();
+    });
+    actions.appendChild(addBtn);
+    actions.appendChild(uploadBtn);
+    target.appendChild(actions);
+
+    if (!classes || classes.length === 0) {
+        const p = document.createElement("p");
+        p.className = "muted empty";
+        p.textContent = "No classes yet. Tap + Add class above to start.";
+        target.appendChild(p);
+        return;
+    }
+    const ul = document.createElement("ul");
+    ul.className = "classes-list";
+    classes.forEach((c) => {
+        const li = document.createElement("li");
+        li.className = "class-card";
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.setAttribute("aria-label", `Open ${c.code}`);
+        const code = document.createElement("span");
+        code.className = "class-card-code";
+        code.textContent = c.code;
+        btn.appendChild(code);
+        if (c.name) {
+            const name = document.createElement("span");
+            name.className = "class-card-name";
+            name.textContent = c.name;
+            btn.appendChild(name);
+        }
+        btn.addEventListener("click", () => showClassDetail(c.id));
+        li.appendChild(btn);
+        ul.appendChild(li);
+    });
+    target.appendChild(ul);
+}
+
 async function load() {
     const target = $("#content");
     target.innerHTML = '<p class="muted loading">Loading…</p>';
     try {
+        if (currentView === "classes") {
+            const classes = await api.classes();
+            $("#today-date").textContent = "Classes";
+            renderClassesList(target, classes);
+            return;
+        }
         if (currentView === "month") {
             const data = await api.month(currentMonth);
             // Server may have normalized currentMonth (e.g., null → "2026-05").
@@ -1311,6 +1695,7 @@ loginForm.addEventListener("submit", async (e) => {
             setLoginStatus("Couldn't sign in. Double-check the server URL.", "error");
             return;
         }
+        cachedMe = me;
         setLoginStatus("", "");
         loginForm.reset();
         showApp();
@@ -1325,19 +1710,630 @@ $("#login-open-options").addEventListener("click", (e) => {
     e.preventDefault();
     chrome.runtime.openOptionsPage();
 });
-$("#login-open-signup").addEventListener("click", async (e) => {
+$("#login-open-signup").addEventListener("click", (e) => {
     e.preventDefault();
-    const url = await api.base();
-    chrome.tabs.create({ url: url + "/signup" });
+    showSignup();
 });
 
-// ---- Wiring ----
-$("#refresh-btn").addEventListener("click", load);
-$("#open-app").addEventListener("click", async (e) => {
+// ---- Signup ----------------------------------------------------------
+// POSTs /signup with Accept: application/json so the server returns
+// {id, email} on success or {error: "..."} on validation failure. After
+// success, the session cookie is already set — we just verify via
+// /me.json and fall through into the app.
+const signupForm = $("#signup-form");
+
+function setSignupStatus(text, kind) {
+    const el = $("#signup-status");
+    if (!text) { el.hidden = true; return; }
+    el.textContent = text;
+    el.className = "status " + (kind || "");
+    el.hidden = false;
+}
+
+signupForm.addEventListener("submit", async (e) => {
     e.preventDefault();
-    const url = await api.base();
-    chrome.tabs.create({ url });
+    const email = (signupForm.email.value || "").trim();
+    const pw = signupForm.password.value || "";
+    const confirm = signupForm.password_confirm.value || "";
+    if (!email || !pw) return;
+    if (pw !== confirm) {
+        setSignupStatus("Passwords don't match.", "error");
+        return;
+    }
+    setSignupStatus("Creating account…", "pending");
+    try {
+        await api.signup(email, pw);
+        const me = await api.me().catch(() => null);
+        if (!me) {
+            setSignupStatus("Account created but couldn't sign in. Try logging in.", "error");
+            return;
+        }
+        cachedMe = me;
+        setSignupStatus("", "");
+        signupForm.reset();
+        showApp();
+        await ensureEditorLists();
+        await load();
+    } catch (err) {
+        setSignupStatus(err.message || "Couldn't sign up.", "error");
+    }
 });
+
+$("#signup-back-to-login").addEventListener("click", (e) => {
+    e.preventDefault();
+    showLogin();
+});
+
+// ---- Add-class surface --------------------------------------------------
+// Opens via "+ Add class" on the Classes tab. View-swap pattern.
+const addClassView = $("#add-class-view");
+const addClassForm = $("#add-class-form");
+
+function setAddClassStatus(text, kind) {
+    const el = $("#add-class-status");
+    if (!text) { el.hidden = true; return; }
+    el.textContent = text;
+    el.className = "status " + (kind || "");
+    el.hidden = false;
+}
+
+function showAddClass() {
+    listView.hidden = true;
+    if (editorView) editorView.hidden = true;
+    if (classDetailView) classDetailView.hidden = true;
+    addClassView.hidden = false;
+    const fab = document.getElementById("add-task-fab");
+    if (fab) fab.hidden = true;
+    setAddClassStatus("", "");
+    addClassForm.reset();
+    addClassForm.code.focus();
+}
+
+function hideAddClass() {
+    addClassView.hidden = true;
+    listView.hidden = false;
+    const fab = document.getElementById("add-task-fab");
+    if (fab) fab.hidden = false;
+}
+
+addClassForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const code = (addClassForm.code.value || "").trim();
+    const name = (addClassForm.name.value || "").trim();
+    if (!code || !name) return;
+    setAddClassStatus("Adding…", "pending");
+    try {
+        await api.createClass({ code, name });
+        // Bust the classes-promise cache so the dropdowns + Classes tab
+        // re-fetch and pick up the new class.
+        classesPromise = null;
+        addClassForm.reset();
+        setAddClassStatus("", "");
+        hideAddClass();
+        // Re-render whatever view we came from. If the user is on Classes,
+        // load() refreshes the list. Otherwise just refresh dropdowns.
+        await ensureEditorLists();
+        await load();
+    } catch (err) {
+        if (err instanceof NotAuthenticated) {
+            showLogin();
+            hideAddClass();
+            return;
+        }
+        setAddClassStatus("Couldn't add: " + err.message, "error");
+    }
+});
+
+$("#add-class-back").addEventListener("click", hideAddClass);
+$("#add-class-cancel").addEventListener("click", hideAddClass);
+
+// "Delete class" button at the bottom of #class-detail.
+$("#class-detail-delete").addEventListener("click", async () => {
+    if (!currentClassId) return;
+    const code = $("#class-detail-code").textContent || "this class";
+    if (!confirm(`Delete ${code} and everything in it?`)) return;
+    try {
+        await api.deleteClass(currentClassId);
+        classesPromise = null;
+        hideClassDetail();
+        await ensureEditorLists();
+        await load();
+    } catch (err) {
+        if (err instanceof NotAuthenticated) {
+            showLogin();
+            hideClassDetail();
+            return;
+        }
+        alert("Couldn't delete class: " + err.message);
+    }
+});
+
+// ---- Event editor surface -----------------------------------------------
+// Click an event row's body → open the editor. Mirrors showEditor for
+// tasks but talks to /events/{id}/edit + /events/{id}/clone.
+const eventEditorView = $("#event-editor-view");
+const eventEditForm = $("#event-edit-form");
+let eventEditReturnClass = null; // class id to drill back into on save
+
+function setEventEditStatus(text, kind) {
+    const el = $("#event-edit-status");
+    if (!text) { el.hidden = true; return; }
+    el.textContent = text;
+    el.className = "status " + (kind || "");
+    el.hidden = false;
+}
+
+function showEventEditor(rowEl) {
+    listView.hidden = true;
+    if (editorView) editorView.hidden = true;
+    if (classDetailView) classDetailView.hidden = true;
+    eventEditorView.hidden = false;
+    const fab = document.getElementById("add-task-fab");
+    if (fab) fab.hidden = true;
+    eventEditForm.event_id.value = rowEl.dataset.id;
+    eventEditForm.class_id.value = rowEl.dataset.classId || "";
+    eventEditReturnClass = rowEl.dataset.classId
+        ? parseInt(rowEl.dataset.classId, 10)
+        : null;
+    eventEditForm.title.value = rowEl.dataset.title || "";
+    eventEditForm.kind.value = rowEl.dataset.kind === "event"
+        ? (rowEl.dataset.subKind || "milestone")
+        : "milestone";
+    // Server stores starts_at on events as the event's "due_at" in row
+    // dataset (renderRow normalizes both into data-due-at). Same wall-
+    // clock-prefix slice as the task editor.
+    eventEditForm.starts_at.value = (rowEl.dataset.dueAt || "").slice(0, 16);
+    eventEditForm.ends_at.value = "";  // not surfaced on rows; user re-enters if known
+    setEventEditStatus("", "");
+    eventEditForm.title.focus();
+    eventEditForm.title.select();
+}
+
+function hideEventEditor() {
+    eventEditorView.hidden = true;
+    // If we came from class-detail, re-open it; otherwise back to list.
+    if (eventEditReturnClass) {
+        showClassDetail(eventEditReturnClass);
+    } else {
+        listView.hidden = false;
+        const fab = document.getElementById("add-task-fab");
+        if (fab) fab.hidden = false;
+    }
+}
+
+eventEditForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const id = eventEditForm.event_id.value;
+    if (!id) return;
+    const fd = new FormData();
+    fd.append("title", eventEditForm.title.value || "");
+    fd.append("kind", eventEditForm.kind.value || "milestone");
+    if (eventEditForm.starts_at.value) fd.append("starts_at", eventEditForm.starts_at.value);
+    if (eventEditForm.ends_at.value) fd.append("ends_at", eventEditForm.ends_at.value);
+    setEventEditStatus("Saving…", "pending");
+    try {
+        await api.editEvent(id, fd);
+        hideEventEditor();
+    } catch (err) {
+        if (err instanceof NotAuthenticated) {
+            showLogin();
+            return;
+        }
+        setEventEditStatus("Couldn't save: " + err.message, "error");
+    }
+});
+
+$("#event-clone-btn").addEventListener("click", async () => {
+    const id = eventEditForm.event_id.value;
+    if (!id) return;
+    if (!confirm("Duplicate this event?")) return;
+    setEventEditStatus("Duplicating…", "pending");
+    try {
+        await api.cloneEvent(id);
+        hideEventEditor();
+    } catch (err) {
+        if (err instanceof NotAuthenticated) {
+            showLogin();
+            return;
+        }
+        setEventEditStatus("Couldn't duplicate: " + err.message, "error");
+    }
+});
+
+$("#event-editor-back").addEventListener("click", hideEventEditor);
+$("#event-editor-cancel").addEventListener("click", hideEventEditor);
+
+// ---- Settings surface ---------------------------------------------------
+// Account / Timezone / xAI key / Calendar / Manage tags. Footer ⚙ button
+// opens this. Logout lives inside the Account section.
+const settingsView = $("#settings-view");
+
+function showSettings() {
+    listView.hidden = true;
+    if (editorView) editorView.hidden = true;
+    if (classDetailView) classDetailView.hidden = true;
+    if (addView) addView.hidden = true;
+    if (addClassView) addClassView.hidden = true;
+    if (eventEditorView) eventEditorView.hidden = true;
+    settingsView.hidden = false;
+    const fab = document.getElementById("add-task-fab");
+    if (fab) fab.hidden = true;
+    populateSettings();
+}
+
+function hideSettings() {
+    settingsView.hidden = true;
+    listView.hidden = false;
+    const fab = document.getElementById("add-task-fab");
+    if (fab) fab.hidden = false;
+}
+
+function populateSettings() {
+    // Source of truth = cachedMe; refreshed in boot() and after any
+    // settings mutation that changes its fields.
+    if (!cachedMe) return;
+    $("#settings-email").textContent = cachedMe.email || "";
+    $("#settings-tz").textContent = cachedMe.timezone || "—";
+    const xaiSet = $("#settings-xai-status");
+    if (cachedMe.xai_api_key_set) {
+        xaiSet.textContent = "Key set: " + (cachedMe.xai_api_key_masked || "");
+    } else {
+        xaiSet.textContent = "No key set. Syllabus upload requires one.";
+    }
+    const urls = cachedMe.calendar_urls || {};
+    const webcal = $("#settings-cal-webcal");
+    webcal.href = urls.webcal_url || "#";
+    $("#settings-cal-url").textContent = urls.https_url || "";
+    populateManageTags();
+}
+
+$("#settings-back").addEventListener("click", hideSettings);
+$("#open-settings").addEventListener("click", showSettings);
+
+$("#settings-logout").addEventListener("click", async () => {
+    try {
+        await api.logout();
+    } catch (_) { /* even on failure, clear local state */ }
+    cachedMe = null;
+    classesPromise = null;
+    tagsPromise = null;
+    hideSettings();
+    showLogin();
+});
+
+const xaiForm = $("#settings-xai-form");
+function setXaiStatus(text, kind) {
+    const el = $("#settings-xai-status-line");
+    if (!text) { el.hidden = true; return; }
+    el.textContent = text;
+    el.className = "status " + (kind || "");
+    el.hidden = false;
+}
+xaiForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const key = (xaiForm.xai_api_key.value || "").trim();
+    setXaiStatus("Saving…", "pending");
+    try {
+        const r = await api.saveXaiKey(key);
+        if (cachedMe) {
+            cachedMe.xai_api_key_set = !!(r && r.xai_api_key_set);
+            cachedMe.xai_api_key_masked = r && r.xai_api_key_masked;
+        }
+        xaiForm.reset();
+        setXaiStatus("Saved ✓", "success");
+        setTimeout(() => setXaiStatus("", ""), 800);
+        populateSettings();
+    } catch (err) {
+        if (err instanceof NotAuthenticated) { showLogin(); return; }
+        setXaiStatus(err.message || "Couldn't save.", "error");
+    }
+});
+$("#settings-xai-clear").addEventListener("click", async () => {
+    setXaiStatus("Clearing…", "pending");
+    try {
+        const r = await api.saveXaiKey("");
+        if (cachedMe) {
+            cachedMe.xai_api_key_set = !!(r && r.xai_api_key_set);
+            cachedMe.xai_api_key_masked = null;
+        }
+        xaiForm.reset();
+        setXaiStatus("Cleared", "success");
+        setTimeout(() => setXaiStatus("", ""), 800);
+        populateSettings();
+    } catch (err) {
+        if (err instanceof NotAuthenticated) { showLogin(); return; }
+        setXaiStatus(err.message || "Couldn't clear.", "error");
+    }
+});
+
+$("#settings-cal-regen").addEventListener("click", async () => {
+    if (!confirm("Regenerate your calendar token? Existing subscriptions will stop working until you re-subscribe with the new URL.")) return;
+    try {
+        const r = await api.regenerateCalendarToken();
+        if (cachedMe) {
+            cachedMe.calendar_token = r.calendar_token;
+            cachedMe.calendar_urls = r.calendar_urls;
+        }
+        populateSettings();
+    } catch (err) {
+        if (err instanceof NotAuthenticated) { showLogin(); return; }
+        alert("Couldn't regenerate: " + err.message);
+    }
+});
+
+// ---- Manage tags --------------------------------------------------------
+// List inside Settings: name (rename inline), color swatch (recolor),
+// × delete (system tags can rename but not delete; × hidden via
+// .is-system class).
+async function populateManageTags() {
+    const ul = $("#settings-tags-list");
+    ul.innerHTML = "";
+    let tags;
+    try {
+        tagsPromise = api.tags();
+        tags = await tagsPromise;
+    } catch (err) {
+        if (err instanceof NotAuthenticated) { showLogin(); return; }
+        return;
+    }
+    tags.forEach((t) => ul.appendChild(renderManageTagRow(t)));
+}
+
+function renderManageTagRow(t) {
+    const li = document.createElement("li");
+    li.dataset.tagId = String(t.id);
+    const swatch = document.createElement("input");
+    swatch.type = "color";
+    swatch.className = "manage-tag-swatch";
+    swatch.value = t.color || "#A04528";
+    swatch.title = "Click to change color";
+    swatch.addEventListener("input", async () => {
+        try {
+            await api.editTag(t.id, { name: t.name, color: swatch.value });
+            t.color = swatch.value;
+            tagsPromise = null;  // bust cache so dropdowns refresh
+        } catch (err) {
+            if (err instanceof NotAuthenticated) { showLogin(); return; }
+            alert("Couldn't recolor: " + err.message);
+        }
+    });
+    if (t.is_system) {
+        const sys = document.createElement("span");
+        sys.className = "manage-tag-system";
+        sys.textContent = "sys";
+        li.appendChild(sys);
+    }
+    const name = document.createElement("input");
+    name.type = "text";
+    name.className = "manage-tag-name";
+    name.value = t.name;
+    name.addEventListener("blur", async () => {
+        const newName = (name.value || "").trim();
+        if (!newName || newName === t.name) {
+            name.value = t.name;
+            return;
+        }
+        try {
+            await api.editTag(t.id, { name: newName, color: swatch.value });
+            t.name = newName;
+            tagsPromise = null;
+        } catch (err) {
+            name.value = t.name;
+            if (err instanceof NotAuthenticated) { showLogin(); return; }
+            alert("Couldn't rename: " + err.message);
+        }
+    });
+    name.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); name.blur(); }
+        if (e.key === "Escape") { name.value = t.name; name.blur(); }
+    });
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "manage-tag-del" + (t.is_system ? " is-system" : "");
+    del.setAttribute("aria-label", `Delete ${t.name}`);
+    del.textContent = "×";
+    del.addEventListener("click", async () => {
+        if (t.is_system) return;
+        if (!confirm(`Delete tag "${t.name}"? Tasks using it will lose the tag.`)) return;
+        try {
+            await api.deleteTag(t.id);
+            li.remove();
+            tagsPromise = null;
+        } catch (err) {
+            if (err instanceof NotAuthenticated) { showLogin(); return; }
+            alert("Couldn't delete: " + err.message);
+        }
+    });
+    li.appendChild(swatch);
+    li.appendChild(name);
+    li.appendChild(del);
+    return li;
+}
+
+const newTagForm = $("#settings-new-tag-form");
+function setManageTagsStatus(text, kind) {
+    const el = $("#settings-tags-status");
+    if (!text) { el.hidden = true; return; }
+    el.textContent = text;
+    el.className = "status " + (kind || "");
+    el.hidden = false;
+}
+newTagForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const name = (newTagForm.name.value || "").trim();
+    const color = newTagForm.color.value || "#A04528";
+    if (!name) return;
+    setManageTagsStatus("Creating…", "pending");
+    try {
+        await api.createTag({ name, color });
+        newTagForm.reset();
+        newTagForm.color.value = "#A04528";
+        tagsPromise = null;
+        setManageTagsStatus("Added ✓", "success");
+        setTimeout(() => setManageTagsStatus("", ""), 800);
+        populateManageTags();
+    } catch (err) {
+        if (err instanceof NotAuthenticated) { showLogin(); return; }
+        setManageTagsStatus(err.message || "Couldn't add.", "error");
+    }
+});
+
+// ---- Syllabus upload + parse polling -----------------------------------
+const syllabusView = $("#syllabus-upload-view");
+const syllabusDrop = $("#syllabus-drop");
+const syllabusFileInput = $("#syllabus-file-input");
+const syllabusPickedEl = $("#syllabus-picked");
+const syllabusUploadBtn = $("#syllabus-upload-btn");
+let syllabusFile = null;
+let syllabusPollTimer = null;
+
+function showSyllabusUpload() {
+    listView.hidden = true;
+    if (editorView) editorView.hidden = true;
+    if (classDetailView) classDetailView.hidden = true;
+    if (settingsView) settingsView.hidden = true;
+    syllabusView.hidden = false;
+    const fab = document.getElementById("add-task-fab");
+    if (fab) fab.hidden = true;
+    // Reset state
+    syllabusFile = null;
+    syllabusFileInput.value = "";
+    syllabusPickedEl.hidden = true;
+    syllabusPickedEl.textContent = "";
+    syllabusUploadBtn.disabled = true;
+    setSyllabusStatus("", "");
+    $("#syllabus-upload-stage").hidden = false;
+    $("#syllabus-parse-stage").hidden = true;
+    $("#syllabus-parse-actions").hidden = true;
+}
+
+function hideSyllabusUpload() {
+    syllabusView.hidden = true;
+    listView.hidden = false;
+    const fab = document.getElementById("add-task-fab");
+    if (fab) fab.hidden = false;
+    if (syllabusPollTimer) {
+        clearTimeout(syllabusPollTimer);
+        syllabusPollTimer = null;
+    }
+}
+
+function setSyllabusStatus(text, kind) {
+    const el = $("#syllabus-upload-status");
+    if (!text) { el.hidden = true; return; }
+    el.textContent = text;
+    el.className = "status " + (kind || "");
+    el.hidden = false;
+}
+
+function pickSyllabusFile(file) {
+    if (!file) return;
+    if (!/\.pdf$/i.test(file.name) && file.type !== "application/pdf") {
+        setSyllabusStatus("Only PDF files are accepted.", "error");
+        return;
+    }
+    if (file.size > 25 * 1024 * 1024) {
+        setSyllabusStatus("File is too big (25 MB max).", "error");
+        return;
+    }
+    syllabusFile = file;
+    syllabusPickedEl.textContent = file.name + " · " + Math.round(file.size / 1024) + " KB";
+    syllabusPickedEl.hidden = false;
+    syllabusUploadBtn.disabled = false;
+    setSyllabusStatus("", "");
+}
+
+["dragenter", "dragover"].forEach((evName) =>
+    syllabusDrop.addEventListener(evName, (e) => {
+        e.preventDefault();
+        syllabusDrop.classList.add("drop-active");
+    })
+);
+["dragleave", "drop"].forEach((evName) =>
+    syllabusDrop.addEventListener(evName, (e) => {
+        e.preventDefault();
+        syllabusDrop.classList.remove("drop-active");
+    })
+);
+syllabusDrop.addEventListener("drop", (e) => {
+    const f = e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) pickSyllabusFile(f);
+});
+syllabusDrop.addEventListener("click", () => syllabusFileInput.click());
+syllabusFileInput.addEventListener("change", (e) => {
+    pickSyllabusFile(e.target.files[0]);
+});
+
+syllabusUploadBtn.addEventListener("click", async () => {
+    if (!syllabusFile) return;
+    setSyllabusStatus("Uploading…", "pending");
+    try {
+        const r = await api.uploadSyllabus(syllabusFile);
+        // Server returns { syllabus_id, class_id }. Now poll the JSON
+        // status endpoint every 2s until done / error / missing.
+        $("#syllabus-upload-stage").hidden = true;
+        $("#syllabus-parse-stage").hidden = false;
+        $("#syllabus-parse-actions").hidden = true;
+        $("#syllabus-parse-status").textContent = "Parsing…";
+        pollSyllabusStatus(r.syllabus_id, r.class_id);
+    } catch (err) {
+        if (err instanceof NotAuthenticated) {
+            showLogin();
+            hideSyllabusUpload();
+            return;
+        }
+        if ((err.message || "").includes("need_key")) {
+            // No xAI key set — punt to settings.
+            hideSyllabusUpload();
+            showSettings();
+            setXaiStatus("Set your xAI API key first to parse syllabi.", "error");
+            return;
+        }
+        setSyllabusStatus(err.message || "Couldn't upload.", "error");
+    }
+});
+
+function pollSyllabusStatus(syllabusId, classId) {
+    api.syllabusStatus(syllabusId).then((s) => {
+        const status = s && s.status;
+        const statusEl = $("#syllabus-parse-status");
+        if (status === "done") {
+            statusEl.textContent = "Done ✓";
+            classesPromise = null;
+            ensureEditorLists().then(() => {
+                hideSyllabusUpload();
+                showClassDetail(classId);
+            });
+            return;
+        }
+        if (status && status.startsWith("error")) {
+            statusEl.textContent = status;
+            $("#syllabus-parse-actions").hidden = false;
+            return;
+        }
+        if (status === "missing") {
+            statusEl.textContent = "Syllabus disappeared. Try again.";
+            $("#syllabus-parse-actions").hidden = false;
+            return;
+        }
+        // pending / running / unknown — keep polling.
+        statusEl.textContent = "Parsing… (" + (status || "pending") + ")";
+        syllabusPollTimer = setTimeout(() => pollSyllabusStatus(syllabusId, classId), 2000);
+    }).catch((err) => {
+        if (err instanceof NotAuthenticated) {
+            showLogin();
+            hideSyllabusUpload();
+            return;
+        }
+        $("#syllabus-parse-status").textContent = "Status fetch failed: " + err.message;
+        $("#syllabus-parse-actions").hidden = false;
+    });
+}
+
+$("#syllabus-back").addEventListener("click", hideSyllabusUpload);
+$("#syllabus-retry").addEventListener("click", () => showSyllabusUpload());
+
+// ---- Wiring ----
 
 // ---- Boot ----
 // Decide login vs app once at startup. /me.json is the source of truth —
@@ -1347,6 +2343,7 @@ async function boot() {
     try {
         const me = await api.me();
         if (!me) { showLogin(); return; }
+        cachedMe = me;
         showApp();
         const footer = $("#logged-in-as");
         if (footer && me.email) footer.textContent = me.email;

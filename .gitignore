@@ -20,6 +20,11 @@ Thumbs.db
 .vscode/
 *.log
 
+# Node / Playwright
+node_modules/
+test-results/
+playwright-report/
+
 # Test fixtures / scratch dumps
 test_syllabus.pdf
 *.ics

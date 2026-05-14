@@ -137,17 +137,18 @@
 
     <!-- Editor view — hidden by default; shown in place of #content when
          a task row is clicked. The side panel is too narrow for an
-         overlay modal, so we swap views instead of stacking. Alerts +
-         attachments aren't here in v1 (complex UI, deferred); the
-         partial-update endpoint leaves them untouched when not sent. -->
+         overlay modal, so we swap views instead of stacking. Full
+         website parity: every field the add modal exposes (including
+         alerts + attachments) is editable here. -->
     <section id="editor" class="editor-view" hidden>
         <button type="button" id="editor-back" class="muted-btn" aria-label="Back to list">← Back</button>
+        <div id="edit-overdue-cap" class="overdue-cap" hidden>OVERDUE</div>
         <form id="edit-form" autocomplete="off">
             <input type="hidden" name="task_id">
 
             <label class="field">
                 <span class="label">Task</span>
-                <input type="text" name="title" required>
+                <input type="text" name="title" required maxlength="200">
             </label>
 
             <label class="field">
@@ -195,9 +196,36 @@
                 </select>
             </label>
 
+            <div class="field">
+                <span class="label">Reminders</span>
+                <div class="alerts-chips" id="edit-alerts-chips"></div>
+                <input type="hidden" name="alerts" id="edit-alerts-value" value="">
+                <select id="edit-alerts-add">
+                    <option value="">+ Add reminder…</option>
+                    <option value="0">At time of event</option>
+                    <option value="5">5 min before</option>
+                    <option value="15">15 min before</option>
+                    <option value="30">30 min before</option>
+                    <option value="60">1 hour before</option>
+                    <option value="120">2 hours before</option>
+                    <option value="1440">1 day before</option>
+                    <option value="2880">2 days before</option>
+                    <option value="10080">1 week before</option>
+                </select>
+            </div>
+
+            <div class="field">
+                <span class="label">Attachments</span>
+                <ul class="attachments-list" id="edit-attachments-list"></ul>
+                <label class="attachments-upload">
+                    <input type="file" id="edit-attachments-input" multiple hidden>
+                    <span class="link-btn">+ Add file</span>
+                </label>
+            </div>
+
             <label class="field">
                 <span class="label">Notes</span>
-                <textarea name="notes" rows="3" placeholder="Optional"></textarea>
+                <textarea name="notes" rows="3" placeholder="Optional" maxlength="2000"></textarea>
             </label>
 
             <div class="actions">
@@ -207,7 +235,7 @@
 
             <div id="edit-status" class="status" hidden></div>
             <p class="hint" style="margin-top: 14px; font-size: 10px; color: var(--ink-3)">
-                Reminders &amp; attachments: edit in <a href="#" id="edit-open-app">Compass</a>.
+                Need the full web app? <a href="#" id="edit-open-app">Open Compass</a>.
             </p>
         </form>
     </section>
@@ -224,7 +252,7 @@
         <form id="add-task-form" autocomplete="off">
             <label class="field">
                 <span class="label">Task</span>
-                <input type="text" name="title" placeholder="What needs doing?" required>
+                <input type="text" name="title" placeholder="What needs doing?" required maxlength="200">
             </label>
             <label class="field">
                 <span class="label">Class</span>
@@ -291,7 +319,7 @@
             </div>
             <label class="field">
                 <span class="label">Notes</span>
-                <textarea name="notes" rows="3" placeholder="Optional"></textarea>
+                <textarea name="notes" rows="3" placeholder="Optional" maxlength="2000"></textarea>
             </label>
             <div class="actions">
                 <button type="submit" class="primary">Add task</button>

@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Compass (Experimental)",
+  "version": "0.2.0",
+  "description": "Experimental copy of Compass — for trying out changes against the same StudyFlow server.",
+  "permissions": ["storage", "sidePanel", "contextMenus"],
+  "host_permissions": [
+    "http://localhost:8000/*",
+    "http://127.0.0.1:8000/*",
+    "http://192.168.86.42:8000/*"
+  ],
+  "optional_host_permissions": ["https://*/*"],
+  "action": {
+    "default_title": "Compass"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "options_page": "options.html"
+}

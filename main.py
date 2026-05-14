@@ -982,39 +982,36 @@ def signup_page(request: Request):
 
 @app.post("/signup")
 def signup_submit(request: Request, email: str = Form(...), password: str = Form(...)):
+    wants_json = "application/json" in request.headers.get("accept", "")
     email = email.strip().lower()
+
+    def _err(msg: str):
+        if wants_json:
+            return JSONResponse({"error": msg}, status_code=400)
+        return templates.TemplateResponse(
+            request, "signup.html",
+            {"error": msg, "email": email},
+            status_code=400,
+        )
+
     if "@" not in email or "." not in email.split("@", 1)[-1]:
-        return templates.TemplateResponse(
-            request, "signup.html",
-            {"error": "Please enter a valid email address.", "email": email},
-            status_code=400,
-        )
+        return _err("Please enter a valid email address.")
     if len(password) < 8:
-        return templates.TemplateResponse(
-            request, "signup.html",
-            {"error": "Password must be at least 8 characters.", "email": email},
-            status_code=400,
-        )
+        return _err("Password must be at least 8 characters.")
     if len(password.encode("utf-8")) > MAX_PASSWORD_LENGTH:
-        return templates.TemplateResponse(
-            request, "signup.html",
-            {"error": f"Password must be at most {MAX_PASSWORD_LENGTH} characters.", "email": email},
-            status_code=400,
-        )
+        return _err(f"Password must be at most {MAX_PASSWORD_LENGTH} characters.")
     with Session(engine) as session:
         existing = session.exec(select(User).where(User.email == email)).first()
         if existing:
-            return templates.TemplateResponse(
-                request, "signup.html",
-                {"error": "That email is already registered. Try logging in.", "email": email},
-                status_code=400,
-            )
+            return _err("That email is already registered. Try logging in.")
         user = User(email=email, password_hash=hash_password(password))
         session.add(user)
         session.commit()
         session.refresh(user)
         request.session["user_id"] = user.id
     _seed_system_tags_for_user(user.id)
+    if wants_json:
+        return JSONResponse({"id": user.id, "email": user.email})
     return RedirectResponse("/", status_code=303)
 
 
@@ -1123,6 +1120,12 @@ def settings_regenerate_calendar_token(request: Request, user: User = Depends(re
         u.calendar_token = secrets.token_urlsafe(32)
         session.add(u)
         session.commit()
+        new_token = u.calendar_token
+    if "application/json" in request.headers.get("accept", ""):
+        return JSONResponse({
+            "calendar_token": new_token,
+            "calendar_urls": _calendar_urls(request, new_token),
+        })
     return RedirectResponse("/settings?saved=1", status_code=303)
 
 
@@ -1132,14 +1135,18 @@ def settings_save(
     xai_api_key: str = Form(""),
     user: User = Depends(require_login),
 ):
+    wants_json = "application/json" in request.headers.get("accept", "")
     key = xai_api_key.strip()
     if key and not key.startswith("xai-"):
+        msg = "xAI keys start with 'xai-'. Get one at https://console.x.ai/"
+        if wants_json:
+            return JSONResponse({"error": msg}, status_code=400)
         return templates.TemplateResponse(request, "settings.html", {
             "user": user,
             "masked_key": _mask_key(user.xai_api_key),
             "saved": False,
             "need_key": False,
-            "error": "xAI keys start with 'xai-'. Get one at https://console.x.ai/",
+            "error": msg,
             "calendar_urls": _calendar_urls(request, user.calendar_token),
         }, status_code=400)
     with Session(engine) as session:
@@ -1147,6 +1154,13 @@ def settings_save(
         u.xai_api_key = key or None
         session.add(u)
         session.commit()
+        new_key = u.xai_api_key
+    if wants_json:
+        return JSONResponse({
+            "saved": True,
+            "xai_api_key_set": bool(new_key),
+            "xai_api_key_masked": _mask_key(new_key),
+        })
     return RedirectResponse("/settings?saved=1", status_code=303)
 
 
@@ -1177,6 +1191,7 @@ def home(request: Request, user: User = Depends(require_login)):
 
 @app.post("/classes")
 def add_class(
+    request: Request,
     name: str = Form(...),
     code: str = Form(...),
     user: User = Depends(require_login),
@@ -1185,20 +1200,25 @@ def add_class(
         cls = Class(user_id=user.id, name=name.strip(), code=code.strip().upper())
         session.add(cls)
         session.commit()
+        session.refresh(cls)
+        if "application/json" in request.headers.get("accept", ""):
+            return JSONResponse({"id": cls.id, "code": cls.code, "name": cls.name})
     return RedirectResponse(url="/", status_code=303)
 
 
 @app.get("/me.json")
-def me_json(user: User = Depends(require_login)):
-    """Light auth-check + identity endpoint. The browser extension hits
-    this on popup open: 200 means we have a valid session and can show
-    the quick-add form; 401 means show a 'Log in to Compass' button that
-    opens the main site in a tab. Avoids the redirect dance that a
-    chrome-extension:// origin can't follow."""
+def me_json(request: Request, user: User = Depends(require_login)):
+    """Light auth-check + identity endpoint. Also carries the fields the
+    extension's Settings surface needs (xAI key set/masked, calendar
+    token + URLs) so a single fetch boots the entire panel."""
     return JSONResponse({
         "id": user.id,
         "email": user.email,
         "timezone": user.timezone,
+        "xai_api_key_set": bool(user.xai_api_key),
+        "xai_api_key_masked": _mask_key(user.xai_api_key),
+        "calendar_token": user.calendar_token,
+        "calendar_urls": _calendar_urls(request, user.calendar_token),
     })
 
 
@@ -1434,6 +1454,10 @@ def class_detail_json(class_id: int, user: User = Depends(require_login)):
                 "notes": t.notes,
                 "rrule": t.rrule,
             }
+        latest_syllabus = (
+            max(cls.syllabi, key=lambda s: s.parsed_at) if cls.syllabi else None
+        )
+        documents = sorted(cls.documents, key=lambda d: d.uploaded_at, reverse=True)
         return JSONResponse({
             "class": {
                 "id": cls.id, "code": cls.code, "name": cls.name,
@@ -1441,6 +1465,24 @@ def class_detail_json(class_id: int, user: User = Depends(require_login)):
             },
             "events": [_ev_dict(ev) for ev in events],
             "tasks": [_t_dict(t) for t in tasks],
+            "syllabus": (
+                {
+                    "id": latest_syllabus.id,
+                    "filename": latest_syllabus.filename,
+                    "parsed_at": latest_syllabus.parsed_at.isoformat()
+                        if latest_syllabus.parsed_at else None,
+                }
+                if latest_syllabus else None
+            ),
+            "documents": [
+                {
+                    "id": d.id,
+                    "title": d.title,
+                    "filename": d.filename,
+                    "uploaded_at": d.uploaded_at.isoformat() if d.uploaded_at else None,
+                }
+                for d in documents
+            ],
         })
 
 
@@ -1483,7 +1525,7 @@ def class_detail(request: Request, class_id: int, user: User = Depends(require_l
 
 
 @app.post("/classes/{class_id}/delete")
-def delete_class(class_id: int, user: User = Depends(require_login)):
+def delete_class(class_id: int, request: Request, user: User = Depends(require_login)):
     with Session(engine) as session:
         cls = session.get(Class, class_id)
         if not cls or cls.user_id != user.id:
@@ -1503,6 +1545,8 @@ def delete_class(class_id: int, user: User = Depends(require_login)):
         session.commit()
     for sid in deleted_syllabus_ids:
         parse_jobs.pop(sid, None)
+    if "application/json" in request.headers.get("accept", ""):
+        return JSONResponse({"deleted": class_id})
     return RedirectResponse(url="/", status_code=303)
 
 
@@ -1510,14 +1554,18 @@ def delete_class(class_id: int, user: User = Depends(require_login)):
 
 @app.post("/syllabus")
 async def syllabus_upload(
+    request: Request,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     user: User = Depends(require_login),
 ):
+    wants_json = "application/json" in request.headers.get("accept", "")
     # Block uploads from accounts with no xAI key — there's nothing to
     # call Grok with, so parsing would just fail later. Send them to
     # /settings with a banner instead of letting the upload silently break.
     if not (user.xai_api_key or "").strip():
+        if wants_json:
+            return JSONResponse({"error": "need_key"}, status_code=400)
         return RedirectResponse("/settings?need_key=1", status_code=303)
     content = await file.read()
     validate_pdf(content)
@@ -1547,10 +1595,13 @@ async def syllabus_upload(
         session.add(syllabus)
         session.commit()
         syllabus_id = syllabus.id
+        class_id = cls.id
 
     parse_jobs[syllabus_id] = "pending"
     background_tasks.add_task(process_syllabus, syllabus_id)
 
+    if wants_json:
+        return JSONResponse({"syllabus_id": syllabus_id, "class_id": class_id})
     return RedirectResponse(url=f"/syllabus/{syllabus_id}/status", status_code=303)
 
 
@@ -1595,6 +1646,7 @@ def syllabus_status_json(syllabus_id: int, user: User = Depends(require_login)):
 @app.post("/events/{event_id}/edit")
 def edit_event(
     event_id: int,
+    request: Request,
     title: str = Form(...),
     kind: str = Form(...),
     starts_at: str = Form(""),
@@ -1615,6 +1667,16 @@ def edit_event(
         cls_id = ev.class_id
         session.add(ev)
         session.commit()
+        session.refresh(ev)
+        if "application/json" in request.headers.get("accept", ""):
+            return JSONResponse({
+                "id": ev.id,
+                "title": ev.title,
+                "kind": ev.kind,
+                "starts_at": ev.starts_at.isoformat() if ev.starts_at else None,
+                "ends_at": ev.ends_at.isoformat() if ev.ends_at else None,
+                "class_id": cls_id,
+            })
     return RedirectResponse(f"/classes/{cls_id}", status_code=303)
 
 
@@ -3132,6 +3194,7 @@ def week_view(request: Request, user: User = Depends(require_login), month: Opti
 @app.post("/classes/{class_id}/docs")
 async def upload_doc(
     class_id: int,
+    request: Request,
     file: UploadFile = File(...),
     title: str = Form(""),
     user: User = Depends(require_login),
@@ -3152,17 +3215,27 @@ async def upload_doc(
         )
         session.add(doc)
         session.commit()
+        session.refresh(doc)
+        if "application/json" in request.headers.get("accept", ""):
+            return JSONResponse({
+                "id": doc.id,
+                "title": doc.title,
+                "filename": doc.filename,
+                "uploaded_at": doc.uploaded_at.isoformat(),
+            })
     return RedirectResponse(f"/classes/{class_id}", status_code=303)
 
 
 @app.post("/docs/{doc_id}/delete")
-def delete_doc(doc_id: int, user: User = Depends(require_login)):
+def delete_doc(doc_id: int, request: Request, user: User = Depends(require_login)):
     with Session(engine) as session:
         d = _own_document(session, doc_id, user.id)
         cls_id = d.class_id
         storage.delete(d.filename)
         session.delete(d)
         session.commit()
+    if "application/json" in request.headers.get("accept", ""):
+        return JSONResponse({"deleted": doc_id})
     return RedirectResponse(f"/classes/{cls_id}", status_code=303)
 
 

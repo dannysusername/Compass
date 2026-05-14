@@ -136,6 +136,13 @@ export const api = {
         fd.append("file", file);
         return request(`/tasks/${taskId}/attachments`, { method: "POST", body: fd });
     },
+    deleteAttachment: (attachmentId) =>
+        request(`/attachments/${attachmentId}/delete`, { method: "POST" }),
+    saveTimezone: (tz) => {
+        const fd = new FormData();
+        fd.append("tz", tz);
+        return request("/settings/timezone", { method: "POST", body: fd });
+    },
     taskDetails: (id) =>
         request(`/tasks/${id}/details.json`),
     editTask: (id, form) =>
