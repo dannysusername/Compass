@@ -10,6 +10,7 @@ python-multipart>=0.0.7
 aiofiles>=23.2
 pystray>=0.19
 Pillow>=10.0
+rumps>=0.4; sys_platform == "darwin"
 bcrypt>=4.0
 itsdangerous>=2.1
 psycopg[binary]>=3.1

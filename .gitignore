@@ -14,6 +14,8 @@ notes/
 .anthropic_key
 .xai_key
 .xai_model
+.admin_emails
+.compass.pid
 .DS_Store
 Thumbs.db
 .idea/

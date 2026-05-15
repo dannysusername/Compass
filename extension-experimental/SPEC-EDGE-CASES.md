@@ -144,6 +144,21 @@ needs you to click-test once.
 | M3 | Login → cookie shared with website tabs (same origin) | FIXED | `credentials: "include"` |
 | M4 | Logout → clears local state, re-shows login | FIXED | `clearForLogout()` |
 
+## N. Syllabus parsing entitlement (free pool vs. own key)
+
+| # | Rule | Status | Notes |
+|---|------|--------|-------|
+| N1 | Own key set → Upload-syllabus enabled, Settings shows "unlimited", no cap | FIXED | `canParse` true via `me.xai_api_key_set`; server skips counter |
+| N2 | No own key, server pool configured, parses left → Upload enabled, Settings shows "N of M used · K left" | FIXED | `canParse` via `server_key_available && free_parses_remaining > 0` |
+| N3 | No own key, free_parses_remaining == 0 → Upload disabled with tooltip; click bounces to Settings with "add your own key" message | FIXED | `blockMsg` (server-pool variant) |
+| N4 | No own key AND no server pool (dev/tests) → Upload disabled, "set your xAI key" tooltip; `/syllabus` returns `need_key` | FIXED | `server_key_available` false → legacy path |
+| N5 | `limit_reached` raised mid-upload (raced past the cap) → routes to Settings with the out-of-parses message | FIXED | `syllabus.js` catch branch matches `limit_reached` |
+| N6 | Successful free-pool parse → `/me.json` re-fetched so count + button state update without a full reload | FIXED | `api.me()` refresh in poll() done branch |
+| N7 | Counter increments at upload enqueue (not parse success) → a failed parse still spends a credit | KNOWN | Intentional: keeps displayed count truthful + blocks burst abuse. Acceptable at this cap |
+| N8 | Adding an own key while at the cap → immediately uncapped (remaining becomes null/unlimited) | FIXED | `_parse_usage` recomputed from `xai_api_key` presence |
+| N9 | Admin-granted unlimited (no own key) → `free_parses_remaining === null` → Upload enabled, Settings shows "granted by an admin" | FIXED | `canParse` treats `remaining === null` as uncapped; settings.js has a granted branch |
+| N10 | Granted user still needs the server pool (`server_key_available`) — grant without `XAI_API_KEY` configured still blocks (`need_key`) | FIXED | Server gate checks `server_key_available` before the cap |
+
 ---
 
 ## Open items — pick what to attack next

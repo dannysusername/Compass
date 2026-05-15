@@ -20,10 +20,27 @@ function populateSettings() {
     if (!state.me) return;
     $("#settings-email").textContent = state.me.email || "";
     $("#settings-tz").textContent = state.me.timezone || "—";
+    const me = state.me;
+    const usage = $("#settings-parse-usage");
     const xaiSet = $("#settings-xai-status");
-    if (state.me.xai_api_key_set) {
-        xaiSet.textContent = "Key set: " + (state.me.xai_api_key_masked || "");
+    if (me.xai_api_key_set) {
+        usage.textContent = "Using your own xAI key — unlimited syllabus parses.";
+        xaiSet.textContent = "Key set: " + (me.xai_api_key_masked || "");
+    } else if (me.free_parses_remaining === null) {
+        // No own key, but uncapped → admin granted unlimited.
+        usage.textContent = "Unlimited syllabus parses — granted by an admin.";
+        xaiSet.textContent = "No personal key needed.";
+    } else if (me.server_key_available) {
+        const used = me.free_parses_used || 0;
+        const limit = me.free_parse_limit || 0;
+        const left = me.free_parses_remaining || 0;
+        usage.textContent =
+            `Free syllabus parses: ${used} of ${limit} used · ${left} left` +
+            (left <= 0 ? " — add your own xAI key below for unlimited." : ".");
+        xaiSet.textContent = "No personal key set (using the free pool).";
     } else {
+        usage.textContent =
+            "Free parsing isn't configured on this server — add your own xAI key to parse syllabi.";
         xaiSet.textContent = "No key set. Syllabus upload requires one.";
     }
     const urls = state.me.calendar_urls || {};

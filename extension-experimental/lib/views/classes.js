@@ -46,14 +46,25 @@ function renderClassesList(target, classes) {
     const uploadBtn = document.createElement("button");
     uploadBtn.type = "button";
     uploadBtn.textContent = "+ Upload syllabus";
-    if (state.me && !state.me.xai_api_key_set) {
+    // Parsing is allowed when the user has their own key (uncapped) OR the
+    // server's free pool is configured and this account still has parses
+    // left. Out of free parses (or no key path at all) → bounce to Settings.
+    const me = state.me || {};
+    // free_parses_remaining === null ⇒ uncapped (own key OR admin grant).
+    const canParse = !!me.xai_api_key_set
+        || me.free_parses_remaining === null
+        || (!!me.server_key_available && (me.free_parses_remaining || 0) > 0);
+    const blockMsg = me.server_key_available
+        ? "You've used all your free syllabus parses — add your own xAI key in Settings for unlimited."
+        : "Set your xAI API key in Settings first to parse syllabi.";
+    if (state.me && !canParse) {
         uploadBtn.classList.add("is-disabled");
-        uploadBtn.title = "Set your xAI API key in Settings first";
+        uploadBtn.title = blockMsg;
     }
     uploadBtn.addEventListener("click", () => {
-        if (state.me && !state.me.xai_api_key_set) {
+        if (state.me && !canParse) {
             showSettings();
-            setXaiStatus("Set your xAI API key first to parse syllabi.", "error");
+            setXaiStatus(blockMsg, "error");
             return;
         }
         showSyllabusUpload();

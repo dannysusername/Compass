@@ -5,17 +5,45 @@
 <div class="setup-card">
     <h1>Your account</h1>
     <p class="subtle">Signed in as <strong>{{ user.email }}</strong></p>
+    {% if is_admin %}
+    <p style="margin-top: 8px">
+        <a href="/admin" class="primary-link">🛠 Admin dashboard</a>
+    </p>
+    {% endif %}
 
-    <h2 style="margin-top: 28px">xAI API key</h2>
+    <h2 style="margin-top: 28px">Syllabus parsing</h2>
     <p class="subtle">
-        Compass parses syllabi by calling the xAI Grok API on your own
-        account. You need a key set here before you can upload a syllabus.
-        Get one at <a href="https://console.x.ai/" target="_blank" rel="noopener">console.x.ai</a>
-        — typical syllabus parses cost a few cents.
+        Compass reads your syllabi with xAI's Grok and turns them into
+        calendar events automatically. Every account gets a batch of free
+        parses on us — no setup, no key required.
     </p>
 
+    {% if usage.own_key %}
+        <p class="hint" style="color: var(--accent, #5b9d5b)">
+            ✓ Using your own xAI key (<code>{{ masked_key }}</code>) —
+            <strong>unlimited</strong> parses, billed to your xAI account.
+        </p>
+    {% else %}
+        <p class="hint">
+            Free parses used:
+            <strong>{{ usage.free_parses_used }} of {{ usage.free_parse_limit }}</strong>
+            {% if usage.server_key_available %}
+                — <strong>{{ usage.free_parses_remaining }}</strong> left.
+            {% else %}
+                (free parsing isn't configured on this server — add your own
+                key below to parse syllabi).
+            {% endif %}
+        </p>
+    {% endif %}
+
+    {% if limit_reached or (usage.server_key_available and not usage.own_key and usage.free_parses_remaining <= 0) %}
+        <p class="error-message">
+            You've used all {{ usage.free_parse_limit }} free syllabus parses.
+            Add your own xAI key below to keep parsing — your key, no limit.
+        </p>
+    {% endif %}
     {% if need_key %}
-        <p class="error-message">Add your xAI key below before uploading a syllabus.</p>
+        <p class="error-message">Add an xAI key below before uploading a syllabus.</p>
     {% endif %}
     {% if saved %}
         <p class="subtle" style="color: var(--accent, #5b9d5b)">Saved.</p>
@@ -23,11 +51,15 @@
     {% if error %}
         <p class="error-message">{{ error }}</p>
     {% endif %}
-    {% if masked_key %}
-        <p class="hint">Currently saved: <code>{{ masked_key }}</code></p>
-    {% else %}
-        <p class="hint">No key saved — uploads disabled until you add one.</p>
-    {% endif %}
+
+    <h3 style="margin-top: 24px">Use your own key (optional)</h3>
+    <p class="subtle">
+        Want unlimited parsing? Add your own key and parses run on your
+        account instead of the free pool. <strong>Only xAI / Grok keys work
+        right now</strong> — get one at
+        <a href="https://console.x.ai/" target="_blank" rel="noopener">console.x.ai</a>
+        (a syllabus parse costs a few cents).
+    </p>
 
     <form method="post" action="/settings">
         <label>
@@ -35,8 +67,10 @@
             <input type="password" name="xai_api_key" placeholder="xai-..." autocomplete="off">
         </label>
         <button type="submit">Save</button>
+        {% if usage.own_key %}
         <button type="submit" name="xai_api_key" value="" formnovalidate
-                style="margin-left: 8px; opacity: 0.7">Remove saved key</button>
+                style="margin-left: 8px; opacity: 0.7">Remove my key</button>
+        {% endif %}
     </form>
 
     <h2 style="margin-top: 36px">Calendar subscription</h2>

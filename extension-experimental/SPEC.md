@@ -92,13 +92,13 @@ All surfaces live inside the side panel (the toolbar icon opens it directly via 
 - Class header inside a day card → drill into class detail.
 
 ### 5. Classes view
-**Elements**: action bar ("+ Add class", "+ Upload syllabus" — disabled with tooltip if no xAI key set), list of class cards (code + name).
+**Elements**: action bar ("+ Add class", "+ Upload syllabus" — enabled when the account has its own xAI key OR free server parses remaining; disabled with tooltip when out of free parses and no own key), list of class cards (code + name).
 
 **States**:
 - Empty: "No classes yet. Tap + Add class above to start."
 - Otherwise: vertical list, click any to drill in.
 
-**Interactions**: Add class → swap to add-class form. Upload syllabus → swap to upload surface (or swap to settings with "Set your xAI key" message if missing).
+**Interactions**: Add class → swap to add-class form. Upload syllabus → swap to upload surface (or swap to Settings with an "out of free parses, add your own xAI key" / "set your xAI key" message when not entitled).
 
 ### 6. Class detail
 **Elements**: ← back, code + name header, collapsible sections — Syllabus (PDF iframe + open-in-tab + download), Documents (list with × delete + upload form), Tasks (list), Events (list), Delete-class button at bottom.
@@ -145,7 +145,7 @@ All surfaces live inside the side panel (the toolbar icon opens it directly via 
 **Elements** (sections):
 - **Account**: email + Logout.
 - **Timezone**: auto-detected line. **New**: "(auto-saved)" indicator after the panel POSTs `/settings/timezone` on open.
-- **xAI key**: set / clear / masked-display.
+- **Syllabus parsing**: free-parse usage line ("N of M used · K left", "unlimited — using your own key", "unlimited — granted by an admin", or "free parsing not configured on this server"). `free_parses_remaining === null` always means uncapped (own key OR admin grant). The admin dashboard itself is web-only (`/admin`, `ADMIN_EMAILS` allowlist) — not an extension surface. Optional own-key field (set / clear / masked-display) — copy states **only xAI/Grok keys work right now**; adding one = uncapped parsing on the user's own quota. Source of truth = `state.me` fields `xai_api_key_set`, `server_key_available`, `free_parses_used`, `free_parse_limit`, `free_parses_remaining`.
 - **Calendar**: webcal subscribe link, full URL display, Regenerate token (with confirm).
 - **Manage tags**: list with inline rename + recolor + delete; "+ Add" form for new tags. System tags can rename + recolor but not delete.
 
@@ -154,7 +154,7 @@ All surfaces live inside the side panel (the toolbar icon opens it directly via 
 
 **States**: pre-pick / picked / uploading / parsing (poll every 2s) / done (drill into the new class) / error (show retry).
 
-**Interactions**: drop a PDF or click to pick (≤25 MB, PDF only). Back cancels and clears the polling timer.
+**Interactions**: drop a PDF or click to pick (≤25 MB, PDF only). Back cancels and clears the polling timer. On `limit_reached` the upload error routes to Settings with an "out of free parses, add your own key" message (same pattern as `need_key`). On a successful free-pool parse the panel re-fetches `/me.json` so the remaining count and Upload-button state stay accurate.
 
 ### 13. Recurring delete bottom sheet
 Unchanged: prompts with the picked date, three options (this date / this and future / entire task) + Cancel.
@@ -164,7 +164,7 @@ Unchanged: context menu on selection / page / link → POST to `/tasks` with the
 
 ## Data model
 
-No new server tables or columns. The extension is a thin client over the existing FastAPI server's models (`User`, `Class`, `Task`, `Tag`, `CalendarEvent`, `Document`, `TaskAlert`, `TaskAttachment`, `Syllabus`, `DayItemPosition`).
+The extension is a thin client over the existing FastAPI server's models (`User`, `Class`, `Task`, `Tag`, `CalendarEvent`, `Document`, `TaskAlert`, `TaskAttachment`, `Syllabus`, `DayItemPosition`). Server-side, `User.xai_api_key` is now **optional** and `User.free_parses_used` tracks shared-key usage against the `FREE_PARSE_LIMIT` env cap (server `XAI_API_KEY` env supplies the shared key). The extension reads the derived entitlement from `/me.json`, not the raw columns.
 
 Client-side state held only in module-scope variables:
 - `cachedMe` — last `/me.json` payload (email, timezone, xAI status, calendar URLs).

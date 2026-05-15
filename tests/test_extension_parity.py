@@ -343,3 +343,161 @@ def test_syllabus_upload_html_branch_redirects(auth_client):
     )
     assert r.status_code in (302, 303)
     assert "/settings" in r.headers.get("location", "")
+
+
+# ---- Hybrid free-pool / own-key syllabus entitlement ---------------------
+
+def _stub_parse_pipeline(monkeypatch):
+    """Neutralize the heavy parts of /syllabus so these tests exercise only
+    the entitlement gate + counter — not PDF extraction, disk writes, or a
+    real Grok call."""
+    monkeypatch.setattr(main, "validate_pdf", lambda content: None)
+    monkeypatch.setattr(main, "extract_pdf_text", lambda src: "syllabus text")
+    monkeypatch.setattr(main.storage, "save", lambda *a, **k: None)
+    monkeypatch.setattr(main, "process_syllabus", lambda syllabus_id: None)
+
+
+def _upload(client, accept_json=True):
+    return client.post(
+        "/syllabus",
+        files={"file": ("syl.pdf", b"%PDF-1.4 fake", "application/pdf")},
+        headers=(JSON if accept_json else {}),
+        follow_redirects=False,
+    )
+
+
+def test_me_json_includes_parse_usage_fields(auth_client):
+    """/me.json carries the derived entitlement so the extension can show
+    'N free parses left' and gate the Upload button."""
+    body = auth_client.get("/me.json").json()
+    for key in ("own_key", "server_key_available",
+                "free_parses_used", "free_parse_limit",
+                "free_parses_remaining"):
+        assert key in body, f"/me.json missing {key}"
+    assert body["own_key"] is False
+    assert body["server_key_available"] is False  # no XAI_API_KEY in tests
+    assert body["free_parses_used"] == 0
+    assert body["free_parses_remaining"] == body["free_parse_limit"]
+
+
+def test_free_pool_upload_increments_counter_then_caps(auth_client, monkeypatch):
+    monkeypatch.setattr(main, "XAI_API_KEY", "xai-server-test")
+    monkeypatch.setattr(main, "FREE_PARSE_LIMIT", 2)
+    _stub_parse_pipeline(monkeypatch)
+
+    uid = auth_client.get("/me.json").json()["id"]
+
+    r1 = _upload(auth_client)
+    assert r1.status_code == 200, r1.text
+    assert "syllabus_id" in r1.json()
+    assert db_get(main.User, uid).free_parses_used == 1
+
+    me = auth_client.get("/me.json").json()
+    assert me["server_key_available"] is True
+    assert me["free_parses_used"] == 1
+    assert me["free_parses_remaining"] == 1
+
+    r2 = _upload(auth_client)
+    assert r2.status_code == 200
+    assert db_get(main.User, uid).free_parses_used == 2
+
+    # Third upload is over the cap → blocked, counter unchanged.
+    r3 = _upload(auth_client)
+    assert r3.status_code == 400
+    assert r3.json() == {"error": "limit_reached", "free_parse_limit": 2}
+    assert db_get(main.User, uid).free_parses_used == 2
+    assert auth_client.get("/me.json").json()["free_parses_remaining"] == 0
+
+
+def test_free_pool_cap_html_branch_redirects_to_limit(auth_client, monkeypatch):
+    monkeypatch.setattr(main, "XAI_API_KEY", "xai-server-test")
+    monkeypatch.setattr(main, "FREE_PARSE_LIMIT", 0)
+    _stub_parse_pipeline(monkeypatch)
+    r = _upload(auth_client, accept_json=False)
+    assert r.status_code in (302, 303)
+    assert "/settings?limit=1" in r.headers.get("location", "")
+
+
+def test_own_key_bypasses_the_cap(auth_client, monkeypatch):
+    monkeypatch.setattr(main, "XAI_API_KEY", "xai-server-test")
+    monkeypatch.setattr(main, "FREE_PARSE_LIMIT", 0)  # free pool exhausted
+    _stub_parse_pipeline(monkeypatch)
+
+    # User brings their own key → uncapped, never touches the free counter.
+    auth_client.post("/settings",
+                     data={"xai_api_key": "xai-personal-key-123456"},
+                     headers=JSON)
+    uid = auth_client.get("/me.json").json()["id"]
+
+    r = _upload(auth_client)
+    assert r.status_code == 200, r.text
+    assert db_get(main.User, uid).free_parses_used == 0
+
+    me = auth_client.get("/me.json").json()
+    assert me["own_key"] is True
+    assert me["free_parses_remaining"] is None  # unlimited
+
+
+# ---- Admin dashboard (ADMIN_EMAILS allowlist) ---------------------------
+
+def test_admin_routes_404_for_non_admin(auth_client):
+    """No ADMIN_EMAILS set → the dashboard doesn't exist for anyone.
+    404 (not 403) so the route's existence isn't disclosed."""
+    assert auth_client.get("/admin").status_code == 404
+    r = auth_client.post("/admin/users/1/unlimited", data={"grant": "1"})
+    assert r.status_code == 404
+
+
+def test_me_json_is_admin_false_for_normal_user(auth_client):
+    assert auth_client.get("/me.json").json()["is_admin"] is False
+
+
+def test_admin_can_list_users_and_grant_unlimited(auth_client, monkeypatch):
+    monkeypatch.setattr(main, "ADMIN_EMAILS", {"test@example.com"})
+    monkeypatch.setattr(main, "XAI_API_KEY", "xai-server-test")
+    monkeypatch.setattr(main, "FREE_PARSE_LIMIT", 0)  # cap everyone immediately
+    _stub_parse_pipeline(monkeypatch)
+
+    uid = auth_client.get("/me.json").json()["id"]
+
+    # Admin sees the dashboard + the user listed.
+    page = auth_client.get("/admin")
+    assert page.status_code == 200
+    assert "test@example.com" in page.text
+
+    # Before the grant the capped user is blocked.
+    assert _upload(auth_client).json() == {"error": "limit_reached",
+                                           "free_parse_limit": 0}
+
+    # Grant unlimited via the dashboard.
+    g = auth_client.post(f"/admin/users/{uid}/unlimited",
+                         data={"grant": "1"}, headers=JSON)
+    assert g.status_code == 200 and g.json()["unlimited"] is True
+    assert db_get(main.User, uid).unlimited_parses is True
+
+    me = auth_client.get("/me.json").json()
+    assert me["unlimited_grant"] is True
+    assert me["free_parses_remaining"] is None  # uncapped
+    assert me["is_admin"] is True
+
+    # Now the same upload sails through, and the counter is NOT touched.
+    assert _upload(auth_client).status_code == 200
+    assert db_get(main.User, uid).free_parses_used == 0
+
+    # Revoke → capped again.
+    auth_client.post(f"/admin/users/{uid}/unlimited",
+                     data={"grant": "0"}, headers=JSON)
+    assert db_get(main.User, uid).unlimited_parses is False
+    assert _upload(auth_client).json()["error"] == "limit_reached"
+
+
+def test_admin_grant_needs_the_server_pool(auth_client, monkeypatch):
+    """An admin grant without XAI_API_KEY configured can't conjure a key —
+    the user still hits need_key."""
+    monkeypatch.setattr(main, "ADMIN_EMAILS", {"test@example.com"})
+    monkeypatch.setattr(main, "XAI_API_KEY", "")  # no shared pool
+    _stub_parse_pipeline(monkeypatch)
+    uid = auth_client.get("/me.json").json()["id"]
+    auth_client.post(f"/admin/users/{uid}/unlimited",
+                     data={"grant": "1"}, headers=JSON)
+    assert _upload(auth_client).json() == {"error": "need_key"}

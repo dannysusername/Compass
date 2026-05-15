@@ -1,0 +1,5 @@
+#!/bin/bash
+# Compass.app launcher. PROJECT is hardcoded so the bundle keeps working
+# even if you drag Compass.app to /Applications, the Dock, or the Desktop.
+PROJECT="/Users/danieli/Documents/Projects/Compass/Compass"
+exec "$PROJECT/.venv/bin/python" "$PROJECT/compass_tray_mac.py"

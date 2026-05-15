@@ -3,7 +3,7 @@
 // or error. On success, drill into the new class.
 
 import { api, NotAuthenticated } from "../api.js";
-import { resetCaches } from "../state.js";
+import { state, resetCaches } from "../state.js";
 import { showLogin, showSecondary, returnToList } from "../nav.js";
 import { ensureLookups } from "../lookups.js";
 import { showSettings, setXaiStatus } from "./settings.js";
@@ -98,10 +98,19 @@ export function bindSyllabus() {
             poll(r.syllabus_id, r.class_id);
         } catch (err) {
             if (err instanceof NotAuthenticated) { showLogin(); hideSyllabusUpload(); return; }
-            if ((err.message || "").includes("need_key")) {
+            const m = err.message || "";
+            if (m.includes("need_key")) {
                 hideSyllabusUpload();
                 showSettings();
                 setXaiStatus("Set your xAI API key first to parse syllabi.", "error");
+                return;
+            }
+            if (m.includes("limit_reached")) {
+                hideSyllabusUpload();
+                showSettings();
+                setXaiStatus(
+                    "You've used all your free syllabus parses. Add your own xAI key below for unlimited parsing.",
+                    "error");
                 return;
             }
             setStatus(err.message || "Couldn't upload.", "error");
@@ -119,6 +128,9 @@ function poll(syllabusId, classId) {
         if (status === "done") {
             statusEl.textContent = "Done ✓";
             resetCaches();
+            // A free-pool parse just spent a credit — refresh /me.json so
+            // Settings and the Upload button show the new remaining count.
+            api.me().then((m) => { if (m) state.me = m; }).catch(() => {});
             ensureLookups().then(() => {
                 hideSyllabusUpload();
                 showClassDetail(classId);

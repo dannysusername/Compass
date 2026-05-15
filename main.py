@@ -40,7 +40,47 @@ import storage
 # ---- Config ----
 
 LOCAL_TZ = ZoneInfo("America/New_York")  # change to your timezone
+
+# Dev convenience: load local `.<name>` secret files into the environment
+# before anything reads them. Mirrors compass_tray.py (Windows-only) so
+# running `uvicorn main:app` directly on macOS/Linux picks up the same
+# secrets. An already-set env var always wins; missing/blank files are
+# skipped. Production (Heroku) ships none of these files and sets real
+# config vars, so this loop is a no-op there.
+for _fname, _var in (
+    (".compass_secret_key", "COMPASS_SECRET_KEY"),
+    (".xai_key", "XAI_API_KEY"),
+    (".xai_model", "XAI_MODEL"),
+    (".admin_emails", "ADMIN_EMAILS"),
+):
+    if not os.environ.get(_var):
+        _p = Path(__file__).parent / _fname
+        if _p.is_file():
+            _val = _p.read_text(encoding="utf-8").strip()
+            if _val:
+                os.environ[_var] = _val
+
 XAI_MODEL = os.environ.get("XAI_MODEL", "grok-4-fast-reasoning").strip()
+# Shared/server-owned Grok key. When set, accounts WITHOUT their own
+# xai_api_key can still parse syllabi (the demo eats the cost), capped per
+# account at FREE_PARSE_LIMIT. Empty in dev/tests → keyless upload falls
+# back to the old "add a key" block. A user who sets their own key bypasses
+# the cap entirely (their quota, their bill).
+XAI_API_KEY = os.environ.get("XAI_API_KEY", "").strip()
+try:
+    FREE_PARSE_LIMIT = max(0, int(os.environ.get("FREE_PARSE_LIMIT", "5")))
+except ValueError:
+    FREE_PARSE_LIMIT = 5
+# Owner allowlist for the admin dashboard. Comma-separated emails, matched
+# case-insensitively against the logged-in user's email. Empty = nobody is
+# admin (the /admin routes 404 for everyone). This is the security boundary:
+# it lives in the environment, so it can't be escalated via the app or a DB
+# edit and survives a DB reset.
+ADMIN_EMAILS = {
+    e.strip().lower()
+    for e in os.environ.get("ADMIN_EMAILS", "").split(",")
+    if e.strip()
+}
 MAX_UPLOAD_MB = 25
 COMPASS_ENV = os.environ.get("COMPASS_ENV", "development").strip().lower()
 COMPASS_SECRET_KEY = os.environ.get("COMPASS_SECRET_KEY", "").strip()
@@ -312,9 +352,20 @@ class User(SQLModel, table=True):
     email: str = Field(unique=True, index=True)
     password_hash: str
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    # User-supplied xAI API key. Required for syllabus parsing — the
-    # /syllabus route blocks uploads from accounts without one.
+    # Optional user-supplied xAI API key. When set, syllabus parses run on
+    # this key (the user's own quota) with NO cap. When empty, Compass uses
+    # the shared server XAI_API_KEY, capped at FREE_PARSE_LIMIT parses per
+    # account (tracked in free_parses_used).
     xai_api_key: Optional[str] = Field(default=None)
+    # Number of syllabus parses this account has spent on the shared server
+    # key. Only incremented when the user has no key of their own. Once it
+    # reaches FREE_PARSE_LIMIT the /syllabus route blocks further uploads
+    # until the user adds their own xAI key.
+    free_parses_used: int = Field(default=0)
+    # Admin-granted (via /admin) uncapped parsing on the SHARED server key —
+    # same effect as bringing your own key, but spent on the owner's quota.
+    # Set/cleared only by an ADMIN_EMAILS account; users can't self-grant.
+    unlimited_parses: bool = Field(default=False)
     # Unguessable token embedded in the iCal subscription URL. Lets Apple
     # Calendar (and other clients) poll the feed without sending a session
     # cookie — cookies don't survive long-lived subscriptions. Regenerating
@@ -421,6 +472,8 @@ async def lifespan(app: FastAPI):
             _add_column_if_missing(conn, "task", "user_id", "INTEGER")
             _add_column_if_missing(conn, "tag", "user_id", "INTEGER")
             _add_column_if_missing(conn, "user", "xai_api_key", "TEXT")
+            _add_column_if_missing(conn, "user", "free_parses_used", "INTEGER NOT NULL DEFAULT 0")
+            _add_column_if_missing(conn, "user", "unlimited_parses", "INTEGER NOT NULL DEFAULT 0")
             _add_column_if_missing(conn, "user", "calendar_token", "TEXT")
             _add_column_if_missing(conn, "user", "class_order_json", "TEXT")
             _add_column_if_missing(conn, "user", "timezone", "TEXT")
@@ -594,6 +647,21 @@ async def _redirect_to_login(request: Request, exc: NotAuthenticatedError):
     if "application/json" in accept:
         return JSONResponse({"error": "not_authenticated"}, status_code=401)
     return RedirectResponse("/login", status_code=303)
+
+
+def _is_admin(user: User) -> bool:
+    """True iff the user's email is in the ADMIN_EMAILS env allowlist
+    (case-insensitive). The only gate to the admin dashboard."""
+    return (user.email or "").strip().lower() in ADMIN_EMAILS
+
+
+def require_admin(user: User = Depends(require_login)) -> User:
+    """Admin-only routes depend on this. Non-admins (and logged-out users,
+    via require_login) get a 404 — not a 403 — so the dashboard's existence
+    isn't even disclosed to accounts that can't use it."""
+    if not _is_admin(user):
+        raise HTTPException(404)
+    return user
 
 
 # ---- Ownership helpers ----
@@ -901,14 +969,17 @@ def process_syllabus(syllabus_id: int) -> None:
                 parse_jobs[syllabus_id] = "error: syllabus not found"
                 return
             raw_text = syllabus.raw_text
-            # Look up the class owner's per-user xAI key so the parse runs
-            # against their quota, not the demo's.
+            # Prefer the class owner's own xAI key (runs on their quota,
+            # uncapped). Fall back to the shared server key for keyless
+            # accounts — the /syllabus route already enforced the per-account
+            # cap before queuing this job.
             cls = session.get(Class, syllabus.class_id)
             owner = session.get(User, cls.user_id) if cls else None
-            user_key = owner.xai_api_key if owner else None
+            own_key = (owner.xai_api_key or "").strip() if owner else ""
+            effective_key = own_key or XAI_API_KEY
 
         try:
-            data = parse_syllabus_with_grok(raw_text, user_key=user_key)
+            data = parse_syllabus_with_grok(raw_text, user_key=effective_key)
         except grpc.RpcError as e:
             parse_jobs[syllabus_id] = f"error: {_grpc_error_message(e)}"
             return
@@ -1057,6 +1128,37 @@ def _mask_key(key: Optional[str]) -> Optional[str]:
     return f"{key[:6]}…{key[-4:]}"
 
 
+def _parse_usage(user: User) -> dict:
+    """Single source of truth for syllabus-parse entitlement, shared by
+    /me.json, /settings and the /syllabus gate so the count the user sees
+    always matches the count the server enforces.
+
+    own_key        → user pays, uncapped (free_parses_remaining is None).
+    unlimited_grant → admin flipped this user uncapped on the SHARED key
+                   (free_parses_remaining is None, but no own key needed).
+    server_key_available → the shared key is configured; keyless accounts
+                   can parse up to FREE_PARSE_LIMIT.
+    Neither        → keyless upload is blocked (old "add a key" behaviour).
+
+    free_parses_remaining is None whenever the account is uncapped (own key
+    OR admin grant) — the /syllabus gate and counter both key off that
+    `None`, so a single test ("is there a finite budget?") covers both
+    uncapped paths and never compares None to a number."""
+    own = bool((user.xai_api_key or "").strip())
+    granted = bool(getattr(user, "unlimited_parses", False))
+    uncapped = own or granted
+    used = user.free_parses_used or 0
+    return {
+        "own_key": own,
+        "unlimited_grant": granted,
+        "server_key_available": bool(XAI_API_KEY),
+        "free_parses_used": used,
+        "free_parse_limit": FREE_PARSE_LIMIT,
+        # None == unlimited (own key or admin-granted).
+        "free_parses_remaining": None if uncapped else max(0, FREE_PARSE_LIMIT - used),
+    }
+
+
 def _calendar_urls(request: Request, token: str) -> dict:
     """Build the subscribe URLs shown on /settings. `webcal_url` triggers
     Apple Calendar (and other clients that register the scheme) to pop up
@@ -1077,6 +1179,7 @@ def settings_page(
     request: Request,
     saved: int = 0,
     need_key: int = 0,
+    limit: int = 0,
     user: User = Depends(require_login),
 ):
     return templates.TemplateResponse(request, "settings.html", {
@@ -1084,6 +1187,9 @@ def settings_page(
         "masked_key": _mask_key(user.xai_api_key),
         "saved": bool(saved),
         "need_key": bool(need_key),
+        "limit_reached": bool(limit),
+        "usage": _parse_usage(user),
+        "is_admin": _is_admin(user),
         "error": None,
         "calendar_urls": _calendar_urls(request, user.calendar_token),
     })
@@ -1150,6 +1256,9 @@ def settings_save(
             "masked_key": _mask_key(user.xai_api_key),
             "saved": False,
             "need_key": False,
+            "limit_reached": False,
+            "usage": _parse_usage(user),
+            "is_admin": _is_admin(user),
             "error": msg,
             "calendar_urls": _calendar_urls(request, user.calendar_token),
         }, status_code=400)
@@ -1166,6 +1275,62 @@ def settings_save(
             "xai_api_key_masked": _mask_key(new_key),
         })
     return RedirectResponse("/settings?saved=1", status_code=303)
+
+
+# ---- Routes: Admin dashboard (ADMIN_EMAILS allowlist only) ----
+
+@app.get("/admin", response_class=HTMLResponse)
+def admin_dashboard(request: Request, admin: User = Depends(require_admin)):
+    with Session(engine) as session:
+        users = session.exec(select(User).order_by(User.created_at)).all()
+        rows = []
+        for u in users:
+            usage = _parse_usage(u)
+            if usage["own_key"]:
+                status = "Own key (uncapped)"
+            elif usage["unlimited_grant"]:
+                status = "Unlimited — granted"
+            elif not usage["server_key_available"]:
+                status = "No key configured"
+            else:
+                status = f"Capped {usage['free_parses_used']}/{usage['free_parse_limit']}"
+            rows.append({
+                "id": u.id,
+                "email": u.email,
+                "created_at": u.created_at,
+                "free_parses_used": u.free_parses_used or 0,
+                "unlimited": bool(u.unlimited_parses),
+                "is_self": u.id == admin.id,
+                "status": status,
+            })
+    return templates.TemplateResponse(request, "admin.html", {
+        "rows": rows,
+        "free_parse_limit": FREE_PARSE_LIMIT,
+        "saved": bool(request.query_params.get("saved")),
+    })
+
+
+@app.post("/admin/users/{user_id}/unlimited")
+def admin_set_unlimited(
+    request: Request,
+    user_id: int,
+    grant: str = Form(...),
+    admin: User = Depends(require_admin),
+):
+    """Toggle a user's admin-granted uncapped parsing. Cross-user by
+    design — this is the one sanctioned place we touch another account's
+    row directly (the ownership helpers deliberately 404 cross-user)."""
+    want = grant.strip() == "1"
+    with Session(engine) as session:
+        target = session.get(User, user_id)
+        if not target:
+            raise HTTPException(404)
+        target.unlimited_parses = want
+        session.add(target)
+        session.commit()
+    if "application/json" in request.headers.get("accept", ""):
+        return JSONResponse({"id": user_id, "unlimited": want})
+    return RedirectResponse("/admin?saved=1", status_code=303)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -1221,6 +1386,10 @@ def me_json(request: Request, user: User = Depends(require_login)):
         "timezone": user.timezone,
         "xai_api_key_set": bool(user.xai_api_key),
         "xai_api_key_masked": _mask_key(user.xai_api_key),
+        # Syllabus-parse entitlement so the panel can show "N free parses
+        # left" and decide whether to enable the Upload-syllabus button.
+        **_parse_usage(user),
+        "is_admin": _is_admin(user),
         "calendar_token": user.calendar_token,
         "calendar_urls": _calendar_urls(request, user.calendar_token),
     })
@@ -1564,13 +1733,26 @@ async def syllabus_upload(
     user: User = Depends(require_login),
 ):
     wants_json = "application/json" in request.headers.get("accept", "")
-    # Block uploads from accounts with no xAI key — there's nothing to
-    # call Grok with, so parsing would just fail later. Send them to
-    # /settings with a banner instead of letting the upload silently break.
-    if not (user.xai_api_key or "").strip():
-        if wants_json:
-            return JSONResponse({"error": "need_key"}, status_code=400)
-        return RedirectResponse("/settings?need_key=1", status_code=303)
+    usage = _parse_usage(user)
+    # Entitlement gate. Users on their own key sail through (uncapped).
+    # Keyless users ride the shared server key up to FREE_PARSE_LIMIT; past
+    # that they must add their own key. If no server key is configured at
+    # all (dev/tests), keyless upload is blocked outright as before.
+    if not usage["own_key"]:
+        if not usage["server_key_available"]:
+            if wants_json:
+                return JSONResponse({"error": "need_key"}, status_code=400)
+            return RedirectResponse("/settings?need_key=1", status_code=303)
+        # remaining is None for an admin-granted account → uncapped, falls
+        # through. A finite remaining at/below 0 is the only block here.
+        if usage["free_parses_remaining"] is not None and usage["free_parses_remaining"] <= 0:
+            if wants_json:
+                return JSONResponse(
+                    {"error": "limit_reached",
+                     "free_parse_limit": FREE_PARSE_LIMIT},
+                    status_code=400,
+                )
+            return RedirectResponse("/settings?limit=1", status_code=303)
     content = await file.read()
     validate_pdf(content)
 
@@ -1600,6 +1782,19 @@ async def syllabus_upload(
         session.commit()
         syllabus_id = syllabus.id
         class_id = cls.id
+
+    # Spend one free parse — only on the capped path (no own key AND no
+    # admin grant; both make free_parses_remaining None). Counting at
+    # enqueue (not on parse success) keeps the remaining count the user
+    # sees immediately truthful and stops a burst of uploads from slipping
+    # past the cap before any job finishes. A failed parse therefore still
+    # costs a credit; acceptable at this cap.
+    if usage["free_parses_remaining"] is not None:
+        with Session(engine) as session:
+            u = session.get(User, user.id)
+            u.free_parses_used = (u.free_parses_used or 0) + 1
+            session.add(u)
+            session.commit()
 
     parse_jobs[syllabus_id] = "pending"
     background_tasks.add_task(process_syllabus, syllabus_id)
