@@ -45,7 +45,7 @@ python -m venv .venv
 
 **Run the server:**
 
-- **macOS / Linux:** `./compass-ctl.sh start|stop|restart|status` (runs uvicorn detached, logs to `compass.log`), or double-click the Finder launchers `Compass Start.command` / `Compass Stop.command` / etc.
+- **macOS / Linux:** `./compass-ctl.sh start|stop|restart|status` (runs uvicorn detached, logs to `compass.log`), or use the `Compass.app` bundle for a Finder-clickable tray.
 - **Windows:** double-click the **Compass** desktop shortcut (tray app), or `pythonw compass_tray.py`.
 - **Anywhere, foreground:** `uvicorn main:app --host 0.0.0.0 --port 8000 --no-access-log`
 
