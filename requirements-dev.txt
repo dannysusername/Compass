@@ -1,0 +1,4 @@
+# Test-only deps, not shipped to Heroku (the buildpack installs
+# requirements.txt). CI installs both. httpx backs fastapi.testclient.
+pytest>=8.0
+httpx>=0.27

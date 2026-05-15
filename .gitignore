@@ -31,8 +31,9 @@ playwright-report/
 test_syllabus.pdf
 *.ics
 
-# All .txt files are local-only by default — Heroku and pip need
-# these two specifically, so allow-list them back in.
+# All .txt files are local-only by default — Heroku and pip/CI need
+# these specifically, so allow-list them back in.
 *.txt
 !requirements.txt
+!requirements-dev.txt
 !runtime.txt
