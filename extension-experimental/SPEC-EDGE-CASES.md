@@ -60,6 +60,11 @@ needs you to click-test once.
 | E3 | Delete recurring row → bottom-sheet picker (this date / this+future / entire task) | FIXED | `behaviors/recurring-sheet.js` |
 | E4 | Recurring task + Starts-on populated → Starts auto-cleared and disabled (rrule + range mutually exclusive — see CLAUDE.md) | FIXED | `syncStartsDisabled` |
 | E5 | Recurring task with explicit `rrule_until` in past → server stores it; web app + iCal feed silently render zero occurrences | KNOWN | Server-side concern; no client warning. Acceptable |
+| E6 | Delete from edit modal (recurring task) → opens the SAME bottom-sheet picker as the row × | FIXED | `#editor-delete` handler calls `showRecurringSheet(editSourceRow, ...)` |
+| E7 | Delete from edit modal: occurrence_at sent to `/exclude` and `/end-after` is the row's ORIGINAL `dueAt`, not the form's current `due_at` (user may have edited it) | **FIXED** | `editSourceRow.dataset.dueAt` captured at editor open |
+| E8 | Delete from edit modal (non-recurring) → `confirm()` then hard-delete | FIXED | Same UX as row × non-recurring branch |
+| E9 | Delete success from edit modal → reload + close editor (same return routing as Save: Class-detail returns to Class-detail) | FIXED | `await load(); hideEditor()` reuses `editReturnToClass` |
+| E10 | Delete failure from edit modal → editor stays open with red status, Save + Delete re-enabled for retry | FIXED | `performDeleteFromEditor` catch branch |
 
 ## F. Cross-class drag (tasks only — events are tied to their class)
 

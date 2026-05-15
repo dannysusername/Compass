@@ -397,6 +397,30 @@ body.cards-dragging * { cursor: grabbing !important; user-select: none; }
     color: var(--ink-3);
 }
 
+/* Editor / form action row destructive button (Delete next to Save).
+   Mirrors .primary's solid fill so it reads as a peer action — same
+   typography, padding, and corner radius, with the danger palette.
+   The confirm() dialog (non-recurring) and the recurring-sheet picker
+   (recurring) both gate accidental clicks, so the loud styling is safe. */
+.actions button.danger {
+    background: var(--danger);
+    color: var(--paper);
+    border: 1px solid var(--danger);
+    padding: 8px 18px;
+    font-family: var(--serif);
+    font-size: 14px;
+    cursor: pointer;
+    border-radius: 2px;
+}
+.actions button.danger:hover {
+    background: #8e2b2b;
+    border-color: #8e2b2b;
+}
+.actions button.danger:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
 /* Class header label — wraps code+name in a button when the bucket
    is a real class (not Personal). Tap → showClassDetail. Personal
    stays a plain span and is non-interactive. */

@@ -192,11 +192,29 @@ I missed a possibility — they get added here.
 | O9 | Edit + change Repeat from Daily → Weekly | Server replaces rrule | OK |
 | O10 | Edit + clear All-day on a date-only task | Form switches type to datetime-local with default `T17:00` time appended | OK |
 
+## P. Edit-modal Delete button
+
+| # | Scenario | Current behavior | Status |
+|---|----------|------------------|--------|
+| P1 | Click Delete on a non-recurring task | `confirm("Delete this task?")` → POST `/tasks/{id}/delete` → reload + close editor | OK |
+| P2 | Click Delete on a recurring task | Opens the bottom-sheet picker (this date / this+future / entire task) | OK |
+| P3 | Picker → "this date" | POST `/tasks/{id}/exclude` with `occurrence_at=<row's original dueAt>` (NOT the form's current due_at) | OK |
+| P4 | Picker → "this and future" | POST `/tasks/{id}/end-after` with same `occurrence_at` | OK |
+| P5 | Picker → "entire task" | POST `/tasks/{id}/delete` | OK |
+| P6 | Picker → Cancel | Sheet closes, editor stays open, no API call | OK |
+| P7 | User changed `due_at` in form, then clicks Delete on recurring → "this date" | Sheet acts on the ORIGINAL occurrence (row's dueAt), not the typed value. **Intentional** — Delete operates on the task instance the editor opened against, not on form contents. | OK |
+| P8 | Delete fires before /tasks/{id}/details.json resolves | Currently Save is disabled by details-loading; Delete is **not** disabled and acts on row data only — safe because Delete doesn't need rrule_until/alerts | OK |
+| P9 | Delete API returns 401 | Bounce to login (same as Save) | OK |
+| P10 | Delete API returns 5xx / network error | Editor stays open, red "Couldn't delete: …" status, Save + Delete re-enabled for retry | OK |
+| P11 | Double-tap Delete | Guarded — handler returns early if `deleteBtn.disabled`; button disabled during in-flight call | OK |
+| P12 | Delete editor opened from Class-detail | Returns to Class-detail after success (reuses `editReturnToClass`) | OK |
+| P13 | Delete a row whose underlying class was deleted in another tab mid-edit | Server 404; surfaced as "Couldn't delete: 404 …" red status. User can cancel out. | **ASK** — okay as-is, or auto-bounce to a fresh list? |
+
 ---
 
 ## ASK rows summary (the only ones I need your call on)
 
-A1, A2, A4, B5, C1, C3, C4, D1, D2, E4, F7, H3, H6, I7, J4, J5, J6, J8, J9, J11, K3, L1, L9, L10, M3, M4, O8
+A1, A2, A4, B5, C1, C3, C4, D1, D2, E4, F7, H3, H6, I7, J4, J5, J6, J8, J9, J11, K3, L1, L9, L10, M3, M4, O8, P13
 
-That's 27 decisions. I'll walk you through them in batches of 3-4 per turn.
+That's 28 decisions. I'll walk you through them in batches of 3-4 per turn.
 After your last answer, I apply them all and we ship.

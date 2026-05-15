@@ -124,13 +124,14 @@ All surfaces live inside the side panel (the toolbar icon opens it directly via 
 **Edge cases**: starts_at > due_at → inline error; tag = `__new__` without finishing inline create → inline error; rrule + starts_at mutually disabled (CSS `.disabled` on the label); all-day mutually disables starts_at.
 
 ### 8. Edit-task (the parity work)
-**Elements**: every field Add-task has, including **alerts** and **attachments** (currently missing).
+**Elements**: every field Add-task has, including **alerts** and **attachments** (currently missing). Action row carries **Save / Delete / Cancel**.
 
 - **Alerts**: chips list pre-populated from `/tasks/{id}/details.json`; same "+ Add reminder" picker. Submit sends `alerts=` so server's partial-update knows to replace.
 - **Attachments**: existing attachments listed with `× delete` (calls `POST /attachments/{id}/delete`); "+ Add file" appends new files which POST to `/tasks/{id}/attachments` after save.
+- **Delete** button (red outline, next to Save): destructive action for the whole task. Recurring tasks open the bottom-sheet picker (this date / future / all); non-recurring tasks show a `confirm()` first. The original occurrence's `due_at` (from the row that opened the editor) is what gets passed to `/tasks/{id}/exclude` and `/tasks/{id}/end-after` — NOT the form's current `due_at` value, since the user may have edited it before clicking Delete.
 - The "Reminders & attachments: edit in Compass" hint at the bottom **goes away** — they're editable here now.
 
-**Interactions**: same as Add-task. Save → reload current view (Today / Month / Class-detail) and return to it. **Saving from Class-detail returns to Class-detail** (audit-fix).
+**Interactions**: same as Add-task. Save → reload current view (Today / Month / Class-detail) and return to it. **Saving from Class-detail returns to Class-detail** (audit-fix). Delete → same return routing as Save (back to source list with reload).
 
 ### 9. Edit-event
 **Elements**: title, kind (with system-tag autocomplete dropdown — minor improvement; currently free text), starts_at, ends_at, Save / Duplicate / Cancel.

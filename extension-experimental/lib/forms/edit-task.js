@@ -21,6 +21,7 @@ import { ensureLookups } from "../lookups.js";
 import { alertLabel, formatLocal, addFilesToBuffer } from "../util.js";
 import { isItemOverdue } from "../views/row.js";
 import { load } from "../views/index.js";
+import { showRecurringSheet } from "../behaviors/recurring-sheet.js";
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -35,6 +36,12 @@ let editPendingFiles = [];
 let editPendingDeletes = [];   // attachment IDs the user × clicked; applied on Save
 let editFailedUploads = [];    // files whose upload failed last save; Retry button uses these
 let editReturnToClass = null;
+// The list row the editor was opened from. Captured here so the in-editor
+// Delete button can route through the same recurring-sheet picker as the
+// row × click — for recurring tasks, exclude / end-after need the ORIGINAL
+// occurrence's due_at (the row's dataset.dueAt), not whatever the user
+// typed into the form's due_at field before clicking Delete.
+let editSourceRow = null;
 // True once /tasks/{id}/details.json has resolved. Submit only sends the
 // `alerts` form field when this is true — otherwise an early/failed load
 // would let us send alerts="" and silently clear the user's reminders.
@@ -50,6 +57,7 @@ export async function showEditor(rowEl) {
     // Decide where to go after save: if the row lived inside class-detail,
     // come back to it; otherwise the regular list reload.
     editReturnToClass = state.currentClassId || null;
+    editSourceRow = rowEl;
     // Disable the Save button until /tasks/{id}/details.json finishes —
     // otherwise an early submit would send alerts="" and rrule_until=""
     // (clearing both on the server) before we'd loaded the existing values.
@@ -509,6 +517,61 @@ export function bindEditTask() {
 
     $("#editor-back").addEventListener("click", hideEditor);
     $("#editor-cancel").addEventListener("click", hideEditor);
+
+    // Delete from inside the editor — mirrors the row × button. Recurring
+    // tasks route through the bottom-sheet picker (this date / future /
+    // all); non-recurring tasks confirm + hard-delete. On success: reload
+    // the source list and close the editor (same return path as Save).
+    $("#editor-delete").addEventListener("click", () => {
+        const deleteBtn = $("#editor-delete");
+        if (deleteBtn.disabled) return;
+        const row = editSourceRow;
+        if (!row) return;
+        const id = row.dataset.id;
+        const occurrenceAt = row.dataset.dueAt || "";
+        const isRecurring = !!row.dataset.rrule;
+        if (isRecurring) {
+            showRecurringSheet(row, async (_row, mode) => {
+                await performDeleteFromEditor(id, mode, occurrenceAt);
+            });
+        } else {
+            if (!confirm("Delete this task?")) return;
+            performDeleteFromEditor(id, "all", "");
+        }
+    });
+}
+
+// Editor-specific delete flow. Unlike row × (which optimistically removes
+// the row from a list that stays visible), we're transitioning views: the
+// editor closes and the source list reloads. Errors keep the editor open
+// with a status message so the user can retry or cancel.
+async function performDeleteFromEditor(taskId, mode, occurrenceAt) {
+    const submitBtn = $("#edit-form button[type='submit']");
+    const deleteBtn = $("#editor-delete");
+    setEditStatus("Deleting…", "pending");
+    if (submitBtn) submitBtn.disabled = true;
+    if (deleteBtn) deleteBtn.disabled = true;
+    try {
+        if (mode === "this") {
+            await api.excludeTaskOccurrence(taskId, occurrenceAt);
+        } else if (mode === "future") {
+            await api.endTaskAfter(taskId, occurrenceAt);
+        } else {
+            await api.deleteTask(taskId);
+        }
+        await load();
+        hideEditor();
+        showToast("Task deleted ✓", "success");
+    } catch (err) {
+        if (err instanceof NotAuthenticated) {
+            showLogin();
+            hideEditor();
+            return;
+        }
+        setEditStatus("Couldn't delete: " + err.message, "error");
+        if (submitBtn) submitBtn.disabled = false;
+        if (deleteBtn) deleteBtn.disabled = false;
+    }
 }
 
 function setEditStatus(text, kind) {
