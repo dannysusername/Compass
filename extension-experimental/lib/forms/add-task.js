@@ -15,6 +15,7 @@ import {
     formatLocal, formatLocalDate, addFilesToBuffer,
 } from "../util.js";
 import { load } from "../views/index.js";
+import { offlineAddTask, isOfflineError } from "../sync.js";
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -458,6 +459,35 @@ export function bindAddTask() {
             if (err instanceof NotAuthenticated) {
                 showLogin();
                 hideAddTask();
+                return;
+            }
+            // Offline: queue the new task + show it optimistically, then
+            // close the form. (Attachments need the server, so they're
+            // skipped offline — rare, and noted in the toast.)
+            if (isOfflineError(err)) {
+                await offlineAddTask({
+                    title,
+                    due_at: due || null,
+                    starts_at: starts || null,
+                    is_all_day: addForm.is_all_day.checked,
+                    rrule: addForm.rrule.value || "",
+                    tag_id: (addForm.tag_id.value && addForm.tag_id.value !== "__new__")
+                        ? Number(addForm.tag_id.value) : null,
+                    class_id: classId || null,
+                    notes: addForm.notes.value.trim() || null,
+                });
+                const stickyClass = addForm.class_id.value;
+                addForm.reset();
+                addForm.class_id.value = stickyClass;
+                addAlerts = [];
+                addPendingFiles = [];
+                renderAlertsChips();
+                renderAttachmentsList();
+                syncRruleVisibility();
+                syncAllDay();
+                await load();
+                hideAddTask();
+                showToast("Saved offline — will sync", "success");
                 return;
             }
             setAddStatus("Couldn't add: " + err.message, "error");

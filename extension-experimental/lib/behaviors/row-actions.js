@@ -7,14 +7,7 @@ import { api, NotAuthenticated } from "../api.js";
 import { showLogin } from "../nav.js";
 import { showRecurringSheet } from "./recurring-sheet.js";
 import { load } from "../views/index.js";
-import { offlineMarkTask, offlineDeleteTask } from "../sync.js";
-
-// A network failure (offline) — as opposed to a 401 (auth) or an HTTP error
-// (server rejected). fetch() rejects with a TypeError when there's no
-// connection; navigator.onLine is the belt-and-suspenders check.
-function isOfflineError(err) {
-    return !navigator.onLine || (err && err.name === "TypeError");
-}
+import { offlineMarkTask, offlineDeleteTask, isOfflineError } from "../sync.js";
 
 export async function onToggle(rowEl) {
     const kind = rowEl.dataset.kind;

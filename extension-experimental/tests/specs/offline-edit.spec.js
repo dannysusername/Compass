@@ -78,6 +78,30 @@ test.describe("offline editing + boot", () => {
         await context.close();
     });
 
+    test("offline add queues a new task and shows it", async () => {
+        const { context, sidePanel } = await launchPanel();
+        await showTodayWithTask(context, sidePanel);  // caches the base today view
+        // Now fully offline: both the create AND the today refetch fail, so
+        // load() falls back to the cache we patched with the new task.
+        await context.route("**/today.json", (route) => route.abort());
+        await context.route("**/tasks", (route) =>
+            route.request().method() === "POST" ? route.abort() : route.fallback());
+
+        await sidePanel.locator("#add-task-fab").click();
+        await sidePanel.locator("#add-task-form input[name='title']").fill("Made offline");
+        await sidePanel.locator("#add-task-form button[type='submit']").click();
+
+        await expect(sidePanel.locator("#content")).toContainText("Made offline");
+        await expect.poll(async () =>
+            (await syncState(sidePanel)).pending.filter((p) => p.op === "upsert").length
+        ).toBeGreaterThan(0);
+        const s = await syncState(sidePanel);
+        const up = s.pending.find((p) => p.op === "upsert");
+        expect(up.data.client_id).toBeTruthy();   // new task → has a client_id for the push
+        expect(up.data.title).toBe("Made offline");
+        await context.close();
+    });
+
     test("offline boot shows the app from cache, not the login screen", async () => {
         const { context, sidePanel } = await launchPanel();  // online boot caches `me`
         await sidePanel.waitForTimeout(400);                 // let the cache write land

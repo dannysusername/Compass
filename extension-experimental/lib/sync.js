@@ -161,6 +161,12 @@ export const getComputedView = (key) => metaGet("view:" + key);
 // reload while still offline. The next online syncNow() pushes the queue
 // (newest-wins) and a fresh /today.json reconciles the view.
 
+// A network failure (offline) vs a 401 (auth) or HTTP error (server
+// rejected): fetch() rejects with a TypeError when there's no connection.
+export function isOfflineError(err) {
+    return !navigator.onLine || (err && err.name === "TypeError");
+}
+
 async function _patchToday(mutate) {
     const view = await getComputedView("today");
     if (!view) return;
@@ -169,6 +175,38 @@ async function _patchToday(mutate) {
 }
 
 const _isTask = (it, id) => it.kind === "task" && String(it.id) === String(id);
+
+const _bucketKey = (classId) =>
+    (classId == null || classId === "" || String(classId) === "0") ? 0 : Number(classId);
+
+export async function offlineAddTask(taskData) {
+    const row = await queueTaskUpsert(taskData);   // temp id + queued + mirror
+    const key = _bucketKey(taskData.class_id);
+    const classes = await local.classes();
+    const cls = classes.find((c) => Number(c.id) === key);
+    const item = {
+        kind: "task", id: row.id, title: taskData.title,
+        due_at: taskData.due_at || null, starts_at: taskData.starts_at || null,
+        completed: false, class_id: key,
+        tag_id: taskData.tag_id ?? null, is_all_day: !!taskData.is_all_day,
+        rrule: taskData.rrule || "", notes: taskData.notes || "",
+    };
+    // Optimistically place it in the Today view so the add is visible. A
+    // not-actually-today task reconciles away on the next online pull.
+    await _patchToday((view) => {
+        view.buckets = view.buckets || [];
+        let bucket = view.buckets.find((b) => Number(b.class_id ?? 0) === key);
+        if (!bucket) {
+            bucket = key === 0
+                ? { class_id: 0, code: "Personal", name: "", is_personal: true, items: [], overdue_items: [] }
+                : { class_id: key, code: cls ? cls.code : "Class", name: cls ? cls.name : "", is_personal: false, items: [], overdue_items: [] };
+            view.buckets.push(bucket);
+        }
+        bucket.items = bucket.items || [];
+        bucket.items.push(item);
+    });
+    return row;
+}
 
 export async function offlineMarkTask(id, completed) {
     await queueTaskUpsert({ id: Number(id), completed_at: completed ? new Date().toISOString() : null });
