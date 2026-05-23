@@ -69,7 +69,10 @@
         data-open-day-modal="day-{{ loop.index0 }}"
         aria-label="View tasks for {{ day.date.strftime('%A %b %d') }}">
         <header class="day-cell-head">
-            <span class="day-cell-date">{{ day.date.day }}</span>
+            <span class="day-cell-dayname">
+                <span class="day-cell-weekday">{{ day.date.strftime('%a') }}</span>
+                <span class="day-cell-date">{{ day.date.day }}</span>
+            </span>
             {% if day.is_today %}<span class="day-today-tag">today</span>{% endif %}
         </header>
         {% if day.items_by_class %}

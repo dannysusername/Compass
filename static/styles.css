@@ -3165,6 +3165,200 @@ body:has(.month-grid) .month-grid { flex: 1; }
     .section-article-actions { width: 100%; margin-top: 6px; }
 }
 
+/* ============================================================
+   Mobile responsive pass — hamburger nav, stacked month grid,
+   touch-sized controls. 640px = phone / small tablet.
+   ============================================================ */
+
+/* Hamburger control. The checkbox is never visible (the label drives
+   it); CSS-only so the menu works before todo.js loads. Hidden on
+   desktop where the inline nav row is fine. */
+.nav-toggle-cb {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    pointer-events: none;
+}
+.nav-toggle {
+    display: none;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    height: 44px;
+    margin-left: auto;
+    border: 1px solid var(--ink);
+    border-radius: 2px;
+    background: transparent;
+    cursor: pointer;
+    box-shadow: none;
+}
+.nav-toggle-bars {
+    position: relative;
+    width: 20px;
+    height: 2px;
+    background: var(--ink);
+}
+.nav-toggle-bars::before,
+.nav-toggle-bars::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    width: 20px;
+    height: 2px;
+    background: var(--ink);
+    transition: transform 0.15s ease, top 0.15s ease;
+}
+.nav-toggle-bars::before { top: -6px; }
+.nav-toggle-bars::after  { top: 6px; }
+/* Morph to an X while the menu is open. */
+.nav-toggle-cb:checked ~ .nav-toggle .nav-toggle-bars { background: transparent; }
+.nav-toggle-cb:checked ~ .nav-toggle .nav-toggle-bars::before { top: 0; transform: rotate(45deg); }
+.nav-toggle-cb:checked ~ .nav-toggle .nav-toggle-bars::after  { top: 0; transform: rotate(-45deg); }
+
+/* Weekday label inside a day cell — only shown in the stacked
+   single-column mobile calendar, hidden in the desktop grid. */
+.day-cell-weekday { display: none; }
+
+@media (max-width: 640px) {
+    /* --- Header → hamburger dropdown --- */
+    .nav-toggle { display: inline-flex; }
+    .top-nav {
+        display: none;
+        position: absolute;
+        top: 100%;
+        left: 0;
+        right: 0;
+        flex-direction: column;
+        gap: 0;
+        margin: 0;
+        background: var(--paper);
+        border-bottom: 1.5px solid var(--ink);
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+        z-index: 20;
+    }
+    .nav-toggle-cb:checked ~ .top-nav { display: flex; }
+    .top-nav a {
+        padding: 16px 24px;
+        border-bottom: 1px solid var(--rule);
+        font-size: 13px;
+    }
+    .top-nav a:last-child { border-bottom: none; }
+    .header-actions { margin-left: 0; }
+
+    /* --- Month calendar → single-column agenda --- */
+    .month-weekdays { display: none; }
+    .month-grid {
+        grid-template-columns: 1fr;
+        grid-auto-rows: auto;
+        gap: 8px;
+    }
+    .day-cell {
+        min-height: 0;
+        padding: 12px 14px;
+    }
+    .day-cell.is-today { padding: 11px 13px; }
+    /* A long faded list of other-month padding days is just noise in
+       a vertical scroll — drop them on mobile. */
+    .day-cell.is-out-of-month { display: none; }
+    .day-cell-weekday {
+        display: inline;
+        font-family: var(--mono);
+        font-size: 11px;
+        font-weight: 700;
+        color: var(--rust);
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        margin-right: 8px;
+    }
+    .day-cell-date { font-size: 15px; }
+    .day-cell-item { font-size: 13px; }
+}
+
+/* Touch devices: grow tap targets to ~44px without touching the
+   desktop look. Scoped to coarse pointers so mouse users keep the
+   tight layout. */
+@media (pointer: coarse) {
+    .todo-toggle {
+        width: 40px;
+        height: 40px;
+        margin: -9px 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+    .todo-del,
+    .todo-edit { padding: 10px 12px; }
+    .modal-close { padding: 10px 16px; min-height: 40px; }
+    .month-nav-btn { padding: 11px 16px; }
+    .modal-actions button { min-height: 44px; }
+}
+
+/* ---- Admin dashboard table (desktop) ---- */
+.admin-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 20px;
+    font-size: 14px;
+}
+.admin-table th,
+.admin-table td { padding: 8px 10px; text-align: left; }
+.admin-table thead tr { border-bottom: 1px solid var(--ink); }
+.admin-table tbody tr { border-bottom: 1px solid var(--rule); }
+.admin-table .admin-status-on { color: var(--accent, #5b9d5b); }
+.admin-table .admin-action-form { margin: 0; }
+
+@media (max-width: 640px) {
+    /* The masthead was 7px too wide at 320px (logo + hamburger +
+       Dark + Logout). Tighten padding + gap so it fits the smallest
+       phones without a horizontal scrollbar. */
+    body > header { padding: 14px 16px; gap: 10px; }
+    .theme-toggle { padding: 5px 9px; letter-spacing: 0.08em; }
+
+    /* Admin user table → one card per user. A 5-column table can't
+       fit a phone; stacking each cell with its label keeps every
+       value readable and the page inside the viewport. */
+    .admin-table thead {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+    }
+    .admin-table,
+    .admin-table tbody,
+    .admin-table tr,
+    .admin-table td { display: block; width: 100%; }
+    .admin-table tr {
+        border: 1px solid var(--rule);
+        border-radius: 3px;
+        margin-bottom: 12px;
+        padding: 6px 12px;
+        background: var(--paper-2);
+    }
+    .admin-table td {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 7px 0;
+        border: none;
+        overflow-wrap: anywhere;
+    }
+    .admin-table td::before {
+        content: attr(data-label);
+        flex-shrink: 0;
+        font-family: var(--mono);
+        font-size: 11px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--muted);
+    }
+    .admin-table td:last-child { padding-top: 10px; }
+    .admin-table .admin-action-form { width: 100%; }
+    .admin-table .admin-action-form button { width: 100%; }
+}
+
 .test-link {
     display: inline-block;
     font-family: var(--mono);

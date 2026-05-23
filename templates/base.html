@@ -20,7 +20,11 @@
     <header>
         <a href="/" class="logo"><em>Compass</em><span class="dot">.</span></a>
         {% if request.session.get("user_id") %}
-        <nav class="top-nav">
+        <input type="checkbox" id="nav-toggle" class="nav-toggle-cb">
+        <label for="nav-toggle" class="nav-toggle" aria-label="Toggle navigation menu">
+            <span class="nav-toggle-bars" aria-hidden="true"></span>
+        </label>
+        <nav class="top-nav" id="top-nav">
             <a href="/">Classes</a>
             <a href="/today">Today</a>
             <a href="/week">Week</a>

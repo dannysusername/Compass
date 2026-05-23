@@ -1,14 +1,18 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, time, timedelta, timezone
+from email.message import EmailMessage
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional, List, Union
 from zoneinfo import ZoneInfo
+import hashlib
 import json
 import logging
 import os
 import secrets
+import smtplib
+import ssl
 import uuid
 
 from fastapi import (
@@ -52,6 +56,9 @@ for _fname, _var in (
     (".xai_key", "XAI_API_KEY"),
     (".xai_model", "XAI_MODEL"),
     (".admin_emails", "ADMIN_EMAILS"),
+    (".sendgrid_api_key", "SENDGRID_API_KEY"),
+    (".email_from", "EMAIL_FROM"),
+    (".app_base_url", "APP_BASE_URL"),
 ):
     if not os.environ.get(_var):
         _p = Path(__file__).parent / _fname
@@ -102,6 +109,70 @@ if not log.handlers:
     _h.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
     log.addHandler(_h)
     log.propagate = False
+
+
+# ---- Email (password-reset delivery) ----
+# Production sends via the SendGrid SMTP relay (validated against Twilio's
+# MCP: smtp.sendgrid.net:587, STARTTLS, username literal "apikey",
+# password = the SendGrid API key). Everywhere else — dev, CI, tests —
+# the no-network `_log_send` backend records the link to compass.log + an
+# in-memory sink, so the whole flow is exercisable with zero setup and no
+# real mail. `send_email` is a module global on purpose so tests can
+# monkeypatch it. NOTE: SendGrid rejects any send whose From isn't a
+# verified Sender Identity; EMAIL_FROM must be a domain-authenticated
+# address (not a free gmail/outlook/yahoo address) — see the plan.
+SENDGRID_API_KEY = os.environ.get("SENDGRID_API_KEY", "").strip()
+EMAIL_FROM = os.environ.get("EMAIL_FROM", "").strip()
+APP_BASE_URL = os.environ.get("APP_BASE_URL", "").strip().rstrip("/")
+
+# Last reset link, exposed ONLY through the COMPASS_ENV != "production"
+# /__test__/last_reset_link route so browser tests can fetch it without
+# scraping the log. Never populated/served in production.
+_last_reset_link: Optional[str] = None
+
+
+def _log_send(to: str, subject: str, text_body: str,
+              html_body: Optional[str] = None) -> None:
+    log.info("email (dev backend) to=%s subject=%r body=%s",
+             to, subject, text_body)
+
+
+def _smtp_send(to: str, subject: str, text_body: str,
+               html_body: Optional[str] = None) -> None:
+    msg = EmailMessage()
+    msg["From"] = EMAIL_FROM
+    msg["To"] = to
+    msg["Subject"] = subject
+    msg.set_content(text_body)
+    if html_body:
+        msg.add_alternative(html_body, subtype="html")
+    ctx = ssl.create_default_context()
+    with smtplib.SMTP("smtp.sendgrid.net", 587, timeout=15) as s:
+        s.ehlo()
+        s.starttls(context=ctx)
+        s.login("apikey", SENDGRID_API_KEY)
+        refused = s.send_message(msg)
+    if refused:
+        raise RuntimeError(f"SendGrid refused recipient(s): {refused}")
+
+
+def send_email(to: str, subject: str, text_body: str,
+               html_body: Optional[str] = None) -> None:
+    """Prod → SendGrid SMTP relay; dev/CI/tests → log backend. Gating on
+    COMPASS_ENV + creds means non-prod never touches the network."""
+    if COMPASS_ENV == "production" and SENDGRID_API_KEY and EMAIL_FROM:
+        _smtp_send(to, subject, text_body, html_body)
+    else:
+        _log_send(to, subject, text_body, html_body)
+
+
+def _reset_link(request: Request, raw_token: str) -> str:
+    """Absolute URL of the reset page. APP_BASE_URL is authoritative in
+    prod — Heroku runs uvicorn without --proxy-headers so request.base_url
+    yields the wrong internal scheme/host. request.base_url is the dev
+    fallback only."""
+    base = APP_BASE_URL or str(request.base_url).rstrip("/")
+    return f"{base}/reset/{raw_token}"
 
 
 # ---- Database models ----
@@ -387,6 +458,25 @@ class User(SQLModel, table=True):
     # legacy single-user behavior intact for accounts that haven't loaded
     # any page since the field was added.
     timezone: Optional[str] = Field(default=None)
+
+
+class PasswordResetToken(SQLModel, table=True):
+    """Single-use, time-limited password-reset grant. Only the SHA-256
+    hash of the raw token is stored — the raw value lives solely in the
+    emailed link, so a DB/backup leak yields nothing usable (the token is
+    256-bit high-entropy so a fast hash is sufficient; bcrypt would buy
+    nothing and hit its 72-byte cap). A new /forgot for the same user
+    marks prior live tokens used (newest-wins); `used_at` is stamped in
+    the same transaction as the password change. Brand-new table →
+    auto-created by the lifespan create_all + migrate.py on both Neon
+    DBs; no manual DDL anywhere."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    token_hash: str = Field(unique=True, index=True)
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc))
+    expires_at: datetime
+    used_at: Optional[datetime] = Field(default=None)
 
 
 class DayItemPosition(SQLModel, table=True):
@@ -1094,7 +1184,10 @@ def signup_submit(request: Request, email: str = Form(...), password: str = Form
 def login_page(request: Request):
     if request.session.get("user_id"):
         return RedirectResponse("/", status_code=303)
-    return templates.TemplateResponse(request, "login.html", {"error": None, "email": ""})
+    reset_done = request.query_params.get("reset") == "1"
+    return templates.TemplateResponse(
+        request, "login.html",
+        {"error": None, "email": "", "reset_done": reset_done})
 
 
 @app.post("/login")
@@ -1116,6 +1209,189 @@ def login_submit(request: Request, email: str = Form(...), password: str = Form(
 def logout(request: Request):
     request.session.clear()
     return RedirectResponse("/login", status_code=303)
+
+
+# ---- Password reset ----
+
+PASSWORD_RESET_TTL = timedelta(hours=1)
+_FORGOT_WINDOW = timedelta(minutes=15)
+_FORGOT_MAX_EMAIL = 3
+# IP cap is deliberately lenient: this is a school app, whole campuses
+# sit behind one NAT'd public IP, so a strict per-IP limit would lock
+# out a building. Per-email (above) is the real abuse guard.
+_FORGOT_MAX_IP = 30
+# email/ip -> [datetime]. In-process, per-dyno, resets on restart —
+# best-effort, mirrors the parse_jobs in-memory pattern.
+_forgot_hits: dict = {}
+
+
+def _token_hash(raw: str) -> str:
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _forgot_throttled(key: str, limit: int) -> bool:
+    now = datetime.now(timezone.utc)
+    hits = [t for t in _forgot_hits.get(key, []) if now - t < _FORGOT_WINDOW]
+    hits.append(now)
+    _forgot_hits[key] = hits
+    return len(hits) > limit
+
+
+def _valid_reset(session: Session, token: str):
+    """Return (row, user) for a usable token, else (None, None). One
+    generic failure for not-found / used / expired / deleted-user so the
+    caller can't build an oracle."""
+    if not token or len(token) < 20:
+        return None, None
+    h = _token_hash(token)
+    row = session.exec(
+        select(PasswordResetToken).where(
+            PasswordResetToken.token_hash == h)).first()
+    if not row or row.used_at is not None:
+        return None, None
+    if not secrets.compare_digest(row.token_hash, h):
+        return None, None
+    exp = row.expires_at
+    if exp.tzinfo is None:
+        exp = exp.replace(tzinfo=timezone.utc)
+    if exp <= datetime.now(timezone.utc):
+        return None, None
+    user = session.get(User, row.user_id)
+    if not user:
+        return None, None
+    return row, user
+
+
+def _reset_resp(request: Request, ctx: dict, status: int = 200):
+    r = templates.TemplateResponse(request, "reset.html", ctx,
+                                   status_code=status)
+    # Token is in the URL path — keep it out of the Referer header.
+    r.headers["Referrer-Policy"] = "no-referrer"
+    return r
+
+
+@app.get("/forgot", response_class=HTMLResponse)
+def forgot_page(request: Request):
+    return templates.TemplateResponse(
+        request, "forgot.html", {"sent": False, "error": None})
+
+
+@app.post("/forgot", response_class=HTMLResponse)
+def forgot_submit(request: Request, email: str = Form(...)):
+    global _last_reset_link
+    email = email.strip().lower()
+    ip = request.client.host if request.client else "?"
+    throttled = (_forgot_throttled(f"e:{email}", _FORGOT_MAX_EMAIL)
+                 or _forgot_throttled(f"i:{ip}", _FORGOT_MAX_IP))
+    if not throttled:
+        with Session(engine) as session:
+            user = session.exec(
+                select(User).where(User.email == email)).first()
+            if user:
+                now = datetime.now(timezone.utc)
+                # newest-wins: invalidate prior live tokens
+                for old in session.exec(
+                    select(PasswordResetToken).where(
+                        PasswordResetToken.user_id == user.id,
+                        PasswordResetToken.used_at.is_(None),
+                    )
+                ).all():
+                    old.used_at = now
+                    session.add(old)
+                raw = secrets.token_urlsafe(32)
+                session.add(PasswordResetToken(
+                    user_id=user.id,
+                    token_hash=_token_hash(raw),
+                    expires_at=now + PASSWORD_RESET_TTL,
+                ))
+                session.commit()
+                link = _reset_link(request, raw)
+                _last_reset_link = link
+                try:
+                    send_email(
+                        to=user.email,
+                        subject="Reset your Compass password",
+                        text_body=(
+                            "We received a request to reset your Compass "
+                            "password.\n\nReset it here (this link expires "
+                            f"in 1 hour and can be used once):\n{link}\n\n"
+                            "If you didn't request this, you can safely "
+                            "ignore this email — your password is unchanged."
+                        ),
+                    )
+                except Exception:
+                    # Swallowing keeps the response existence-independent
+                    # (anti-enumeration); the token row is intentionally
+                    # kept so a transient SMTP blip doesn't strand the user.
+                    log.exception("password reset email send failed")
+    # Anti-enumeration: byte-identical neutral 200 no matter what happened
+    # above. Deliberately no email echoed, no redirect, no JSON branch.
+    return templates.TemplateResponse(
+        request, "forgot.html", {"sent": True, "error": None})
+
+
+@app.get("/reset/{token}", response_class=HTMLResponse)
+def reset_page(request: Request, token: str):
+    with Session(engine) as session:
+        row, _user = _valid_reset(session, token)
+    if not row:
+        return _reset_resp(request,
+                           {"invalid": True, "token": "", "error": None}, 400)
+    return _reset_resp(request,
+                       {"invalid": False, "token": token, "error": None})
+
+
+@app.post("/reset/{token}", response_class=HTMLResponse)
+def reset_submit(request: Request, token: str,
+                 password: str = Form(""), confirm: str = Form("")):
+    with Session(engine) as session:
+        row, user = _valid_reset(session, token)
+        if not row:
+            return _reset_resp(
+                request, {"invalid": True, "token": "", "error": None}, 400)
+        if len(password) < 8:
+            return _reset_resp(request, {
+                "invalid": False, "token": token,
+                "error": "Password must be at least 8 characters."}, 400)
+        if len(password.encode("utf-8")) > MAX_PASSWORD_LENGTH:
+            return _reset_resp(request, {
+                "invalid": False, "token": token,
+                "error": f"Password must be at most "
+                         f"{MAX_PASSWORD_LENGTH} characters."}, 400)
+        if password != confirm:
+            return _reset_resp(request, {
+                "invalid": False, "token": token,
+                "error": "Passwords don't match."}, 400)
+        now = datetime.now(timezone.utc)
+        user.password_hash = hash_password(password)
+        row.used_at = now
+        session.add(user)
+        session.add(row)
+        # Invalidate any other outstanding tokens for this user.
+        for other in session.exec(
+            select(PasswordResetToken).where(
+                PasswordResetToken.user_id == user.id,
+                PasswordResetToken.used_at.is_(None),
+            )
+        ).all():
+            other.used_at = now
+            session.add(other)
+        session.commit()
+    # Kill any pre-existing session (fixation defense); force a fresh
+    # login with the new password.
+    request.session.clear()
+    resp = RedirectResponse("/login?reset=1", status_code=303)
+    resp.headers["Referrer-Policy"] = "no-referrer"
+    return resp
+
+
+@app.get("/__test__/last_reset_link")
+def _test_last_reset_link():
+    """Test-only: lets browser tests fetch the most recent reset link
+    without parsing compass.log. Hard 404 in production."""
+    if COMPASS_ENV == "production":
+        raise HTTPException(404)
+    return JSONResponse({"link": _last_reset_link or ""})
 
 
 def _mask_key(key: Optional[str]) -> Optional[str]:

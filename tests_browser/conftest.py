@@ -54,6 +54,14 @@ def server_url():
     env["COMPASS_ENV"] = "test"
     env["UPLOAD_DIR"] = str(_TEST_DIR / "uploads")
     env["STORAGE_BACKEND"] = "local"
+    # Fixed admin allowlist so the mobile sweep can exercise /admin.
+    # Regular per-test users (browser_user_N@) are never in it, so
+    # existing tests see no behaviour change.
+    env["ADMIN_EMAILS"] = "admin_browser@example.com"
+    # Pin the external base URL so emailed reset links point at this
+    # test server (exercises the prod-style APP_BASE_URL path). No
+    # SENDGRID_* set → send_email uses the no-network log backend.
+    env["APP_BASE_URL"] = f"http://127.0.0.1:{port}"
 
     proc = subprocess.Popen(
         [

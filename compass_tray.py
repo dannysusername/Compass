@@ -304,13 +304,17 @@ class ServerController:
         return "Stopped"
 
     def reload_env(self) -> None:
-        """Re-read .compass_secret_key, .xai_key, .xai_model, .admin_emails
-        so a Restart picks up any edits made since the launcher started."""
+        """Re-read .compass_secret_key, .xai_key, .xai_model, .admin_emails,
+        .sendgrid_api_key, .email_from, .app_base_url so a Restart picks up
+        any edits made since the launcher started."""
         for fname, var in (
             (".compass_secret_key", "COMPASS_SECRET_KEY"),
             (".xai_key", "XAI_API_KEY"),
             (".xai_model", "XAI_MODEL"),
             (".admin_emails", "ADMIN_EMAILS"),
+            (".sendgrid_api_key", "SENDGRID_API_KEY"),
+            (".email_from", "EMAIL_FROM"),
+            (".app_base_url", "APP_BASE_URL"),
         ):
             f = ROOT / fname
             if f.is_file():

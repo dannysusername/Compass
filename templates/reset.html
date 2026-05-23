@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Set a new password — Compass{% endblock %}
+{% block content %}
+
+<meta name="referrer" content="no-referrer">
+<div class="setup-card">
+    {% if invalid %}
+        <h1>Link invalid or expired</h1>
+        <p class="subtle">This password-reset link is invalid, already used, or has expired. Reset links last 1 hour and work once.</p>
+        <p class="hint"><a href="/forgot">Request a new link</a></p>
+    {% else %}
+        <h1>Set a new password</h1>
+        <p class="subtle">Choose a new password for your Compass account.</p>
+        {% if error %}
+            <p class="error-message">{{ error }}</p>
+        {% endif %}
+        <form method="post" action="/reset/{{ token }}">
+            <label>
+                New password
+                <input type="password" name="password" required autofocus
+                       minlength="8" maxlength="72" autocomplete="new-password">
+            </label>
+            <label>
+                Confirm new password
+                <input type="password" name="confirm" required
+                       minlength="8" maxlength="72" autocomplete="new-password">
+            </label>
+            <button type="submit">Update password</button>
+        </form>
+    {% endif %}
+</div>
+
+{% endblock %}

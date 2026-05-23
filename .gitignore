@@ -15,6 +15,9 @@ notes/
 .xai_key
 .xai_model
 .admin_emails
+.sendgrid_api_key
+.email_from
+.app_base_url
 .compass.pid
 .DS_Store
 Thumbs.db
@@ -26,6 +29,7 @@ Thumbs.db
 node_modules/
 test-results/
 playwright-report/
+mobile-screenshots/
 
 # Test fixtures / scratch dumps
 test_syllabus.pdf
