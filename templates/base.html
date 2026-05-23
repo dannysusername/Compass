@@ -5,6 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="theme-color" content="#F4F1E8">
     <title>{% block title %}Compass{% endblock %}</title>
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="apple-touch-icon" href="/static/icon-192.png">
     <link rel="stylesheet" href="{{ '/static/styles.css' | static_v }}">
     <script>
       // Apply saved theme before paint to avoid a flash of light mode.
@@ -44,6 +46,18 @@
         {% block content %}{% endblock %}
     </main>
     <script src="{{ '/static/upload.js' | static_v }}" defer></script>
+    {% if COMPASS_ENV != 'test' %}
+    <script>
+      // Register the service worker → makes Compass installable and lets it
+      // open + show your tasks offline (Step 1: offline viewing). Skipped in
+      // the test env so a live SW can't cache responses and flake the suite.
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', function () {
+          navigator.serviceWorker.register('/sw.js').catch(function () {});
+        });
+      }
+    </script>
+    {% endif %}
     {% if request.session.get("user_id") %}
     <script>
       // Detect the browser's IANA timezone and POST it so the server

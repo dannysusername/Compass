@@ -738,6 +738,26 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
 
+# ---- PWA (installable app + offline viewing) ----
+# The service worker MUST be served from the root so its scope covers the
+# whole app ("/"). The manifest makes Compass installable. Both live in
+# static/ but are exposed at the root here.
+@app.get("/sw.js", include_in_schema=False)
+def service_worker():
+    return FileResponse(
+        "static/sw.js",
+        media_type="application/javascript",
+        # no-cache so a new service worker is picked up promptly on deploy.
+        headers={"Cache-Control": "no-cache", "Service-Worker-Allowed": "/"},
+    )
+
+
+@app.get("/manifest.webmanifest", include_in_schema=False)
+def web_manifest():
+    return FileResponse("static/manifest.webmanifest",
+                        media_type="application/manifest+json")
+
+
 def _static_v(path: str) -> str:
     """Cache-busting version stamp for a static file. Appends `?v=<mtime>` so
     Brave/Chrome reload the asset whenever it's changed on disk — keeps users
@@ -750,6 +770,9 @@ def _static_v(path: str) -> str:
 
 
 templates.env.filters["static_v"] = _static_v
+# Exposed to templates so base.html can skip service-worker registration in
+# the test env (a live SW would cache responses and flake the browser suite).
+templates.env.globals["COMPASS_ENV"] = COMPASS_ENV
 
 
 # ---- Parse-job status (in-memory; resets on restart) ----
