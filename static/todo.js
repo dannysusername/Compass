@@ -55,8 +55,17 @@
                 });
                 if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
             } catch (err) {
-                setDoneEverywhere(kind, id, wasDone);
-                console.error('toggle failed:', err);
+                // Offline: keep the optimistic state, queue it for the next
+                // sync (tasks only — events are server-generated).
+                if (kind === 'task' && window.CompassSync && CompassSync.isOffline(err)) {
+                    await CompassSync.queueTaskUpsert({
+                        id: Number(id),
+                        completed_at: !wasDone ? new Date().toISOString() : null,
+                    });
+                } else {
+                    setDoneEverywhere(kind, id, wasDone);
+                    console.error('toggle failed:', err);
+                }
             }
         });
     }
@@ -162,7 +171,14 @@
                 if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
                 removeRowsFromUI(kind, id);
             } catch (err) {
-                alert(`Could not delete ${label}: ` + err.message);
+                // Offline: keep it removed + queue the delete (non-recurring
+                // tasks only; recurring this/future + events need the server).
+                if (kind === 'task' && window.CompassSync && CompassSync.isOffline(err)) {
+                    await CompassSync.queueTaskDelete(id);
+                    removeRowsFromUI(kind, id);
+                } else {
+                    alert(`Could not delete ${label}: ` + err.message);
+                }
             }
         });
     }
