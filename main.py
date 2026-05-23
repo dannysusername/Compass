@@ -233,6 +233,13 @@ class Class(SQLModel, table=True):
     user_id: int = Field(foreign_key="user.id", index=True)
     name: str
     code: str
+    # Sync change-tracking (local-first step 2): set on insert + every ORM
+    # update. Optional so the column adds cleanly to populated prod tables;
+    # the lifespan backfills NULLs. See _SYNC_MODELS / GET /sync.
+    updated_at: Optional[datetime] = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        sa_column_kwargs={"onupdate": lambda: datetime.now(timezone.utc)},
+    )
     syllabi: List["Syllabus"] = Relationship(
         back_populates="cls",
         sa_relationship_kwargs={"cascade": "all, delete-orphan"},
@@ -273,6 +280,10 @@ class CalendarEvent(SQLModel, table=True):
     position: int = Field(default=0)  # drag-to-reorder priority, shared with Task
     source_text: Optional[str] = Field(default=None)
     completed_at: Optional[datetime] = Field(default=None)
+    updated_at: Optional[datetime] = Field(  # sync change-tracking
+        default_factory=lambda: datetime.now(timezone.utc),
+        sa_column_kwargs={"onupdate": lambda: datetime.now(timezone.utc)},
+    )
     cls: Optional[Class] = Relationship(back_populates="events")
 
 
@@ -308,6 +319,10 @@ class Task(SQLModel, table=True):
     # "Delete only this date" on a recurring row.
     rrule_exdates: Optional[str] = Field(default=None)
     is_all_day: bool = Field(default=False)
+    updated_at: Optional[datetime] = Field(  # sync change-tracking
+        default_factory=lambda: datetime.now(timezone.utc),
+        sa_column_kwargs={"onupdate": lambda: datetime.now(timezone.utc)},
+    )
     cls: Optional[Class] = Relationship(back_populates="tasks")
     tag: Optional["Tag"] = Relationship(back_populates="tasks")
     alerts: List["TaskAlert"] = Relationship(
@@ -362,6 +377,10 @@ class Tag(SQLModel, table=True):
     color: str  # hex string like #a83232
     is_system: bool = Field(default=False)
     system_key: Optional[str] = Field(default=None, index=True)
+    updated_at: Optional[datetime] = Field(  # sync change-tracking
+        default_factory=lambda: datetime.now(timezone.utc),
+        sa_column_kwargs={"onupdate": lambda: datetime.now(timezone.utc)},
+    )
     tasks: List["Task"] = Relationship(back_populates="tag")
 
 
@@ -623,6 +642,11 @@ async def lifespan(app: FastAPI):
             _add_column_if_missing(conn, "task", "is_all_day", "INTEGER NOT NULL DEFAULT 0")
             _add_column_if_missing(conn, "task", "rrule_until", "TIMESTAMP")
             _add_column_if_missing(conn, "task", "rrule_exdates", "TEXT")
+            # Sync change-tracking columns (local-first step 2).
+            _add_column_if_missing(conn, "task", "updated_at", "TIMESTAMP")
+            _add_column_if_missing(conn, "class", "updated_at", "TIMESTAMP")
+            _add_column_if_missing(conn, "tag", "updated_at", "TIMESTAMP")
+            _add_column_if_missing(conn, "calendarevent", "updated_at", "TIMESTAMP")
             # SQLite has no in-place ALTER COLUMN to drop NOT NULL, so
             # rebuild the task table when its class_id is still marked
             # NOT NULL. Idempotent — subsequent boots see notnull=0 and
@@ -708,6 +732,24 @@ async def lifespan(app: FastAPI):
         if fixed:
             session.commit()
             log.info("backfilled due_at on %s date-less orphan task(s)", fixed)
+    # Backfill sync timestamps so pre-existing rows are syncable — a NULL
+    # updated_at would never match a "changed since" pull. One-time +
+    # idempotent (no NULLs remain afterwards). Explicitly assigning the
+    # value keeps the column out of nothing-changed UPDATEs, so the
+    # onupdate hook doesn't clobber it back to "now".
+    with Session(engine) as session:
+        now = datetime.now(timezone.utc)
+        touched = 0
+        for Model in (Task, Class, Tag, CalendarEvent):
+            for row in session.exec(
+                select(Model).where(Model.updated_at.is_(None))
+            ).all():
+                row.updated_at = getattr(row, "created_at", None) or now
+                session.add(row)
+                touched += 1
+        if touched:
+            session.commit()
+            log.info("backfilled updated_at on %s row(s)", touched)
     yield
 
 
@@ -1741,6 +1783,51 @@ def add_class(
         if "application/json" in request.headers.get("accept", ""):
             return JSONResponse({"id": cls.id, "code": cls.code, "name": cls.name})
     return RedirectResponse(url="/", status_code=303)
+
+
+@app.get("/sync")
+def sync_pull(request: Request, user: User = Depends(require_login),
+             since: Optional[str] = None):
+    """Local-first step 2 — PULL side. Returns the user's rows (classes,
+    tags, tasks, events) changed strictly after `since` (an ISO-8601
+    timestamp), or everything when `since` is omitted. The client stores
+    the returned `server_time` and passes it back as `since` on the next
+    pull, so each sync only ships the delta.
+
+    Filtering is done in Python (not SQL) to dodge SQLite/Postgres naive-vs-
+    aware datetime comparison pitfalls — matches how the collectors do date
+    math. Deletes (tombstones) and the PUSH side are later slices."""
+    since_dt = parse_iso_dt(since) if since else None
+    server_time = datetime.now(timezone.utc)
+
+    def changed(row) -> bool:
+        if since_dt is None:
+            return True
+        u = row.updated_at
+        if u is None:
+            return True  # un-backfilled row — ship it so the client has it
+        if u.tzinfo is None:
+            u = u.replace(tzinfo=timezone.utc)
+        return u > since_dt
+
+    with Session(engine) as session:
+        classes = session.exec(
+            select(Class).where(Class.user_id == user.id)).all()
+        tags = session.exec(
+            select(Tag).where(Tag.user_id == user.id)).all()
+        tasks = session.exec(
+            select(Task).where(Task.user_id == user.id)).all()
+        class_ids = [c.id for c in classes]
+        events = session.exec(
+            select(CalendarEvent).where(CalendarEvent.class_id.in_(class_ids))
+        ).all() if class_ids else []
+        return JSONResponse({
+            "server_time": server_time.isoformat(),
+            "classes": [c.model_dump(mode="json") for c in classes if changed(c)],
+            "tags": [t.model_dump(mode="json") for t in tags if changed(t)],
+            "tasks": [t.model_dump(mode="json") for t in tasks if changed(t)],
+            "events": [e.model_dump(mode="json") for e in events if changed(e)],
+        })
 
 
 @app.get("/me.json")
