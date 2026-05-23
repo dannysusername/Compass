@@ -156,6 +156,41 @@ export const local = {
 export const cacheComputedView = (key, data) => metaSet("view:" + key, data);
 export const getComputedView = (key) => metaGet("view:" + key);
 
+// ---- Offline task writes (optimistic) ----
+// Queue the change AND patch the cached Today view so the edit survives a
+// reload while still offline. The next online syncNow() pushes the queue
+// (newest-wins) and a fresh /today.json reconciles the view.
+
+async function _patchToday(mutate) {
+    const view = await getComputedView("today");
+    if (!view) return;
+    mutate(view);
+    await cacheComputedView("today", view);
+}
+
+const _isTask = (it, id) => it.kind === "task" && String(it.id) === String(id);
+
+export async function offlineMarkTask(id, completed) {
+    await queueTaskUpsert({ id: Number(id), completed_at: completed ? new Date().toISOString() : null });
+    await _patchToday((view) => {
+        for (const b of (view.buckets || [])) {
+            for (const it of [...(b.items || []), ...(b.overdue_items || [])]) {
+                if (_isTask(it, id)) it.completed = completed;
+            }
+        }
+    });
+}
+
+export async function offlineDeleteTask(id) {
+    await queueTaskDelete(Number(id));
+    await _patchToday((view) => {
+        for (const b of (view.buckets || [])) {
+            b.items = (b.items || []).filter((it) => !_isTask(it, id));
+            b.overdue_items = (b.overdue_items || []).filter((it) => !_isTask(it, id));
+        }
+    });
+}
+
 // Test-only: wipe every store for a deterministic starting state. Uses the
 // module's own (correctly-versioned) connection so it can't race the schema.
 export async function _resetForTests() {

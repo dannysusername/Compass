@@ -7,6 +7,14 @@ import { api, NotAuthenticated } from "../api.js";
 import { showLogin } from "../nav.js";
 import { showRecurringSheet } from "./recurring-sheet.js";
 import { load } from "../views/index.js";
+import { offlineMarkTask, offlineDeleteTask } from "../sync.js";
+
+// A network failure (offline) — as opposed to a 401 (auth) or an HTTP error
+// (server rejected). fetch() rejects with a TypeError when there's no
+// connection; navigator.onLine is the belt-and-suspenders check.
+function isOfflineError(err) {
+    return !navigator.onLine || (err && err.name === "TypeError");
+}
 
 export async function onToggle(rowEl) {
     const kind = rowEl.dataset.kind;
@@ -18,8 +26,14 @@ export async function onToggle(rowEl) {
         if (kind === "event") await api.toggleEvent(id);
         else await api.toggleTask(id);
     } catch (err) {
-        setRowDone(rowEl, wasDone);
-        if (err instanceof NotAuthenticated) showLogin();
+        if (err instanceof NotAuthenticated) { setRowDone(rowEl, wasDone); showLogin(); return; }
+        // Offline: keep the optimistic state, queue it for the next sync.
+        // (Events are server-generated — no offline write, so roll back.)
+        if (kind === "task" && isOfflineError(err)) {
+            await offlineMarkTask(id, !wasDone);
+        } else {
+            setRowDone(rowEl, wasDone);  // genuine server error → revert
+        }
     }
 }
 
@@ -69,8 +83,19 @@ export async function runDelete(rowEl, mode) {
         // case, where we already removed the only DOM element that matters.
         if (mode !== "all" || isRecurring) await load();
     } catch (err) {
-        if (parent) parent.insertBefore(rowEl, next);
-        if (err instanceof NotAuthenticated) showLogin();
-        else alert("Couldn't delete: " + err.message);
+        if (err instanceof NotAuthenticated) {
+            if (parent) parent.insertBefore(rowEl, next);
+            showLogin();
+            return;
+        }
+        // Offline delete of a plain task: keep it removed + queue the
+        // delete for the next sync. (Recurring this/future and events
+        // need the server, so those revert.)
+        if (kind === "task" && mode === "all" && !rowEl.dataset.rrule && isOfflineError(err)) {
+            await offlineDeleteTask(id);
+            return;
+        }
+        if (parent) parent.insertBefore(rowEl, next);  // revert
+        alert("Couldn't delete: " + err.message);
     }
 }

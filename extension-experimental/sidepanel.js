@@ -28,6 +28,7 @@ import { bindEventEditor } from "./lib/forms/event-editor.js";
 import { bindAddClass } from "./lib/forms/add-class.js";
 import { bindSettings } from "./lib/forms/settings.js";
 import { bindSyllabus } from "./lib/forms/syllabus.js";
+import { syncNow, cacheComputedView, getComputedView } from "./lib/sync.js";
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -87,10 +88,16 @@ async function boot() {
     // form, one submit handler) so it's safe to call before /me.json
     // resolves.
     bindAll();
+    // When the connection comes back, flush any queued offline edits and
+    // re-render with fresh server data.
+    window.addEventListener("online", () => {
+        syncNow().then(() => load()).catch(() => {});
+    });
     try {
         const me = await api.me();
         if (!me) { showLogin(); return; }
         state.me = me;
+        cacheComputedView("me", me).catch(() => {});  // for offline boot
         showApp();
         const footer = $("#logged-in-as");
         if (footer && me.email) footer.textContent = me.email;
@@ -99,9 +106,20 @@ async function boot() {
         await load();
     } catch (err) {
         if (err instanceof NotAuthenticated) { showLogin(); return; }
-        // Server unreachable / wrong URL — show login so the user can
-        // fix the server URL via the options link rather than be stuck
-        // on a "Loading…" spinner.
+        // Offline / unreachable: a real 401 is handled above. If we have a
+        // cached identity from a prior online boot, run the app OFFLINE
+        // against the local mirror instead of stranding the user on login.
+        const cachedMe = await getComputedView("me").catch(() => null);
+        if (cachedMe) {
+            state.me = cachedMe;
+            showApp();
+            const footer = $("#logged-in-as");
+            if (footer && cachedMe.email) footer.textContent = cachedMe.email;
+            ensureLookups().catch(() => {});
+            await load();  // Today falls back to its cached view
+            return;
+        }
+        // Never synced — can't do anything offline; let the user fix the URL.
         showLogin();
         setLoginStatus("Couldn't reach Compass: " + err.message, "error");
     }
