@@ -121,7 +121,7 @@ All surfaces live inside the side panel (the toolbar icon opens it directly via 
 
 **States / interactions** unchanged from existing — but the pre-fill from a Month-view day-card click sets `due_at` and `starts_at` to the picked day.
 
-**Edge cases**: starts_at > due_at → inline error; tag = `__new__` without finishing inline create → inline error; rrule + starts_at mutually disabled (CSS `.disabled` on the label); all-day mutually disables starts_at.
+**Edge cases**: starts_at > due_at → inline error; tag = `__new__` without finishing inline create → inline error; rrule + starts_at mutually disabled (CSS `.disabled` on the label); all-day keeps starts_at usable as a **date-only** field (an all-day task may span a date range) and defaults an empty Due to today — only a Repeat disables starts_at. The edit surface returns to its origin on Back/Save: a row edited from Today/Month returns to that list; a row edited from class-detail returns to class-detail.
 
 ### 8. Edit-task (the parity work)
 **Elements**: every field Add-task has, including **alerts** and **attachments** (currently missing). Action row carries **Save / Delete / Cancel**.

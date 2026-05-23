@@ -112,9 +112,12 @@ def test_edit_task_alerts_when_starts_after_due(signed_in_page):
 
 # ---- Mutually-exclusive disables ----
 
-def test_all_day_disables_starts_on(signed_in_page):
-    """Toggling All-day clears + disables Starts-on (an all-day task
-    is anchored to its due date alone)."""
+def test_all_day_keeps_starts_on_enabled_as_date(signed_in_page):
+    """Toggling All-day keeps Starts-on USABLE as a date-only input — an
+    all-day task may span multiple days (start date → due date). Only a
+    Repeat disables Starts-on. (Regression: All-day used to disable it,
+    which both removed the multi-day span and — via the smart-default
+    start the edit modal injected — silently blocked saves.)"""
     page = signed_in_page
     _open_add_task_modal(page)
 
@@ -122,13 +125,12 @@ def test_all_day_disables_starts_on(signed_in_page):
     expect(starts).not_to_be_disabled()  # baseline
 
     page.check("#add-task-modal input[data-task-all-day]")
-    expect(starts).to_be_disabled()
-    expect(starts).to_have_value("")
+    expect(starts).not_to_be_disabled()
+    expect(starts).to_have_attribute("type", "date")
 
-    # Toggle off — Starts-on becomes editable again (assuming Repeat
-    # also off, which it is — default 'Doesn't repeat').
     page.uncheck("#add-task-modal input[data-task-all-day]")
     expect(starts).not_to_be_disabled()
+    expect(starts).to_have_attribute("type", "datetime-local")
 
 
 def test_repeat_disables_starts_on(signed_in_page):

@@ -18,7 +18,7 @@ import { api, NotAuthenticated } from "../api.js";
 import { state } from "../state.js";
 import { showLogin, showSecondary, returnToList, showToast } from "../nav.js";
 import { ensureLookups } from "../lookups.js";
-import { alertLabel, formatLocal, addFilesToBuffer } from "../util.js";
+import { alertLabel, formatLocal, formatLocalDate, addFilesToBuffer } from "../util.js";
 import { isItemOverdue } from "../views/row.js";
 import { load } from "../views/index.js";
 import { showRecurringSheet } from "../behaviors/recurring-sheet.js";
@@ -48,15 +48,20 @@ let editSourceRow = null;
 let editDetailsLoaded = false;
 
 export async function showEditor(rowEl) {
+    // Decide where Back/Save returns to, BEFORE showSecondary hides the
+    // current surface. Only return to class-detail when the editor was
+    // actually opened from it — keying off state.currentClassId alone is
+    // wrong because it stays set after a tab switch, so editing a Today /
+    // overdue row would wrongly drill into a class on Back. Read the
+    // live surface visibility instead.
+    const fromClassDetail = !document.querySelector("#class-detail").hidden;
     showSecondary("#editor");
     // Class + tag dropdowns must be populated BEFORE setting their value —
     // otherwise `select.value = "5"` for a missing option silently drops
     // to "" and the form would save with no class/tag. Force-refresh so
     // a class created/deleted in another tab shows up here.
     await ensureLookups({ force: true });
-    // Decide where to go after save: if the row lived inside class-detail,
-    // come back to it; otherwise the regular list reload.
-    editReturnToClass = state.currentClassId || null;
+    editReturnToClass = fromClassDetail ? (state.currentClassId || null) : null;
     editSourceRow = rowEl;
     // Disable the Save button until /tasks/{id}/details.json finishes —
     // otherwise an early submit would send alerts="" and rrule_until=""
@@ -151,10 +156,10 @@ function setDateInput(input, isoOrEmpty, isAllDay) {
     input.value = isoOrEmpty.slice(0, len);
 }
 
-// All-day + Repeat both want to control starts_at: All-day clears+disables
-// it (anchored to its due date); Repeat does the same (rrule + range is
-// mutually exclusive — see CLAUDE.md). They OR their disable conditions
-// so toggling one off doesn't re-enable the field while the other is on.
+// All-day switches starts_at/due_at to date-only inputs but KEEPS Starts-on
+// usable — an all-day task may span a date range. Only a Repeat disables
+// Starts-on (rrule + range are mutually exclusive — see syncStartsDisabled
+// / CLAUDE.md). All-day also defaults an empty Due to today.
 function syncAllDay() {
     const editForm = $("#edit-form");
     const on = editForm.is_all_day.checked;
@@ -166,11 +171,14 @@ function syncAllDay() {
             due.value = due.value.slice(0, 10);
         }
         due.type = "date";
+        // Never leave an all-day task date-less (parity with add + web).
+        if (!due.value) due.value = formatLocalDate(new Date());
         if (starts) {
             if (starts.value && starts.type === "datetime-local") {
                 starts.dataset.lastTime = starts.value.slice(11, 16) || "09:00";
             }
-            starts.value = "";
+            // Keep the start value — an all-day task may span a date range.
+            // Only a Repeat clears it (syncStartsDisabled). Drop the time.
             starts.type = "date";
         }
     } else {
@@ -227,9 +235,10 @@ function updateRruleUntilMin() {
 
 function syncStartsDisabled() {
     const editForm = $("#edit-form");
-    const allDay = editForm.is_all_day.checked;
+    // Only a Repeat disables Starts-on. All-day does NOT — an all-day task
+    // may span a date range (start date → due date).
     const hasRrule = !!editForm.rrule.value;
-    const disabled = allDay || hasRrule;
+    const disabled = hasRrule;
     const starts = editForm.starts_at;
     const label = $("#edit-starts-label");
     if (starts) {

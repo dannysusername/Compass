@@ -686,6 +686,28 @@ async def lifespan(app: FastAPI):
                     session.add(t)
                 session.delete(tag)
         session.commit()
+    # Backfill date-less orphan tasks. Pre-fix data could contain a task
+    # with no due_at, no starts_at, and no rrule — it renders only on
+    # "today" on the web and NOT AT ALL in the extension, so it became
+    # impossible to reach and delete. Anchor each to its creation date so
+    # it resurfaces (as an overdue row) and can be edited/deleted on every
+    # surface. Idempotent: once anchored there are no NULL-date orphans
+    # left to match. New tasks can't become orphans — _create_task_for_user
+    # backstops a missing date to today at creation time.
+    with Session(engine) as session:
+        orphans = session.exec(
+            select(Task).where(Task.due_at.is_(None), Task.starts_at.is_(None))
+        ).all()
+        fixed = 0
+        for t in orphans:
+            if (t.rrule or "").strip():
+                continue  # recurring tasks carry their anchor elsewhere
+            t.due_at = t.created_at or datetime.now(timezone.utc)
+            session.add(t)
+            fixed += 1
+        if fixed:
+            session.commit()
+            log.info("backfilled due_at on %s date-less orphan task(s)", fixed)
     yield
 
 
@@ -2619,6 +2641,14 @@ def _create_task_for_user(
     if not title:
         raise HTTPException(400, "Title required")
     starts_dt, due_dt = _normalize_task_range(starts_at, due_at)
+    # A task must be anchored to at least one date. A dateless task renders
+    # only on "today" and then becomes hard to reach to edit/delete (the
+    # extension can't surface it at all) — so a missing date silently
+    # creates an unmanageable orphan. Default a date-less, non-recurring
+    # task's due to *today* so it's always visible and editable. Recurring
+    # tasks always carry their anchor in due_at, so they're exempt.
+    if due_dt is None and starts_dt is None and not _normalize_rrule(rrule):
+        due_dt = _today_local(_user_tz(user)).replace(hour=23, minute=59)
     tag_pk: Optional[int] = None
     if tag_id:
         try:

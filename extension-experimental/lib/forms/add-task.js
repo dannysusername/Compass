@@ -12,7 +12,7 @@ import { showLogin, showSecondary, returnToList, showToast } from "../nav.js";
 import { ensureLookups, defaultClassId } from "../lookups.js";
 import {
     smartDefaultStart, smartDefaultDue, smartDefaultsForDay, alertLabel,
-    formatLocal, addFilesToBuffer,
+    formatLocal, formatLocalDate, addFilesToBuffer,
 } from "../util.js";
 import { load } from "../views/index.js";
 
@@ -230,11 +230,16 @@ function syncAllDay() {
             due.value = due.value.slice(0, 10);
         }
         due.type = "date";
+        // An all-day task must have a date — default Due to today when
+        // empty so we never create a date-less, hard-to-manage task.
+        if (!due.value) due.value = formatLocalDate(new Date());
         if (starts) {
             if (starts.value && starts.type === "datetime-local") {
                 starts.dataset.lastTime = starts.value.slice(11, 16) || "09:00";
             }
-            starts.value = "";
+            // Keep the start value — an all-day task may span multiple days
+            // (start date → due date). Only a Repeat clears it (see
+            // syncStartsDisabled). Just drop the time component.
             starts.type = "date";
         }
     } else {
@@ -302,9 +307,10 @@ function updateRruleUntilMin() {
 
 function syncStartsDisabled() {
     const addForm = $("#add-task-form");
-    const allDay = addForm.is_all_day.checked;
+    // Only a Repeat disables Starts-on (rrule + range are mutually
+    // exclusive). All-day does NOT — an all-day task can span a date range.
     const hasRrule = !!addForm.rrule.value;
-    const disabled = allDay || hasRrule;
+    const disabled = hasRrule;
     const starts = addForm.starts_at;
     const label = $("#add-starts-label");
     if (starts) {

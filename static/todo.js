@@ -254,51 +254,59 @@
             input.type = 'datetime-local';
         }
 
+        // Only the ADD form invents convenience defaults. The EDIT form
+        // must show exactly what the task has — injecting a smart-default
+        // *start* (e.g. 6pm) into an edited task that had none would make
+        // start > due and silently trip the "start before due" submit
+        // guard, blocking the save (this is the overdue-edit bug: a past
+        // due date is always < a present-day default start).
+        const isAddForm = form.matches('[data-add-task]');
+        const todayDate = () => {
+            const d = new Date();
+            const pad = (n) => String(n).padStart(2, '0');
+            return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+        };
         const sync = () => {
             const on = !!checkbox.checked;
-            // Repeat also wants starts disabled (rrule + range is mutually
-            // exclusive — see bindRruleVisibility). Either condition is
-            // enough to force the field off; otherwise toggling All-day
-            // off would re-enable Starts-on while a Repeat was still set.
+            // Starts-on is disabled ONLY by a Repeat (rrule + range are
+            // mutually exclusive — see bindRruleVisibility). All-day does
+            // NOT disable it: an all-day task may span multiple days
+            // (start date → due date), it just has no time component.
             const rruleSelect = form.querySelector('[data-task-rrule]');
             const hasRrule = !!(rruleSelect && rruleSelect.value);
             if (on) {
-                // All-day: show date-only inputs. Starts is disabled
-                // because an all-day task lives on its due date alone.
+                // All-day: date-only inputs. Keep the start field usable so
+                // the user can set a multi-day all-day span; clear it only
+                // when a Repeat forces it off.
                 if (startsInput) {
-                    startsInput.value = '';
                     toDate(startsInput);
-                    startsInput.disabled = true;
+                    startsInput.disabled = hasRrule;
+                    if (hasRrule) startsInput.value = '';
                 }
                 toDate(dueInput);
-                // Default the due date to today when nothing's been chosen
-                // yet — saves the user from having to click into the
-                // picker just to confirm "yes, today". If they typed a
-                // different date already, leave it alone.
-                if (dueInput && !dueInput.value) {
-                    const d = new Date();
-                    const pad = (n) => String(n).padStart(2, '0');
-                    dueInput.value = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-                }
+                // An all-day task must have a date — default due to today
+                // when empty so we never create a dateless, hard-to-manage
+                // task. A date the user already typed is left alone.
+                if (dueInput && !dueInput.value) dueInput.value = todayDate();
             } else {
                 // Restore datetime inputs. Starts stays disabled if Repeat
-                // is set; otherwise re-enable + populate a default so the
-                // user isn't staring at a blank field.
+                // is set; otherwise re-enable. Only the ADD form pre-fills a
+                // default start — see note above.
                 if (startsInput) {
                     startsInput.disabled = hasRrule;
                     toDateTime(startsInput, '09:00');
-                    if (!hasRrule && !startsInput.value) {
-                        startsInput.value = _smartDefaultStart();
-                    } else if (hasRrule) {
+                    if (hasRrule) {
                         startsInput.value = '';
+                    } else if (isAddForm && !startsInput.value) {
+                        startsInput.value = _smartDefaultStart();
                     }
                 }
                 toDateTime(dueInput, '10:00');
-                if (dueInput && !dueInput.value && startsInput && startsInput.value) {
+                if (isAddForm && dueInput && !dueInput.value && startsInput && startsInput.value) {
                     dueInput.value = _smartDefaultDue(startsInput.value);
                 }
             }
-            if (startsLabel) startsLabel.classList.toggle('disabled', on || hasRrule);
+            if (startsLabel) startsLabel.classList.toggle('disabled', hasRrule);
         };
         sync();
         checkbox.addEventListener('change', sync);
@@ -320,7 +328,6 @@
         // two conditions instead of unilaterally re-enabling.
         const startsInput = form.querySelector('input[name="starts_at"]');
         const startsLabel = startsInput ? startsInput.closest('label') : null;
-        const allDayCheckbox = form.querySelector('[data-task-all-day]');
         const sync = () => {
             const showing = !!select.value;
             untilLabel.hidden = !showing;
@@ -328,13 +335,13 @@
                 const inp = untilLabel.querySelector('input');
                 if (inp) inp.value = '';
             }
-            const allDayOn = !!(allDayCheckbox && allDayCheckbox.checked);
-            const disable = showing || allDayOn;
+            // Only a Repeat disables Starts-on. All-day no longer does —
+            // an all-day task can span a date range.
             if (startsInput) {
-                startsInput.disabled = disable;
+                startsInput.disabled = showing;
                 if (showing) startsInput.value = '';
             }
-            if (startsLabel) startsLabel.classList.toggle('disabled', disable);
+            if (startsLabel) startsLabel.classList.toggle('disabled', showing);
         };
         sync();
         select.addEventListener('change', sync);

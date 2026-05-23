@@ -11,8 +11,8 @@ needs you to click-test once.
 | A1 | End-date field hidden when Repeat = Doesn't repeat | **FIXED** | CSS `[hidden]` was being overridden by `.field { display: flex }` — now `[hidden] { display: none !important }` enforces it |
 | A2 | End-date field cleared when Repeat changes from set → none | FIXED | `syncRruleVisibility()` zeroes `rrule_until.value` |
 | A3 | End-date never sent to server without an rrule | **FIXED** | Add-task: only sends when `rrule.value && rrule_until.value`. Edit-task: explicitly sends `""` when no rrule (clears server-side stale state) |
-| A4 | Starts-on field disabled (greyed + cleared) when All-day OR Repeat is on | FIXED | `syncStartsDisabled()` ORs the two conditions |
-| A5 | Starts-on field re-enabled when BOTH All-day off AND Repeat off | FIXED | Same function, naturally |
+| A4 | Starts-on field disabled (greyed + cleared) ONLY when Repeat is on — All-day does NOT disable it (an all-day task may span a date range) | FIXED | `syncStartsDisabled()` keys off `hasRrule` only |
+| A5 | Starts-on field re-enabled when Repeat off (regardless of All-day) | FIXED | Same function |
 | A6 | Reminders / Attachments inputs always usable (no coupling) | FIXED | They're independent of date/repeat |
 
 ## B. Field type / format
@@ -21,7 +21,7 @@ needs you to click-test once.
 |---|------|--------|-------|
 | B1 | Toggling All-day ON: Due input switches `datetime-local → date`, value sliced to YYYY-MM-DD | FIXED | `syncAllDay()` |
 | B2 | Toggling All-day OFF: Due input switches `date → datetime-local`, value gets `T17:00` appended | FIXED | Same |
-| B3 | Toggling All-day ON with Starts populated: Starts cleared (anchored to Due) | FIXED | Inside `syncAllDay` |
+| B3 | Toggling All-day ON with Starts populated: Starts KEPT (date-only), so a multi-day all-day span survives; Due defaults to today when empty | FIXED | Inside `syncAllDay` (only a Repeat clears Starts) |
 | B4 | All-day Due picker shows day picker, NOT time picker | VERIFY | Browser-native via `type=date` |
 | B5 | Repeat dropdown limited to: Doesn't repeat / Daily / Weekly / Weekdays / Monthly | FIXED | Server's `_ALLOWED_RRULES` whitelist matches |
 

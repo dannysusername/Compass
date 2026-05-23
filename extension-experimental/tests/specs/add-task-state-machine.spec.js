@@ -57,12 +57,21 @@ async function assertInvariants(sidePanel, state) {
         await expect(endDateLabel, `${stateStr} I-1 (end-date should be hidden)`).toBeHidden();
     }
 
-    // I-3 / I-4: Starts disabled iff all_day OR rrule.
-    const shouldDisable = state.isAllDay || state.hasRrule;
+    // I-3 / I-4: Starts disabled iff rrule. All-day does NOT disable it —
+    // an all-day task may span a date range (start date → due date).
+    const shouldDisable = state.hasRrule;
     if (shouldDisable) {
         await expect(startsInput, `${stateStr} I-3 (starts should be disabled)`).toBeDisabled();
     } else {
         await expect(startsInput, `${stateStr} I-4 (starts should be enabled)`).toBeEnabled();
+    }
+
+    // I-5: All-day (without a Repeat) keeps Starts usable as a DATE input;
+    // otherwise it's a datetime-local input.
+    if (!state.hasRrule) {
+        const expectedType = state.isAllDay ? "date" : "datetime-local";
+        await expect(startsInput, `${stateStr} I-5 (starts input type)`)
+            .toHaveAttribute("type", expectedType);
     }
 }
 

@@ -45,7 +45,7 @@ I missed a possibility — they get added here.
 | C6 | Set far future (5+ years) | Allowed silently | OK |
 | C7 | Equals Due | Server collapses to single-date | OK |
 | C8 | After Due | Inline error: "start date must be before end date", no submit | OK |
-| C9 | Disabled by All-day or Repeat | Value cleared; not sent | OK |
+| C9 | Disabled by Repeat (NOT All-day) | Value cleared + disabled only on Repeat; All-day keeps it as a date-only field | OK |
 
 ## D. Due (datetime-local OR date)
 
@@ -62,7 +62,7 @@ I missed a possibility — they get added here.
 
 | # | Input | Current behavior | Status |
 |---|-------|------------------|--------|
-| E1 | Toggle ON | Due input switches `datetime-local → date`, value sliced to YYYY-MM-DD; Starts cleared + disabled | OK |
+| E1 | Toggle ON | Due input switches `datetime-local → date` (defaults to today if empty); Starts switches to date-only but stays usable (only Repeat clears/disables it) | OK |
 | E2 | Toggle ON when Due was empty | Due type changes; stays empty | OK |
 | E3 | Toggle OFF | Due type back to `datetime-local`, default time `T17:00` appended; Starts re-enabled if Repeat is also off | OK |
 | E4 | Toggle ON then OFF | Time portion is `17:00` (lost original time) | **ASK** — preserve original time across toggle? |
