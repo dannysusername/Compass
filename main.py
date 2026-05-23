@@ -175,6 +175,57 @@ def _reset_link(request: Request, raw_token: str) -> str:
     return f"{base}/reset/{raw_token}"
 
 
+def _reset_email_bodies(link: str) -> tuple[str, str]:
+    """(plain-text, HTML) bodies for the reset email. The HTML version
+    gives a real clickable button + brand styling; the plain-text part is
+    the fallback for clients that don't render HTML. Table-based layout +
+    inline styles for broad email-client support (Gmail/Outlook strip
+    <style> blocks and most modern CSS)."""
+    text = (
+        "We received a request to reset your Compass password.\n\n"
+        "Reset it here (this link expires in 1 hour and can be used "
+        f"once):\n{link}\n\n"
+        "If you didn't request this, you can safely ignore this email "
+        "— your password is unchanged."
+    )
+    sans = ("-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,"
+            "Arial,sans-serif")
+    html = f"""\
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#F4F1E8;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F4F1E8;padding:32px 16px;">
+    <tr><td align="center">
+      <table role="presentation" cellpadding="0" cellspacing="0" width="480" style="max-width:480px;width:100%;background:#ffffff;border:1px solid #E2DCCA;border-radius:12px;">
+        <tr><td style="padding:30px 32px 4px 32px;">
+          <span style="font-family:Georgia,'Times New Roman',serif;font-size:22px;font-style:italic;font-weight:bold;color:#1F3D7A;">Compass<span style="color:#5b9d5b;font-style:normal;">.</span></span>
+        </td></tr>
+        <tr><td style="padding:12px 32px 0 32px;">
+          <h1 style="margin:0 0 12px 0;font-family:{sans};font-size:20px;color:#1F3D7A;">Reset your password</h1>
+          <p style="margin:0 0 24px 0;font-family:{sans};font-size:15px;line-height:1.5;color:#2B2B2B;">We received a request to reset your Compass password. Click the button below to choose a new one.</p>
+        </td></tr>
+        <tr><td align="center" style="padding:0 32px;">
+          <a href="{link}" style="display:inline-block;background:#1F3D7A;color:#ffffff;text-decoration:none;font-family:{sans};font-size:15px;font-weight:600;padding:13px 30px;border-radius:8px;">Reset password</a>
+        </td></tr>
+        <tr><td style="padding:20px 32px 0 32px;">
+          <p style="margin:0 0 12px 0;font-family:{sans};font-size:13px;color:#7A7468;">This link expires in <strong>1 hour</strong> and can be used once.</p>
+          <p style="margin:0 0 6px 0;font-family:{sans};font-size:13px;color:#7A7468;">If the button doesn't work, copy and paste this link into your browser:</p>
+          <p style="margin:0;font-family:monospace;font-size:12px;line-height:1.45;word-break:break-all;"><a href="{link}" style="color:#1F3D7A;">{link}</a></p>
+        </td></tr>
+        <tr><td style="padding:24px 32px 30px 32px;">
+          <div style="border-top:1px solid #ECE7D9;padding-top:16px;">
+            <p style="margin:0;font-family:{sans};font-size:13px;line-height:1.5;color:#7A7468;">If you didn't request this, you can safely ignore this email — your password won't change.</p>
+          </div>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+    return text, html
+
+
 # ---- Database models ----
 
 class Class(SQLModel, table=True):
@@ -1307,17 +1358,13 @@ def forgot_submit(request: Request, email: str = Form(...)):
                 session.commit()
                 link = _reset_link(request, raw)
                 _last_reset_link = link
+                text_body, html_body = _reset_email_bodies(link)
                 try:
                     send_email(
                         to=user.email,
                         subject="Reset your Compass password",
-                        text_body=(
-                            "We received a request to reset your Compass "
-                            "password.\n\nReset it here (this link expires "
-                            f"in 1 hour and can be used once):\n{link}\n\n"
-                            "If you didn't request this, you can safely "
-                            "ignore this email — your password is unchanged."
-                        ),
+                        text_body=text_body,
+                        html_body=html_body,
                     )
                 except Exception:
                     # Swallowing keeps the response existence-independent
