@@ -1314,3 +1314,14 @@ details.class-detail-section > summary:hover {
     text-decoration: none;
 }
 .sidepanel-foot a:hover { color: var(--rust); }
+
+/* Offline indicator on the Today list (local-first step 2). */
+.offline-banner {
+    background: #FBEFC8;
+    color: #6b5e2a;
+    border: 1px solid #E8D9A0;
+    border-radius: 8px;
+    padding: 8px 12px;
+    font-size: 13px;
+    margin-bottom: 10px;
+}

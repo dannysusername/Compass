@@ -148,3 +148,23 @@ export const local = {
     cursor: () => metaGet("cursor"),
     pending: () => getAll("pending"),
 };
+
+// Last-known-good cache of a server-COMPUTED view payload (e.g. /today.json),
+// keyed by name. The server does the date/rrule/overdue bucketing, so until
+// the client can recompute views from the raw mirror, we stash the computed
+// response and replay it when offline. Stored in the meta store.
+export const cacheComputedView = (key, data) => metaSet("view:" + key, data);
+export const getComputedView = (key) => metaGet("view:" + key);
+
+// Test-only: wipe every store for a deterministic starting state. Uses the
+// module's own (correctly-versioned) connection so it can't race the schema.
+export async function _resetForTests() {
+    const d = await db();
+    const names = [...DATA_STORES, "pending", "meta"];
+    return new Promise((resolve, reject) => {
+        const t = d.transaction(names, "readwrite");
+        names.forEach((n) => t.objectStore(n).clear());
+        t.oncomplete = () => resolve();
+        t.onerror = () => reject(t.error);
+    });
+}

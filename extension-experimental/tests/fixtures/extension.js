@@ -82,6 +82,21 @@ async function installMocks(context) {
             body: JSON.stringify({ saved: true, unchanged: true }),
         });
     });
+    // The Today view kicks off a background syncNow() on boot. Mock the
+    // pull so it's deterministic and never hits the real network. Regex
+    // (not glob) so it matches /sync + /sync?since=… but NOT lib/sync.js.
+    // Tests that exercise sync register their own /sync route (last-wins).
+    await context.route(/\/sync(\?|$)/, (route) => {
+        if (route.request().method() !== "GET") return route.fallback();
+        route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({
+                server_time: "2026-01-01T00:00:00+00:00",
+                classes: [], tags: [], tasks: [], events: [], deletions: [],
+            }),
+        });
+    });
 }
 
 // Launch a new browser context with the extension loaded. Returns
