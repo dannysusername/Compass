@@ -384,6 +384,20 @@ class Tag(SQLModel, table=True):
     tasks: List["Task"] = Relationship(back_populates="tag")
 
 
+class Tombstone(SQLModel, table=True):
+    """Records a deleted row so the deletion propagates to other devices on
+    the next pull (a hard delete just makes the row vanish, which a client
+    can't distinguish from "never had it"). (kind, item_id) names what was
+    deleted; user_id scopes it. Brand-new table → auto-created by create_all
+    + migrate.py. Part of local-first step 2 (sync)."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    kind: str          # "task" | "class" | "tag" | "event"
+    item_id: int
+    deleted_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc), index=True)
+
+
 # Names + colors mirror the event sub-kinds so a user task tagged
 # "milestone" looks identical to an event with kind="milestone". Each
 # kind gets its own muted, paper-aesthetic color so users can tell them
@@ -1785,6 +1799,66 @@ def add_class(
     return RedirectResponse(url="/", status_code=303)
 
 
+# ---- Sync helpers (local-first step 2) ----
+
+def _aware(dt: Optional[datetime]) -> Optional[datetime]:
+    """Attach UTC to a naive datetime so aware/naive comparisons don't blow
+    up — DB reads come back naive on both SQLite and Postgres."""
+    if dt is not None and dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _record_tombstone(session: Session, user_id: int, kind: str, item_id: int) -> None:
+    session.add(Tombstone(user_id=user_id, kind=kind, item_id=item_id))
+
+
+# Task fields a client may push (never id/user_id/created_at/updated_at).
+_TASK_PUSH_DT = {"starts_at", "due_at", "completed_at", "rrule_until"}
+_TASK_PUSH_FIELDS = (
+    "title", "notes", "starts_at", "due_at", "completed_at", "position",
+    "tag_id", "class_id", "rrule", "rrule_until", "rrule_exdates", "is_all_day",
+)
+
+
+def _validated_fk(session: Session, Model, value, user_id: int) -> Optional[int]:
+    """Return value as an int id IFF it names a row owned by user_id, else
+    None — so a pushed task can't point at someone else's class/tag."""
+    if value in (None, "", 0, "0"):
+        return None
+    try:
+        pk = int(value)
+    except (TypeError, ValueError):
+        return None
+    obj = session.get(Model, pk)
+    if not obj or getattr(obj, "user_id", None) != user_id:
+        return None
+    return pk
+
+
+def _apply_task_fields(session: Session, user: User, row: "Task", data: dict) -> None:
+    """Set the allowed, validated fields on a Task from a pushed dict.
+    Only keys present in `data` are touched (partial-update friendly)."""
+    for k in _TASK_PUSH_FIELDS:
+        if k not in data:
+            continue
+        v = data[k]
+        if k in _TASK_PUSH_DT:
+            v = parse_iso_dt(v) if v else None
+        elif k == "is_all_day":
+            v = bool(v)
+        elif k == "position":
+            try:
+                v = int(v)
+            except (TypeError, ValueError):
+                continue
+        elif k == "tag_id":
+            v = _validated_fk(session, Tag, v, user.id)
+        elif k == "class_id":
+            v = _validated_fk(session, Class, v, user.id)
+        setattr(row, k, v)
+
+
 @app.get("/sync")
 def sync_pull(request: Request, user: User = Depends(require_login),
              since: Optional[str] = None):
@@ -1796,19 +1870,18 @@ def sync_pull(request: Request, user: User = Depends(require_login),
 
     Filtering is done in Python (not SQL) to dodge SQLite/Postgres naive-vs-
     aware datetime comparison pitfalls — matches how the collectors do date
-    math. Deletes (tombstones) and the PUSH side are later slices."""
+    math. `deletions` carries tombstones since `since` so a client drops
+    rows removed elsewhere (empty on a full/first pull — a fresh client has
+    nothing to drop)."""
     since_dt = parse_iso_dt(since) if since else None
     server_time = datetime.now(timezone.utc)
 
-    def changed(row) -> bool:
+    def newer_than_since(dt) -> bool:
         if since_dt is None:
             return True
-        u = row.updated_at
-        if u is None:
+        if dt is None:
             return True  # un-backfilled row — ship it so the client has it
-        if u.tzinfo is None:
-            u = u.replace(tzinfo=timezone.utc)
-        return u > since_dt
+        return _aware(dt) > since_dt
 
     with Session(engine) as session:
         classes = session.exec(
@@ -1821,13 +1894,83 @@ def sync_pull(request: Request, user: User = Depends(require_login),
         events = session.exec(
             select(CalendarEvent).where(CalendarEvent.class_id.in_(class_ids))
         ).all() if class_ids else []
+        # Tombstones only matter to a client that already has state — skip
+        # them on a full/first pull (since omitted).
+        deletions = []
+        if since_dt is not None:
+            for tomb in session.exec(
+                select(Tombstone).where(Tombstone.user_id == user.id)
+            ).all():
+                if newer_than_since(tomb.deleted_at):
+                    deletions.append({"kind": tomb.kind, "id": tomb.item_id,
+                                      "deleted_at": _aware(tomb.deleted_at).isoformat()})
         return JSONResponse({
             "server_time": server_time.isoformat(),
-            "classes": [c.model_dump(mode="json") for c in classes if changed(c)],
-            "tags": [t.model_dump(mode="json") for t in tags if changed(t)],
-            "tasks": [t.model_dump(mode="json") for t in tasks if changed(t)],
-            "events": [e.model_dump(mode="json") for e in events if changed(e)],
+            "classes": [c.model_dump(mode="json") for c in classes if newer_than_since(c.updated_at)],
+            "tags": [t.model_dump(mode="json") for t in tags if newer_than_since(t.updated_at)],
+            "tasks": [t.model_dump(mode="json") for t in tasks if newer_than_since(t.updated_at)],
+            "events": [e.model_dump(mode="json") for e in events if newer_than_since(e.updated_at)],
+            "deletions": deletions,
         })
+
+
+@app.post("/sync")
+async def sync_push(request: Request, user: User = Depends(require_login)):
+    """Local-first step 2 — PUSH side (tasks). Body:
+
+        {"changes": {"tasks": [ {id?, client_id?, updated_at, ...fields} ]},
+         "deletes": {"tasks": [id, ...]}}
+
+    Upserts use **newest-wins**: a task with an `id` is updated only if the
+    pushed `updated_at` is not older than the server's (else the server copy
+    is kept). A task with no `id` is created and its `client_id` is mapped to
+    the new server id in the response (`id_map`) so the client can reconcile
+    its local row. Deletes hard-delete + write a tombstone so the removal
+    reaches other devices on pull. Cross-user / unknown ids are skipped.
+    (Classes/tags/events push is a later slice.)"""
+    payload = await request.json()
+    changes = (payload or {}).get("changes") or {}
+    deletes = (payload or {}).get("deletes") or {}
+    id_map: dict[str, int] = {}
+    with Session(engine) as session:
+        for data in changes.get("tasks", []):
+            if not isinstance(data, dict):
+                continue
+            sid = data.get("id")
+            client_updated = _aware(parse_iso_dt(data.get("updated_at"))
+                                    if data.get("updated_at") else None)
+            if sid:
+                row = session.get(Task, sid)
+                if not row or row.user_id != user.id:
+                    continue  # unknown / cross-user → skip
+                server_updated = _aware(row.updated_at)
+                if (client_updated and server_updated
+                        and client_updated < server_updated):
+                    continue  # server copy is newer → keep it (newest-wins)
+                _apply_task_fields(session, user, row, data)
+                session.add(row)
+            else:
+                row = Task(
+                    user_id=user.id,
+                    title=(data.get("title") or "").strip() or "Untitled",
+                    created_at=datetime.now(timezone.utc),
+                )
+                _apply_task_fields(session, user, row, data)
+                session.add(row)
+                session.flush()  # assign the new id
+                cid = data.get("client_id")
+                if cid is not None:
+                    id_map[str(cid)] = row.id
+        for sid in deletes.get("tasks", []):
+            row = session.get(Task, sid)
+            if row and row.user_id == user.id:
+                session.delete(row)
+                _record_tombstone(session, user.id, "task", sid)
+        session.commit()
+    return JSONResponse({
+        "server_time": datetime.now(timezone.utc).isoformat(),
+        "id_map": id_map,
+    })
 
 
 @app.get("/me.json")
@@ -3415,6 +3558,7 @@ def delete_task(task_id: int, request: Request, user: User = Depends(require_log
         t = _own_task(session, task_id, user.id)
         cls_id = t.class_id
         session.delete(t)
+        _record_tombstone(session, user.id, "task", task_id)  # propagate to other devices
         session.commit()
     if "application/json" in request.headers.get("accept", ""):
         return JSONResponse({"deleted": task_id})
