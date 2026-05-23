@@ -183,4 +183,9 @@ export const api = {
         fd.append("occurrence_at", occurrenceAt);
         return request(`/tasks/${id}/end-after`, { method: "POST", body: fd });
     },
+    // ---- Local-first sync (step 2) ----
+    syncPull: (since) =>
+        request("/sync" + (since ? `?since=${encodeURIComponent(since)}` : "")),
+    syncPush: (payload) =>
+        request("/sync", { method: "POST", body: JSON.stringify(payload) }),
 };
