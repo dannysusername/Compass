@@ -38,17 +38,20 @@ def test_offline_toggle_queues_then_syncs_on_reconnect(signed_in_page, server_ur
     page.context.set_offline(True)
     row.locator(".todo-toggle").click()
     expect(row).to_have_class(re.compile(r"\bdone\b"))     # optimistic, kept (not rolled back)
-    assert _queue_len(page) == 1                            # queued for later
+    # the queue write is async (in the failed-toggle catch) — poll for it
+    page.wait_for_function("async () => (await window.CompassSync.getQueue()).length === 1")
 
     # Reconnect → sync.js 'online' handler replays the queue to the server.
     page.context.set_offline(False)
     page.wait_for_function("async () => (await window.CompassSync.getQueue()).length === 0")
 
-    # Server persisted it: a task completed today still renders (crossed-out).
-    page.goto(server_url + "/")
-    expect(page.locator(".todo-row[data-title='Off toggle']").first).to_have_class(
-        re.compile(r"\bdone\b")
+    # Verify the server actually persisted the completion (robust check via a
+    # fresh /sync pull — doesn't depend on how a completed task re-renders).
+    data = page.evaluate(
+        "async () => (await fetch('/sync', {credentials:'same-origin', headers:{Accept:'application/json'}})).json()"
     )
+    task = next(t for t in data["tasks"] if t["title"] == "Off toggle")
+    assert task["completed_at"], "offline toggle did not sync to the server"
 
 
 def test_offline_delete_queues_then_syncs_on_reconnect(signed_in_page, server_url):
@@ -68,6 +71,31 @@ def test_offline_delete_queues_then_syncs_on_reconnect(signed_in_page, server_ur
 
     page.goto(server_url + "/")
     expect(page.locator(".todo-row[data-title='Off delete']")).to_have_count(0)  # gone on server
+
+
+def test_offline_add_queues_then_syncs_on_reconnect(signed_in_page, server_url):
+    page = signed_in_page
+    page.goto(server_url + "/")
+    page.on("dialog", lambda d: d.accept())  # "Saved offline" alert
+
+    page.context.set_offline(True)
+    page.click("button[data-open-modal='add-task-modal']")
+    page.fill("#add-task-modal input[name='title']", "Added offline")
+    # Clear the auto-filled start so it can't be after Due (the add form's
+    # smart-default start would otherwise trip the start<due guard).
+    page.fill("#add-task-modal input[name='starts_at']", "")
+    page.fill("#add-task-modal input[name='due_at']", _today_iso(11))
+    page.click("#add-task-modal button[type='submit']")
+
+    page.wait_for_function("async () => (await window.CompassSync.getQueue()).length === 1")
+    q = page.evaluate("async () => await window.CompassSync.getQueue()")
+    assert q[0]["op"] == "upsert" and q[0]["data"]["client_id"]
+    assert q[0]["data"]["title"] == "Added offline"
+
+    page.context.set_offline(False)
+    page.wait_for_function("async () => (await window.CompassSync.getQueue()).length === 0")
+    page.goto(server_url + "/")
+    expect(page.locator(".todo-row[data-title='Added offline']").first).to_be_visible()
 
 
 def test_apply_to_dom_reinstates_a_queued_toggle(signed_in_page, server_url):

@@ -1120,6 +1120,29 @@
                 }
                 await softRefresh();
             } catch (err) {
+                // Offline: queue the new task so it's not lost — it syncs and
+                // appears on reconnect. (No optimistic row on the web yet, so
+                // we tell the user; toggle/delete of existing rows DO show
+                // offline.)
+                if (window.CompassSync && CompassSync.isOffline(err)) {
+                    await CompassSync.queueTaskUpsert({
+                        title,
+                        due_at: (dueInput && dueInput.value) || null,
+                        starts_at: (startsInput && startsInput.value) || null,
+                        is_all_day: !!(allDayCheckbox && allDayCheckbox.checked),
+                        rrule: (rruleSelect && rruleSelect.value) || '',
+                        tag_id: tagId ? Number(tagId) : null,
+                        class_id: classId || null,
+                        notes: (notesField && notesField.value.trim()) || null,
+                    });
+                    const addModal = form.closest('.modal-overlay');
+                    if (addModal) {
+                        addModal.hidden = true;
+                        document.body.classList.remove('modal-open');
+                    }
+                    alert("Saved offline — it'll sync and appear when you're back online.");
+                    return;
+                }
                 console.error('add-task failed:', err);
                 alert('Could not add task: ' + err.message);
                 // Form fields stay populated so the user can fix and resubmit.
