@@ -1910,9 +1910,13 @@ _PUSH_KINDS = {
 # resolves), events last. dict insertion order above is already correct.
 
 
-def _apply_push_fields(session: Session, user: User, row, data: dict, cfg: dict) -> None:
+def _apply_push_fields(session: Session, user: User, row, data: dict, cfg: dict,
+                       id_map: Optional[dict] = None) -> None:
     """Set allowed, validated fields on `row` from a pushed dict. Only keys
-    present in `data` are touched (partial-update friendly)."""
+    present in `data` are touched (partial-update friendly). `id_map` (flat
+    client_id→server_id, accumulated this push) lets an FK that points at a
+    row created offline in the SAME push resolve to its new server id — e.g.
+    a task whose tag_id is the client_id of a tag created in this batch."""
     for k in cfg["fields"]:
         if k not in data:
             continue
@@ -1927,6 +1931,8 @@ def _apply_push_fields(session: Session, user: User, row, data: dict, cfg: dict)
             except (TypeError, ValueError):
                 continue
         elif k in cfg["fks"]:
+            if id_map and isinstance(v, str) and v in id_map:
+                v = id_map[v]  # resolve a same-push temp id → real server id
             v = _validated_fk(session, cfg["fks"][k], v, user.id)
         setattr(row, k, v)
 
@@ -2006,6 +2012,7 @@ async def sync_push(request: Request, user: User = Depends(require_login)):
     changes = (payload or {}).get("changes") or {}
     deletes = (payload or {}).get("deletes") or {}
     id_map: dict[str, dict[str, int]] = {}
+    flat_map: dict[str, int] = {}  # client_id → server_id, all kinds, for FK resolution
     with Session(engine) as session:
         for kind, cfg in _PUSH_KINDS.items():
             Model = cfg["model"]
@@ -2023,18 +2030,19 @@ async def sync_push(request: Request, user: User = Depends(require_login)):
                     if (client_updated and server_updated
                             and client_updated < server_updated):
                         continue  # server copy is newer → keep it
-                    _apply_push_fields(session, user, row, data, cfg)
+                    _apply_push_fields(session, user, row, data, cfg, flat_map)
                     session.add(row)
                 else:
                     row = cfg["new"](session, user, data)
                     if row is None:
                         continue  # e.g. event whose class isn't the user's
-                    _apply_push_fields(session, user, row, data, cfg)
+                    _apply_push_fields(session, user, row, data, cfg, flat_map)
                     session.add(row)
                     session.flush()  # assign the new id
                     cid = data.get("client_id")
                     if cid is not None:
                         id_map.setdefault(kind, {})[str(cid)] = row.id
+                        flat_map[str(cid)] = row.id
             for sid in deletes.get(kind, []):
                 row = session.get(Model, sid)
                 if row and cfg["owns"](session, row, user):

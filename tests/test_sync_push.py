@@ -123,6 +123,25 @@ def test_push_event_with_foreign_class_is_skipped(auth_client, second_user_clien
     assert "x" not in r.json()["id_map"]  # creation skipped — class not owned
 
 
+def test_push_resolves_same_batch_temp_ids(auth_client):
+    """Offline you can create a tag/class AND a task that references it in one
+    push: the task's tag_id/class_id is the new row's client_id, and the
+    server resolves it to the freshly-created server id."""
+    r = auth_client.post("/sync", json={"changes": {
+        "tags": [{"client_id": "tag-tmp", "name": "Reading", "color": "#abc123",
+                  "updated_at": "2026-05-23T09:00:00+00:00"}],
+        "classes": [{"client_id": "cls-tmp", "code": "HIST200", "name": "History",
+                     "updated_at": "2026-05-23T09:00:00+00:00"}],
+        "tasks": [{"client_id": "task-tmp", "title": "Read ch.1",
+                   "tag_id": "tag-tmp", "class_id": "cls-tmp",
+                   "due_at": "2026-05-23T10:00", "updated_at": "2026-05-23T09:00:00+00:00"}],
+    }})
+    idm = r.json()["id_map"]
+    task = db_get(main.Task, idm["task-tmp"])
+    assert task.tag_id == idm["tag-tmp"]      # resolved temp tag id → real id
+    assert task.class_id == idm["cls-tmp"]    # resolved temp class id → real id
+
+
 def test_push_task_cannot_point_at_another_users_class(auth_client, second_user_client):
     # B makes a class; A pushes a task claiming B's class_id → must be nulled.
     second_user_client.post("/classes", data={"name": "Bio", "code": "BIO101"})
