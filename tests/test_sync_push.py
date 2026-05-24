@@ -68,6 +68,61 @@ def test_push_cross_user_is_rejected(auth_client, second_user_client):
     assert db_get(main.Task, tid).title == "A owns this"  # untouched
 
 
+def test_push_create_class_and_tag(auth_client):
+    r = auth_client.post("/sync", json={"changes": {
+        "classes": [{"client_id": "c1", "code": "CHEM101", "name": "Chemistry",
+                     "updated_at": "2026-05-23T09:00:00+00:00"}],
+        "tags": [{"client_id": "t1", "name": "Lab", "color": "#123456",
+                  "updated_at": "2026-05-23T09:00:00+00:00"}],
+    }})
+    assert r.status_code == 200
+    idm = r.json()["id_map"]
+    cls = db_get(main.Class, idm["c1"])
+    tag = db_get(main.Tag, idm["t1"])
+    assert cls and cls.code == "CHEM101"
+    assert tag and tag.name == "Lab" and tag.color == "#123456"
+
+
+def test_push_delete_class_tombstones(auth_client):
+    auth_client.post("/classes", data={"name": "Bye", "code": "BYE101"})
+    first = auth_client.get("/sync").json()
+    cid = next(c["id"] for c in first["classes"] if c["code"] == "BYE101")
+    cursor = first["server_time"]
+    auth_client.post("/sync", json={"deletes": {"classes": [cid]}})
+    assert db_get(main.Class, cid) is None
+    delta = auth_client.get("/sync", params={"since": cursor}).json()
+    assert any(d["kind"] == "class" and d["id"] == cid for d in delta["deletions"])
+
+
+def test_push_event_create_then_complete(auth_client):
+    auth_client.post("/classes", data={"name": "Sci", "code": "SCI101"})
+    cid = next(c["id"] for c in auth_client.get("/sync").json()["classes"]
+               if c["code"] == "SCI101")
+    r = auth_client.post("/sync", json={"changes": {"events": [
+        {"client_id": "e1", "class_id": cid, "title": "Lecture", "kind": "lecture",
+         "updated_at": "2026-05-23T09:00:00+00:00"},
+    ]}})
+    eid = r.json()["id_map"]["e1"]
+    ev = db_get(main.CalendarEvent, eid)
+    assert ev and ev.title == "Lecture" and ev.class_id == cid
+    # complete it via a newer push
+    auth_client.post("/sync", json={"changes": {"events": [
+        {"id": eid, "completed_at": "2026-05-23T10:00:00+00:00",
+         "updated_at": "2099-01-01T00:00:00+00:00"},
+    ]}})
+    assert db_get(main.CalendarEvent, eid).completed_at is not None
+
+
+def test_push_event_with_foreign_class_is_skipped(auth_client, second_user_client):
+    second_user_client.post("/classes", data={"name": "B", "code": "BCLASS"})
+    b_cid = second_user_client.get("/sync").json()["classes"][0]["id"]
+    r = auth_client.post("/sync", json={"changes": {"events": [
+        {"client_id": "x", "class_id": b_cid, "title": "sneaky",
+         "updated_at": "2026-05-23T09:00:00+00:00"},
+    ]}})
+    assert "x" not in r.json()["id_map"]  # creation skipped — class not owned
+
+
 def test_push_task_cannot_point_at_another_users_class(auth_client, second_user_client):
     # B makes a class; A pushes a task claiming B's class_id → must be nulled.
     second_user_client.post("/classes", data={"name": "Bio", "code": "BIO101"})

@@ -1813,12 +1813,12 @@ def _record_tombstone(session: Session, user_id: int, kind: str, item_id: int) -
     session.add(Tombstone(user_id=user_id, kind=kind, item_id=item_id))
 
 
-# Task fields a client may push (never id/user_id/created_at/updated_at).
-_TASK_PUSH_DT = {"starts_at", "due_at", "completed_at", "rrule_until"}
-_TASK_PUSH_FIELDS = (
-    "title", "notes", "starts_at", "due_at", "completed_at", "position",
-    "tag_id", "class_id", "rrule", "rrule_until", "rrule_exdates", "is_all_day",
-)
+def _truthy(v) -> bool:
+    """Coerce a pushed value to bool. JSON booleans pass through; be careful
+    with strings — bool('0') is True in Python, so map common falsey strings."""
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes", "on")
+    return bool(v)
 
 
 def _validated_fk(session: Session, Model, value, user_id: int) -> Optional[int]:
@@ -1836,26 +1836,98 @@ def _validated_fk(session: Session, Model, value, user_id: int) -> Optional[int]
     return pk
 
 
-def _apply_task_fields(session: Session, user: User, row: "Task", data: dict) -> None:
-    """Set the allowed, validated fields on a Task from a pushed dict.
-    Only keys present in `data` are touched (partial-update friendly)."""
-    for k in _TASK_PUSH_FIELDS:
+def _new_event(session: Session, user: User, data: dict):
+    """Create a CalendarEvent only if it names a class the user owns (events
+    are class-scoped + class_id is non-nullable). Returns None to skip."""
+    cid = _validated_fk(session, Class, data.get("class_id"), user.id)
+    cls = session.get(Class, cid) if cid else None
+    if not cls:
+        return None
+    return CalendarEvent(
+        class_id=cls.id, class_code=cls.code,
+        title=(data.get("title") or "").strip() or "Event",
+        kind=(data.get("kind") or "task"),
+    )
+
+
+# Per-kind PUSH config. `owns(session,row,user)` gates ownership; `new(...)`
+# builds a fresh row (or None to skip); `fields`/`dt`/`bools`/`ints`/`fks`
+# describe which columns a client may set and how to coerce them. Tasks/
+# classes/tags are user-scoped; events are scoped through their class.
+_PUSH_KINDS = {
+    "classes": {
+        "model": Class,
+        "fields": ("name", "code"),
+        "dt": set(), "bools": set(), "ints": set(), "fks": {},
+        "owns": lambda s, row, u: row.user_id == u.id,
+        "new": lambda s, u, d: Class(
+            user_id=u.id,
+            name=(d.get("name") or "").strip() or "Untitled",
+            code=(d.get("code") or "").strip() or "NEW"),
+        "tomb": "class",
+    },
+    "tags": {
+        "model": Tag,
+        "fields": ("name", "color", "is_system", "system_key"),
+        "dt": set(), "bools": {"is_system"}, "ints": set(), "fks": {},
+        "owns": lambda s, row, u: row.user_id == u.id,
+        "new": lambda s, u, d: Tag(
+            user_id=u.id,
+            name=(d.get("name") or "").strip() or "Tag",
+            color=(d.get("color") or "#888888")),
+        "tomb": "tag",
+    },
+    "tasks": {
+        "model": Task,
+        "fields": ("title", "notes", "starts_at", "due_at", "completed_at",
+                   "position", "tag_id", "class_id", "rrule", "rrule_until",
+                   "rrule_exdates", "is_all_day"),
+        "dt": {"starts_at", "due_at", "completed_at", "rrule_until"},
+        "bools": {"is_all_day"}, "ints": {"position"},
+        "fks": {"tag_id": Tag, "class_id": Class},
+        "owns": lambda s, row, u: row.user_id == u.id,
+        "new": lambda s, u, d: Task(
+            user_id=u.id,
+            title=(d.get("title") or "").strip() or "Untitled",
+            created_at=datetime.now(timezone.utc)),
+        "tomb": "task",
+    },
+    "events": {
+        "model": CalendarEvent,
+        # class_id is non-nullable + only set at create (via _new_event), so
+        # it's deliberately not an editable field here.
+        "fields": ("title", "starts_at", "ends_at", "kind", "completed_at",
+                   "position", "actionable", "source_text"),
+        "dt": {"starts_at", "ends_at", "completed_at"},
+        "bools": {"actionable"}, "ints": {"position"}, "fks": {},
+        "owns": lambda s, row, u: (lambda c: c is not None and c.user_id == u.id)(
+            s.get(Class, row.class_id)),
+        "new": _new_event,
+        "tomb": "event",
+    },
+}
+# Replay order: classes/tags before tasks (so a pushed task's class_id/tag_id
+# resolves), events last. dict insertion order above is already correct.
+
+
+def _apply_push_fields(session: Session, user: User, row, data: dict, cfg: dict) -> None:
+    """Set allowed, validated fields on `row` from a pushed dict. Only keys
+    present in `data` are touched (partial-update friendly)."""
+    for k in cfg["fields"]:
         if k not in data:
             continue
         v = data[k]
-        if k in _TASK_PUSH_DT:
+        if k in cfg["dt"]:
             v = parse_iso_dt(v) if v else None
-        elif k == "is_all_day":
-            v = bool(v)
-        elif k == "position":
+        elif k in cfg["bools"]:
+            v = _truthy(v)
+        elif k in cfg["ints"]:
             try:
                 v = int(v)
             except (TypeError, ValueError):
                 continue
-        elif k == "tag_id":
-            v = _validated_fk(session, Tag, v, user.id)
-        elif k == "class_id":
-            v = _validated_fk(session, Class, v, user.id)
+        elif k in cfg["fks"]:
+            v = _validated_fk(session, cfg["fks"][k], v, user.id)
         setattr(row, k, v)
 
 
@@ -1916,60 +1988,66 @@ def sync_pull(request: Request, user: User = Depends(require_login),
 
 @app.post("/sync")
 async def sync_push(request: Request, user: User = Depends(require_login)):
-    """Local-first step 2 — PUSH side (tasks). Body:
+    """Local-first step 2 — PUSH side (ALL kinds: classes, tags, tasks, events).
+    Body:
 
-        {"changes": {"tasks": [ {id?, client_id?, updated_at, ...fields} ]},
-         "deletes": {"tasks": [id, ...]}}
+        {"changes": {"<kind>": [ {id?, client_id?, updated_at, ...fields} ]},
+         "deletes": {"<kind>": [id, ...]}}
 
-    Upserts use **newest-wins**: a task with an `id` is updated only if the
-    pushed `updated_at` is not older than the server's (else the server copy
-    is kept). A task with no `id` is created and its `client_id` is mapped to
-    the new server id in the response (`id_map`) so the client can reconcile
-    its local row. Deletes hard-delete + write a tombstone so the removal
-    reaches other devices on pull. Cross-user / unknown ids are skipped.
-    (Classes/tags/events push is a later slice.)"""
+    Upserts are **newest-wins**: a row with an `id` is updated only if the
+    pushed `updated_at` is not older than the server's. A row with no `id` is
+    created and its `client_id` → new server id is returned in `id_map`
+    (keyed by kind) so the client reconciles its optimistic row. Deletes
+    hard-delete + write a tombstone so the removal reaches other devices on
+    pull. Cross-user / unknown ids (and FK refs the user doesn't own) are
+    skipped. Kinds are processed classes→tags→tasks→events so a pushed task's
+    class_id/tag_id resolves against rows created in the same push."""
     payload = await request.json()
     changes = (payload or {}).get("changes") or {}
     deletes = (payload or {}).get("deletes") or {}
-    id_map: dict[str, int] = {}
+    id_map: dict[str, dict[str, int]] = {}
     with Session(engine) as session:
-        for data in changes.get("tasks", []):
-            if not isinstance(data, dict):
-                continue
-            sid = data.get("id")
-            client_updated = _aware(parse_iso_dt(data.get("updated_at"))
-                                    if data.get("updated_at") else None)
-            if sid:
-                row = session.get(Task, sid)
-                if not row or row.user_id != user.id:
-                    continue  # unknown / cross-user → skip
-                server_updated = _aware(row.updated_at)
-                if (client_updated and server_updated
-                        and client_updated < server_updated):
-                    continue  # server copy is newer → keep it (newest-wins)
-                _apply_task_fields(session, user, row, data)
-                session.add(row)
-            else:
-                row = Task(
-                    user_id=user.id,
-                    title=(data.get("title") or "").strip() or "Untitled",
-                    created_at=datetime.now(timezone.utc),
-                )
-                _apply_task_fields(session, user, row, data)
-                session.add(row)
-                session.flush()  # assign the new id
-                cid = data.get("client_id")
-                if cid is not None:
-                    id_map[str(cid)] = row.id
-        for sid in deletes.get("tasks", []):
-            row = session.get(Task, sid)
-            if row and row.user_id == user.id:
-                session.delete(row)
-                _record_tombstone(session, user.id, "task", sid)
+        for kind, cfg in _PUSH_KINDS.items():
+            Model = cfg["model"]
+            for data in changes.get(kind, []):
+                if not isinstance(data, dict):
+                    continue
+                client_updated = _aware(parse_iso_dt(data.get("updated_at"))
+                                        if data.get("updated_at") else None)
+                sid = data.get("id")
+                if sid:
+                    row = session.get(Model, sid)
+                    if not row or not cfg["owns"](session, row, user):
+                        continue  # unknown / cross-user → skip
+                    server_updated = _aware(getattr(row, "updated_at", None))
+                    if (client_updated and server_updated
+                            and client_updated < server_updated):
+                        continue  # server copy is newer → keep it
+                    _apply_push_fields(session, user, row, data, cfg)
+                    session.add(row)
+                else:
+                    row = cfg["new"](session, user, data)
+                    if row is None:
+                        continue  # e.g. event whose class isn't the user's
+                    _apply_push_fields(session, user, row, data, cfg)
+                    session.add(row)
+                    session.flush()  # assign the new id
+                    cid = data.get("client_id")
+                    if cid is not None:
+                        id_map.setdefault(kind, {})[str(cid)] = row.id
+            for sid in deletes.get(kind, []):
+                row = session.get(Model, sid)
+                if row and cfg["owns"](session, row, user):
+                    session.delete(row)
+                    _record_tombstone(session, user.id, cfg["tomb"], sid)
         session.commit()
+    # Flatten id_map for back-compat (task clients read it flat); also expose
+    # the per-kind form. client_ids are globally unique on the client.
+    flat = {cid: sid for m in id_map.values() for cid, sid in m.items()}
     return JSONResponse({
         "server_time": datetime.now(timezone.utc).isoformat(),
-        "id_map": id_map,
+        "id_map": flat,
+        "id_map_by_kind": id_map,
     })
 
 
@@ -2305,14 +2383,19 @@ def delete_class(class_id: int, request: Request, user: User = Depends(require_l
         # in-memory parse_jobs dict — otherwise stale "done" entries linger
         # and confuse status pages for re-used IDs.
         deleted_syllabus_ids = [s.id for s in cls.syllabi]
-        # Detach tasks first so they survive the class deletion as
-        # Personal tasks. Without this, the FK would either cascade-delete
-        # them (old behavior) or fail.
+        # Events are cascade-deleted with the class — tombstone them (and the
+        # class) so other devices drop them on the next pull. Detached tasks
+        # keep their rows (class_id→None bumps their updated_at, so they sync
+        # as updates, not deletes).
+        deleted_event_ids = [e.id for e in cls.events]
         for t in cls.tasks:
             t.class_id = None
             session.add(t)
         session.flush()
         session.delete(cls)
+        _record_tombstone(session, user.id, "class", class_id)
+        for eid in deleted_event_ids:
+            _record_tombstone(session, user.id, "event", eid)
         session.commit()
     for sid in deleted_syllabus_ids:
         parse_jobs.pop(sid, None)
@@ -2509,6 +2592,7 @@ def delete_event(event_id: int, request: Request, user: User = Depends(require_l
         ev = _own_event(session, event_id, user.id)
         cls_id = ev.class_id
         session.delete(ev)
+        _record_tombstone(session, user.id, "event", event_id)  # propagate
         session.commit()
     if "application/json" in request.headers.get("accept", ""):
         return JSONResponse({"deleted": event_id})
@@ -3249,6 +3333,7 @@ async def delete_tag(tag_id: int, user: User = Depends(require_login)):
             t.tag_id = None
             session.add(t)
         session.delete(tag)
+        _record_tombstone(session, user.id, "tag", tag_id)  # propagate to other devices
         session.commit()
         return JSONResponse({"deleted": tag_id})
 
