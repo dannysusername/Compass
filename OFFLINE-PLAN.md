@@ -25,12 +25,18 @@ Status legend: ✅ done · �doing · ⬜ todo
 - ⬜ Generalize both queues to **all kinds** (class/tag/event upsert+delete), not just tasks.
 - ⬜ Offline reads for ALL views (extension: month + classes from mirror/cache; web: SW cache + applyToDom for every kind).
 
+## Phase 2.5 — Queues generalized to all kinds ✅ DONE
+Both `sync.js` files: `queueUpsert(kind,data)`/`queueDelete(kind,id)` + replay/push group by kind.
+
 ## Phase 3 — Wire every WRITE through the offline queue (web `todo.js` + extension handlers)
-Tasks: ✅ add · ✅ toggle · ✅ delete · ✅ **full edit modal** · ⬜ **recurring** (exclude / end-after via rrule_exdates / rrule_until) · ⬜ **reorder**.
-Classes: ⬜ create · ⬜ edit · ⬜ delete.
-Tags: ⬜ create · ⬜ edit · ⬜ delete.
-Events: ⬜ toggle · ⬜ edit · ⬜ delete · ⬜ clone.
-Settings: ⬜ timezone (already best-effort) · calendar-token regen (needs server — degrade).
+Tasks: ✅ add · ✅ toggle · ✅ delete · ✅ **full edit modal** · ⬜ recurring (exclude/end-after) · ⬜ reorder.
+Events: ✅ toggle · ✅ delete · ⬜ edit · ⬜ clone.
+Classes: ⬜ create · ⬜ edit · ⬜ delete.   ← web add-class is a plain form (needs a JS interceptor)
+Tags: ⬜ create · ⬜ edit · ⬜ delete.   ← **hard bit:** creating a tag *while tagging a task offline* needs cross-entity temp-id resolution in the server push (a task's tag_id/class_id pointing at a not-yet-created row).
+Settings: timezone already best-effort; calendar-token regen needs server (degrade).
+
+**Done + testable now (the daily workflow):** tasks fully offline (view/add/edit/check-off/delete) + events (check-off/delete), both apps, syncing on reconnect, server carries every entity.
+**Remaining = setup/occasional ops:** create/edit/delete classes & tags offline, recurring-rule edits, drag-reorder. Lower daily value; the tag-on-task case has real cross-entity complexity.
 
 ## Phase 4 — Reconnect + reliability
 - ✅ Replay queue on `online` (both).
