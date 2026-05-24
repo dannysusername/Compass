@@ -56,9 +56,10 @@
                 if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
             } catch (err) {
                 // Offline: keep the optimistic state, queue it for the next
-                // sync (tasks only — events are server-generated).
-                if (kind === 'task' && window.CompassSync && CompassSync.isOffline(err)) {
-                    await CompassSync.queueTaskUpsert({
+                // sync. Works for tasks AND events (both carry completed_at).
+                if ((kind === 'task' || kind === 'event')
+                    && window.CompassSync && CompassSync.isOffline(err)) {
+                    await CompassSync.queueUpsert(kind === 'event' ? 'events' : 'tasks', {
                         id: Number(id),
                         completed_at: !wasDone ? new Date().toISOString() : null,
                     });
@@ -171,10 +172,11 @@
                 if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
                 removeRowsFromUI(kind, id);
             } catch (err) {
-                // Offline: keep it removed + queue the delete (non-recurring
-                // tasks only; recurring this/future + events need the server).
-                if (kind === 'task' && window.CompassSync && CompassSync.isOffline(err)) {
-                    await CompassSync.queueTaskDelete(id);
+                // Offline: keep it removed + queue the delete. Plain tasks
+                // and events (recurring this/future still needs the server).
+                if ((kind === 'task' || kind === 'event') && !isRecurring
+                    && window.CompassSync && CompassSync.isOffline(err)) {
+                    await CompassSync.queueDelete(kind === 'event' ? 'events' : 'tasks', id);
                     removeRowsFromUI(kind, id);
                 } else {
                     alert(`Could not delete ${label}: ` + err.message);

@@ -84,49 +84,56 @@ export async function pull() {
 let _tmp = 0;
 const tempId = () => `tmp-${Date.now()}-${_tmp++}`;
 
-// Create/update a task locally (optimistic) + queue it for the next push.
-// A task with no id is a new one: gets a temp id locally and a client_id in
-// the queued change so push() can map it to the server id.
-export async function queueTaskUpsert(taskData) {
-    const isNew = taskData.id == null;
-    const id = isNew ? tempId() : taskData.id;
+// Create/update a row locally (optimistic) + queue it for the next push.
+// `kind` is the server/store plural key: tasks|classes|tags|events. A row
+// with no id is new: gets a temp id locally + a client_id in the queued
+// change so push() can map it to the real server id.
+export async function queueUpsert(kind, data) {
+    const isNew = data.id == null;
+    const id = isNew ? tempId() : data.id;
     const updated_at = new Date().toISOString();
-    const row = { ...taskData, id, updated_at };
-    await putAll("tasks", [row]);
-    const change = { ...taskData, updated_at };
+    const row = { ...data, id, updated_at };
+    await putAll(kind, [row]);
+    const change = { ...data, updated_at };
     if (isNew) { delete change.id; change.client_id = id; }
     await tx("pending", "readwrite", (s) =>
-        s.put({ op: "upsert", kind: "task", data: change, localId: id }));
+        s.put({ op: "upsert", kind, data: change, localId: id }));
     return row;
 }
 
-export async function queueTaskDelete(id) {
-    await del("tasks", id);
+export async function queueDelete(kind, id) {
     if (typeof id === "string" && id.startsWith("tmp-")) {
         // never synced to the server — just drop its queued upsert(s).
+        await del(kind, id);
         const all = await getAll("pending");
         const uids = all.filter((p) => p.localId === id).map((p) => p.uid);
         return tx("pending", "readwrite", (s) => { uids.forEach((u) => s.delete(u)); });
     }
-    return tx("pending", "readwrite", (s) => s.put({ op: "delete", kind: "task", id }));
+    const nid = Number(id);
+    await del(kind, nid);
+    return tx("pending", "readwrite", (s) => s.put({ op: "delete", kind, id: nid }));
 }
+
+// Back-compat task helpers.
+export const queueTaskUpsert = (data) => queueUpsert("tasks", data);
+export const queueTaskDelete = (id) => queueDelete("tasks", id);
 
 // ---- Push ----
 export async function push() {
     const pending = await getAll("pending");
     if (!pending.length) return { id_map: {} };
-    const changes = { tasks: [] };
-    const deletes = { tasks: [] };
+    const changes = {};
+    const deletes = {};
     for (const p of pending) {
-        if (p.kind !== "task") continue;
-        if (p.op === "delete") deletes.tasks.push(p.id);
-        else changes.tasks.push(p.data);
+        const k = p.kind === "task" ? "tasks" : p.kind;  // tolerate legacy singular
+        if (p.op === "delete") (deletes[k] = deletes[k] || []).push(p.id);
+        else (changes[k] = changes[k] || []).push(p.data);
     }
     const res = await api.syncPush({ changes, deletes });
     // Drop temp rows whose server id we now know — the next pull brings the
-    // canonical server row (its updated_at > our cursor).
+    // canonical server row. A temp id could live in any store.
     for (const clientId of Object.keys(res.id_map || {})) {
-        await del("tasks", clientId);
+        for (const st of DATA_STORES) await del(st, clientId);
     }
     await tx("pending", "readwrite", (s) => { pending.forEach((p) => s.delete(p.uid)); });
     return res;
@@ -175,6 +182,32 @@ async function _patchToday(mutate) {
 }
 
 const _isTask = (it, id) => it.kind === "task" && String(it.id) === String(id);
+const _isItem = (it, domKind, id) => it.kind === domKind && String(it.id) === String(id);
+const _serverKind = (domKind) => (domKind === "event" ? "events" : "tasks");
+
+// Kind-aware toggle/delete (works for task AND event rows). domKind is the
+// row's singular kind ("task"/"event"); the queue uses the plural server key.
+export async function offlineToggleItem(domKind, id, completed) {
+    await queueUpsert(_serverKind(domKind),
+        { id: Number(id), completed_at: completed ? new Date().toISOString() : null });
+    await _patchToday((view) => {
+        for (const b of (view.buckets || [])) {
+            for (const it of [...(b.items || []), ...(b.overdue_items || [])]) {
+                if (_isItem(it, domKind, id)) it.completed = completed;
+            }
+        }
+    });
+}
+
+export async function offlineDeleteItem(domKind, id) {
+    await queueDelete(_serverKind(domKind), id);
+    await _patchToday((view) => {
+        for (const b of (view.buckets || [])) {
+            b.items = (b.items || []).filter((it) => !_isItem(it, domKind, id));
+            b.overdue_items = (b.overdue_items || []).filter((it) => !_isItem(it, domKind, id));
+        }
+    });
+}
 
 const _bucketKey = (classId) =>
     (classId == null || classId === "" || String(classId) === "0") ? 0 : Number(classId);

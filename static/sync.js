@@ -53,33 +53,38 @@
 
     // Queue an upsert. For a new task pass no id → returns a temp id the
     // caller stamps on its optimistic row so replay can reconcile it.
-    async function queueTaskUpsert(data) {
+    // `kind` is the server's plural key: "tasks" | "classes" | "tags" | "events".
+    async function queueUpsert(kind, data) {
         const isNew = data.id == null;
         const id = isNew ? tempId() : data.id;
         const change = Object.assign({}, data, { updated_at: new Date().toISOString() });
         if (isNew) { delete change.id; change.client_id = id; }
-        await enqueue({ op: "upsert", data: change, localId: id });
+        await enqueue({ op: "upsert", kind, data: change, localId: id });
         return id;
     }
-    async function queueTaskDelete(id) {
+    async function queueDelete(kind, id) {
         if (typeof id === "string" && id.startsWith("tmp-")) {
             // Never synced — just drop its queued upsert(s).
             const all = await getQueue();
             await removeMany(all.filter((e) => e.localId === id).map((e) => e.uid));
             return;
         }
-        await enqueue({ op: "delete", id: Number(id) });
+        await enqueue({ op: "delete", kind, id: Number(id) });
     }
+    // Back-compat task helpers.
+    const queueTaskUpsert = (data) => queueUpsert("tasks", data);
+    const queueTaskDelete = (id) => queueDelete("tasks", id);
 
     // Replay the queue to the server. Returns the id_map (temp → server id).
     async function replay() {
         const pending = await getQueue();
         if (!pending.length) return { id_map: {} };
-        const changes = { tasks: [] };
-        const deletes = { tasks: [] };
+        const changes = {};
+        const deletes = {};
         for (const e of pending) {
-            if (e.op === "delete") deletes.tasks.push(e.id);
-            else changes.tasks.push(e.data);
+            const kind = e.kind || "tasks";
+            if (e.op === "delete") (deletes[kind] = deletes[kind] || []).push(e.id);
+            else (changes[kind] = changes[kind] || []).push(e.data);
         }
         const r = await fetch("/sync", {
             method: "POST",
@@ -129,5 +134,8 @@
         applyToDom();
     });
 
-    global.CompassSync = { queueTaskUpsert, queueTaskDelete, replay, applyToDom, isOffline, getQueue };
+    global.CompassSync = {
+        queueUpsert, queueDelete, queueTaskUpsert, queueTaskDelete,
+        replay, applyToDom, isOffline, getQueue,
+    };
 })(window);

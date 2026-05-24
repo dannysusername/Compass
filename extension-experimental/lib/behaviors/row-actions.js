@@ -7,7 +7,7 @@ import { api, NotAuthenticated } from "../api.js";
 import { showLogin } from "../nav.js";
 import { showRecurringSheet } from "./recurring-sheet.js";
 import { load } from "../views/index.js";
-import { offlineMarkTask, offlineDeleteTask, isOfflineError } from "../sync.js";
+import { offlineToggleItem, offlineDeleteItem, isOfflineError } from "../sync.js";
 
 export async function onToggle(rowEl) {
     const kind = rowEl.dataset.kind;
@@ -20,10 +20,9 @@ export async function onToggle(rowEl) {
         else await api.toggleTask(id);
     } catch (err) {
         if (err instanceof NotAuthenticated) { setRowDone(rowEl, wasDone); showLogin(); return; }
-        // Offline: keep the optimistic state, queue it for the next sync.
-        // (Events are server-generated — no offline write, so roll back.)
-        if (kind === "task" && isOfflineError(err)) {
-            await offlineMarkTask(id, !wasDone);
+        // Offline: keep the optimistic state, queue it (tasks AND events).
+        if ((kind === "task" || kind === "event") && isOfflineError(err)) {
+            await offlineToggleItem(kind, id, !wasDone);
         } else {
             setRowDone(rowEl, wasDone);  // genuine server error → revert
         }
@@ -81,11 +80,11 @@ export async function runDelete(rowEl, mode) {
             showLogin();
             return;
         }
-        // Offline delete of a plain task: keep it removed + queue the
-        // delete for the next sync. (Recurring this/future and events
-        // need the server, so those revert.)
-        if (kind === "task" && mode === "all" && !rowEl.dataset.rrule && isOfflineError(err)) {
-            await offlineDeleteTask(id);
+        // Offline delete of a plain task/event: keep it removed + queue the
+        // delete. (Recurring this/future still needs the server, so revert.)
+        if ((kind === "task" || kind === "event") && mode === "all"
+                && !rowEl.dataset.rrule && isOfflineError(err)) {
+            await offlineDeleteItem(kind, id);
             return;
         }
         if (parent) parent.insertBefore(rowEl, next);  // revert
