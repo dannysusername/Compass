@@ -102,6 +102,32 @@ test.describe("offline editing + boot", () => {
         await context.close();
     });
 
+    test("offline full edit queues the changed fields", async () => {
+        const { context, sidePanel } = await launchPanel();
+        await showTodayWithTask(context, sidePanel);
+        await context.route("**/tasks/*/details.json", (route) =>
+            route.fulfill({ status: 200, contentType: "application/json",
+                body: JSON.stringify({ rrule_until: "", alerts: [], attachments: [] }) }));
+        await context.route("**/tasks/*/edit", (route) => route.abort());  // offline
+
+        // open the editor for the task row, change the title, save
+        await sidePanel.evaluate(async () => {
+            const row = document.querySelector('li.todo-row[data-id="1"]');
+            const mod = await import("./lib/forms/edit-task.js");
+            await mod.showEditor(row);
+        });
+        await expect(sidePanel.locator("#editor")).toBeVisible();
+        await sidePanel.locator("#edit-form input[name='title']").fill("Edited offline");
+        await sidePanel.locator("#edit-form button[type='submit']").click();
+
+        await expect.poll(async () => {
+            const s = await syncState(sidePanel);
+            const up = s.pending.find((p) => p.op === "upsert" && p.data && p.data.id === 1);
+            return up && up.data.title;
+        }).toBe("Edited offline");
+        await context.close();
+    });
+
     test("offline boot shows the app from cache, not the login screen", async () => {
         const { context, sidePanel } = await launchPanel();  // online boot caches `me`
         await sidePanel.waitForTimeout(400);                 // let the cache write land

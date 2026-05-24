@@ -219,6 +219,25 @@ export async function offlineMarkTask(id, completed) {
     });
 }
 
+// Full offline edit of an existing task: queue the changed fields + patch
+// the cached Today item so the edit shows + survives a reload. A class_id
+// change updates the field in place; bucket placement reconciles on the
+// next online pull. (Reminders/alerts are separate rows — not synced here.)
+export async function offlineEditTask(id, fields) {
+    await queueTaskUpsert({ id: Number(id), ...fields });
+    const keys = ["title", "due_at", "starts_at", "tag_id", "notes",
+                  "is_all_day", "rrule", "rrule_until", "class_id"];
+    await _patchToday((view) => {
+        for (const b of (view.buckets || [])) {
+            for (const it of [...(b.items || []), ...(b.overdue_items || [])]) {
+                if (_isTask(it, id)) {
+                    for (const k of keys) if (k in fields) it[k] = fields[k];
+                }
+            }
+        }
+    });
+}
+
 export async function offlineDeleteTask(id) {
     await queueTaskDelete(Number(id));
     await _patchToday((view) => {

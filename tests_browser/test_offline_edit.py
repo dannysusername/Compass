@@ -98,6 +98,29 @@ def test_offline_add_queues_then_syncs_on_reconnect(signed_in_page, server_url):
     expect(page.locator(".todo-row[data-title='Added offline']").first).to_be_visible()
 
 
+def test_offline_full_edit_queues_then_syncs(signed_in_page, server_url):
+    page = signed_in_page
+    row = _make_task(page, server_url, "Edit me offline")
+    expect(row).to_be_visible()
+    tid = int(row.get_attribute("data-id"))
+
+    page.context.set_offline(True)
+    row.locator(".todo-row-main").click()      # open the drawer
+    row.locator(".todo-edit").click()          # open the edit modal
+    expect(page.locator("#edit-task-modal")).to_be_visible()
+    page.fill("#edit-task-modal input[name='title']", "Edited while offline")
+    page.click("#edit-task-modal button[type='submit']")
+    page.wait_for_function("async () => (await window.CompassSync.getQueue()).length === 1")
+
+    page.context.set_offline(False)
+    page.wait_for_function("async () => (await window.CompassSync.getQueue()).length === 0")
+    data = page.evaluate(
+        "async () => (await fetch('/sync', {credentials:'same-origin', headers:{Accept:'application/json'}})).json()"
+    )
+    task = next(t for t in data["tasks"] if t["id"] == tid)
+    assert task["title"] == "Edited while offline", "offline edit did not sync"
+
+
 def test_apply_to_dom_reinstates_a_queued_toggle(signed_in_page, server_url):
     """applyToDom re-marks a queued toggle on a freshly-rendered page (this is
     what makes an offline edit survive a reload behind the service worker)."""

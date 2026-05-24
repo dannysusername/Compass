@@ -13,12 +13,11 @@ Status legend: ✅ done · �doing · ⬜ todo
 
 ---
 
-## Phase 1 — Server: make `/sync` carry every entity
+## Phase 1 — Server: make `/sync` carry every entity ✅ DONE
 - ✅ Pull (`GET /sync`) returns classes/tags/tasks/events + deletions.
-- ✅ Push (`POST /sync`) for **tasks** (newest-wins, id-map, ownership).
-- ⬜ Push for **classes**, **tags**, **events** (field allow-lists + ownership + newest-wins + id-map per kind).
-- ⬜ Tombstones on **class/tag/event** delete routes (task delete already does).
-- ⬜ Tests: `tests/test_sync_push.py` extended to all kinds.
+- ✅ Push (`POST /sync`) for tasks AND classes/tags/events (`_PUSH_KINDS` config).
+- ✅ Tombstones on class/tag/event delete routes.
+- ✅ Tests: `tests/test_sync_push.py` (9 pass).
 
 ## Phase 2 — Shared client sync engine (both surfaces)
 - ✅ Extension IndexedDB mirror + queue + reconnect (`lib/sync.js`).
@@ -27,7 +26,7 @@ Status legend: ✅ done · �doing · ⬜ todo
 - ⬜ Offline reads for ALL views (extension: month + classes from mirror/cache; web: SW cache + applyToDom for every kind).
 
 ## Phase 3 — Wire every WRITE through the offline queue (web `todo.js` + extension handlers)
-Tasks: ✅ add · ✅ toggle · ✅ delete · ⬜ **full edit modal** · ⬜ **recurring** (exclude / end-after via rrule_exdates / rrule_until) · ⬜ **reorder**.
+Tasks: ✅ add · ✅ toggle · ✅ delete · ✅ **full edit modal** · ⬜ **recurring** (exclude / end-after via rrule_exdates / rrule_until) · ⬜ **reorder**.
 Classes: ⬜ create · ⬜ edit · ⬜ delete.
 Tags: ⬜ create · ⬜ edit · ⬜ delete.
 Events: ⬜ toggle · ⬜ edit · ⬜ delete · ⬜ clone.

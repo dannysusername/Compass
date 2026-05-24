@@ -707,6 +707,39 @@
                     });
                 });
             } catch (err) {
+                // Offline: queue the full edit + patch the row optimistically.
+                // (Reminders/alerts are separate rows, not synced offline yet.)
+                if (window.CompassSync && CompassSync.isOffline(err)) {
+                    await CompassSync.queueTaskUpsert({
+                        id: Number(id),
+                        title,
+                        due_at: due || null,
+                        starts_at: starts || null,
+                        tag_id: tagId ? Number(tagId) : null,
+                        notes: notesField ? (notesField.value || null) : null,
+                        class_id: newClassId || null,
+                        rrule: (rruleSelect && rruleSelect.value) || '',
+                        rrule_until: untilValue || null,
+                        is_all_day: !!(allDayCheckbox && allDayCheckbox.checked),
+                    });
+                    const modal = document.getElementById('edit-task-modal');
+                    if (modal) {
+                        modal.hidden = true;
+                        document.body.classList.remove('modal-open');
+                    }
+                    forEachScope((root) => {
+                        root.querySelectorAll(
+                            `.todo-row[data-kind="task"][data-id="${id}"]`
+                        ).forEach((row) => {
+                            row.dataset.title = title;
+                            row.dataset.dueAt = due || '';
+                            row.dataset.startsAt = starts || '';
+                            const titleEl = row.querySelector('.todo-title');
+                            if (titleEl) titleEl.textContent = title;
+                        });
+                    });
+                    return;
+                }
                 alert('Could not save: ' + err.message);
             }
         });

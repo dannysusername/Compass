@@ -22,6 +22,7 @@ import { alertLabel, formatLocal, formatLocalDate, addFilesToBuffer } from "../u
 import { isItemOverdue } from "../views/row.js";
 import { load } from "../views/index.js";
 import { showRecurringSheet } from "../behaviors/recurring-sheet.js";
+import { offlineEditTask, isOfflineError } from "../sync.js";
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -516,6 +517,24 @@ export function bindEditTask() {
             if (err instanceof NotAuthenticated) {
                 showLogin();
                 hideEditor();
+                return;
+            }
+            // Offline: queue the full edit + patch the cached view, then
+            // close. (Attachments need the server, so they're skipped offline.)
+            if (isOfflineError(err)) {
+                await offlineEditTask(id, {
+                    title,
+                    due_at: editForm.due_at.value || null,
+                    starts_at: editForm.starts_at.value || null,
+                    tag_id: editForm.tag_id.value ? Number(editForm.tag_id.value) : null,
+                    notes: editForm.notes.value || null,
+                    class_id: editForm.class_id.value || null,
+                    rrule: editForm.rrule.value || "",
+                    is_all_day: editForm.is_all_day.checked,
+                });
+                await load();
+                hideEditor();
+                showToast("Saved offline — will sync", "success");
                 return;
             }
             setEditStatus("Couldn't save: " + err.message, "error");
