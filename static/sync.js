@@ -104,12 +104,187 @@
         return res;
     }
 
-    // Re-apply pending toggles/deletes to the freshly-loaded page so an
-    // offline edit survives a reload (added rows are left to the next
-    // online refresh — injecting a server-styled row offline is brittle).
+    // ---- Optimistic row rendering (offline ADD) ----
+    // The site is server-rendered, so an offline-added task has no row until a
+    // reload reaches the server. These build a row matching templates/_today_list.html
+    // (render_item) in JS so the task shows the instant it's added offline, and
+    // survives an offline reload (applyToDom re-injects it from the queue). On
+    // reconnect a softRefresh swaps the whole list for the canonical server HTML.
+    const _bucketKey = (classId) =>
+        (classId == null || classId === "" || String(classId) === "0") ? "0" : String(classId);
+
+    function _classLabel(classId) {
+        if (_bucketKey(classId) === "0") return { code: "Personal", name: "", isPersonal: true };
+        const opt = document.querySelector(`select[name="class_id"] option[value="${classId}"]`);
+        if (opt && opt.textContent.includes("—")) {
+            const parts = opt.textContent.split("—");
+            return { code: parts[0].trim(), name: parts.slice(1).join("—").trim(), isPersonal: false };
+        }
+        return { code: "Class", name: "", isPersonal: false };
+    }
+
+    function _makeClassBlock(classId) {
+        const key = _bucketKey(classId);
+        const label = _classLabel(classId);
+        const block = document.createElement("div");
+        block.className = "class-block";
+        block.setAttribute("data-bucket-key", key);
+        const headRow = document.createElement("div");
+        headRow.className = "class-block-head-row";
+        const grip = document.createElement("span");
+        grip.className = "class-block-drag";
+        grip.title = "Drag to reorder this class";
+        grip.innerHTML = '<span class="class-block-drag-grip" aria-hidden="true"></span>';
+        headRow.appendChild(grip);
+        let head;
+        if (label.isPersonal) {
+            head = document.createElement("div");
+            head.className = "class-block-head class-block-head-personal";
+            const code = document.createElement("span");
+            code.className = "class-code"; code.textContent = label.code;
+            head.appendChild(code);
+        } else {
+            head = document.createElement("a");
+            head.href = "/classes/" + key;
+            head.className = "class-block-head";
+            const code = document.createElement("span");
+            code.className = "class-code"; code.textContent = label.code;
+            const name = document.createElement("span");
+            name.className = "class-name"; name.textContent = label.name;
+            head.appendChild(code); head.appendChild(name);
+        }
+        headRow.appendChild(head);
+        block.appendChild(headRow);
+        const ul = document.createElement("ul");
+        ul.className = "todo-list todo-list-draggable";
+        block.appendChild(ul);
+        return block;
+    }
+
+    function buildTaskRow(data) {
+        const li = document.createElement("li");
+        li.className = "todo-row";
+        li.setAttribute("data-kind", "task");
+        li.setAttribute("data-id", String(data.id));
+        li.setAttribute("data-class-id", _bucketKey(data.class_id) === "0" ? "" : String(data.class_id));
+        li.setAttribute("data-title", data.title || "");
+        li.setAttribute("data-due-at", data.due_at || "");
+        li.setAttribute("data-starts-at", data.starts_at || "");
+        li.setAttribute("data-tag-id", data.tag_id != null ? String(data.tag_id) : "");
+        li.setAttribute("data-sub-kind-id", "");
+        li.setAttribute("data-rrule", data.rrule || "");
+        li.setAttribute("data-is-all-day", data.is_all_day ? "1" : "");
+        li.setAttribute("data-notes", data.notes || "");
+
+        const main = document.createElement("div");
+        main.className = "todo-row-main";
+        main.setAttribute("data-row-toggle", "");
+        main.setAttribute("aria-expanded", "false");
+        main.setAttribute("tabindex", "0");
+        main.setAttribute("role", "button");
+        main.setAttribute("aria-label", (data.title || "") + " — tap for actions");
+
+        const handle = document.createElement("span");
+        handle.className = "todo-drag-handle";
+        handle.title = "Drag to reorder priority";
+        handle.innerHTML = '<span class="todo-burger" aria-hidden="true"></span>';
+        main.appendChild(handle);
+
+        const toggle = document.createElement("button");
+        toggle.type = "button";
+        toggle.className = "todo-toggle";
+        toggle.setAttribute("aria-pressed", "false");
+        toggle.setAttribute("aria-label", "Toggle done");
+        toggle.innerHTML = '<span class="todo-circle"></span>';
+        main.appendChild(toggle);
+
+        const titleEl = document.createElement("span");
+        titleEl.className = "todo-title";
+        titleEl.textContent = data.title || "";
+        main.appendChild(titleEl);
+
+        if (data.is_all_day) {
+            const w = document.createElement("span");
+            w.className = "todo-when"; w.textContent = "All day";
+            main.appendChild(w);
+        } else if (data.due_at && data.due_at.length >= 16) {
+            const hm = data.due_at.slice(11, 16);
+            if (hm && hm !== "00:00") {
+                const w = document.createElement("span");
+                w.className = "todo-when"; w.textContent = hm;
+                main.appendChild(w);
+            }
+        }
+        if (data.tag_id != null && data.tag_id !== "") {
+            const opt = document.querySelector(`select[name="tag_id"] option[value="${data.tag_id}"]`);
+            if (opt) {
+                const pill = document.createElement("span");
+                pill.className = "todo-tag";
+                const color = opt.getAttribute("data-color");
+                if (color) pill.style.setProperty("--tag-color", color);
+                pill.textContent = opt.textContent;
+                main.appendChild(pill);
+            }
+        }
+        li.appendChild(main);
+
+        const drawer = document.createElement("div");
+        drawer.className = "todo-drawer";
+        drawer.hidden = true;
+        if (data.notes && String(data.notes).trim()) {
+            const n = document.createElement("div");
+            n.className = "todo-notes"; n.textContent = data.notes;
+            drawer.appendChild(n);
+        }
+        const actions = document.createElement("div");
+        actions.className = "todo-drawer-actions";
+        const edit = document.createElement("button");
+        edit.type = "button"; edit.className = "todo-edit";
+        edit.setAttribute("data-id", String(data.id)); edit.textContent = "✎ Edit";
+        const del = document.createElement("button");
+        del.type = "button"; del.className = "todo-del";
+        del.setAttribute("data-id", String(data.id)); del.setAttribute("data-kind", "task");
+        del.textContent = "× Delete";
+        actions.appendChild(edit); actions.appendChild(del);
+        drawer.appendChild(actions);
+        li.appendChild(drawer);
+        return li;
+    }
+
+    // Place an optimistic task row in the right class bucket on the today list,
+    // creating the bucket (and the container, replacing the "Nothing for today"
+    // empty state) when needed. Returns the row, or null if not on a list page
+    // or the row is already present. Caller re-binds interactions afterward.
+    function injectTaskRow(data) {
+        const section = document.querySelector(".today-list-block");
+        if (!section) return null;
+        if (data.id != null && document.querySelector(`.todo-row[data-id="${data.id}"]`)) return null;
+        let container = section.querySelector("[data-class-block-list]");
+        if (!container) {
+            container = document.createElement("div");
+            container.className = "class-block-list";
+            container.setAttribute("data-class-block-list", "");
+            const empty = section.querySelector("p.empty");
+            if (empty) empty.replaceWith(container); else section.appendChild(container);
+        }
+        const key = _bucketKey(data.class_id);
+        let block = container.querySelector(`.class-block[data-bucket-key="${key}"]`);
+        if (!block) { block = _makeClassBlock(data.class_id); container.appendChild(block); }
+        const ul = block.querySelector("ul.todo-list");
+        if (!ul) return null;
+        const row = buildTaskRow(data);
+        ul.appendChild(row);
+        return row;
+    }
+
+    // Re-apply pending edits to the freshly-loaded page so an offline change
+    // survives a reload behind the service worker: toggles re-marked, deletes
+    // re-removed, and offline-added tasks re-injected (matched on client_id so
+    // the next replay reconciles them to their server id).
     async function applyToDom() {
         let pending;
         try { pending = await getQueue(); } catch (_) { return; }
+        let injected = false;
         for (const e of pending) {
             if (e.op === "delete") {
                 document.querySelectorAll(`.todo-row[data-id="${e.id}"]`).forEach((r) => r.remove());
@@ -120,14 +295,28 @@
                     const c = row.querySelector(".todo-toggle");
                     if (c) c.setAttribute("aria-pressed", done ? "true" : "false");
                 });
+            } else if (e.op === "upsert" && e.kind === "tasks" && e.data
+                       && e.data.id == null && e.data.client_id && e.data.title) {
+                if (injectTaskRow({ ...e.data, id: e.data.client_id })) injected = true;
             }
         }
+        if (injected && typeof window.bindTodoToggles === "function") window.bindTodoToggles();
     }
 
-    // Flush the queue when the connection returns. No reload needed — the
-    // optimistic DOM already reflects the edits, and replay() reconciles any
-    // temp ids → server ids in place.
-    global.addEventListener("online", () => { replay().catch(() => {}); });
+    // Flush the queue when the connection returns, then swap the today list
+    // for the server's canonical HTML so offline-added rows (which carried a
+    // temp id + minimal optimistic markup) become real, fully-styled rows
+    // without a manual refresh. Only refresh if something actually flushed.
+    global.addEventListener("online", () => {
+        getQueue().then((q) => {
+            const had = q.length;
+            return replay().then(() => {
+                if (had && typeof window.compassSoftRefresh === "function") {
+                    window.compassSoftRefresh();
+                }
+            });
+        }).catch(() => {});
+    });
     // On load, replay anything left over (online) or re-apply it (offline).
     global.addEventListener("DOMContentLoaded", () => {
         if (navigator.onLine) replay().catch(() => {});
@@ -136,6 +325,6 @@
 
     global.CompassSync = {
         queueUpsert, queueDelete, queueTaskUpsert, queueTaskDelete,
-        replay, applyToDom, isOffline, getQueue,
+        replay, applyToDom, isOffline, getQueue, injectTaskRow, buildTaskRow,
     };
 })(window);

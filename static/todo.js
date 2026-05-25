@@ -1160,7 +1160,7 @@
                 // we tell the user; toggle/delete of existing rows DO show
                 // offline.)
                 if (window.CompassSync && CompassSync.isOffline(err)) {
-                    await CompassSync.queueTaskUpsert({
+                    const offlineData = {
                         title,
                         due_at: (dueInput && dueInput.value) || null,
                         starts_at: (startsInput && startsInput.value) || null,
@@ -1169,13 +1169,21 @@
                         tag_id: tagId ? Number(tagId) : null,
                         class_id: classId || null,
                         notes: (notesField && notesField.value.trim()) || null,
-                    });
+                    };
+                    // Queue it, then drop an optimistic row in immediately (temp
+                    // id = the queue's client_id, so replay reconciles it). On
+                    // reconnect compassSoftRefresh swaps in the canonical row.
+                    const tempId = await CompassSync.queueTaskUpsert(offlineData);
+                    if (CompassSync.injectTaskRow) {
+                        CompassSync.injectTaskRow({ ...offlineData, id: tempId });
+                        bindAll();
+                    }
                     const addModal = form.closest('.modal-overlay');
                     if (addModal) {
                         addModal.hidden = true;
                         document.body.classList.remove('modal-open');
                     }
-                    alert("Saved offline — it'll sync and appear when you're back online.");
+                    alert("Saved offline — it'll sync when you're back online.");
                     return;
                 }
                 console.error('add-task failed:', err);
@@ -1677,4 +1685,7 @@
     }
     bindAll();
     window.bindTodoToggles = bindAll;
+    // Exposed so static/sync.js can re-render the canonical today list after it
+    // flushes the offline queue on reconnect (replacing optimistic temp rows).
+    window.compassSoftRefresh = softRefresh;
 })();

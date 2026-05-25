@@ -98,6 +98,35 @@ def test_offline_add_queues_then_syncs_on_reconnect(signed_in_page, server_url):
     expect(page.locator(".todo-row[data-title='Added offline']").first).to_be_visible()
 
 
+def test_offline_add_shows_optimistic_row_immediately(signed_in_page, server_url):
+    """The bug a user hit: an offline-added task didn't appear in the list until
+    a manual refresh. It must show the instant it's added (optimistic row), and
+    stay after reconnect once the canonical server row swaps in."""
+    page = signed_in_page
+    page.goto(server_url + "/")
+    page.on("dialog", lambda d: d.accept())  # "Saved offline" alert
+
+    page.context.set_offline(True)
+    page.click("button[data-open-modal='add-task-modal']")
+    page.fill("#add-task-modal input[name='title']", "Shows offline")
+    page.fill("#add-task-modal input[name='starts_at']", "")
+    page.fill("#add-task-modal input[name='due_at']", _today_iso(11))
+    page.click("#add-task-modal button[type='submit']")
+
+    # Visible WHILE STILL OFFLINE — no reload, no server round-trip.
+    row = page.locator(".todo-row[data-title='Shows offline']").first
+    expect(row).to_be_visible()
+    # and it's a real interactive row (toggle/edit/delete present)
+    expect(row.locator(".todo-toggle")).to_have_count(1)
+    expect(row.locator(".todo-edit")).to_have_count(1)
+
+    # Reconnect → queue flushes and the canonical row takes its place; the task
+    # stays visible without the user touching anything.
+    page.context.set_offline(False)
+    page.wait_for_function("async () => (await window.CompassSync.getQueue()).length === 0")
+    expect(page.locator(".todo-row[data-title='Shows offline']").first).to_be_visible()
+
+
 def test_offline_full_edit_queues_then_syncs(signed_in_page, server_url):
     page = signed_in_page
     row = _make_task(page, server_url, "Edit me offline")
