@@ -60,7 +60,7 @@
                 if ((kind === 'task' || kind === 'event')
                     && window.CompassSync && CompassSync.isOffline(err)) {
                     await CompassSync.queueUpsert(kind === 'event' ? 'events' : 'tasks', {
-                        id: Number(id),
+                        id,  // raw — queueUpsert keeps temp ids, coerces real ids
                         completed_at: !wasDone ? new Date().toISOString() : null,
                     });
                 } else {
@@ -713,7 +713,7 @@
                 // (Reminders/alerts are separate rows, not synced offline yet.)
                 if (window.CompassSync && CompassSync.isOffline(err)) {
                     await CompassSync.queueTaskUpsert({
-                        id: Number(id),
+                        id,  // raw — temp ids merge into the offline create
                         title,
                         due_at: due || null,
                         starts_at: starts || null,

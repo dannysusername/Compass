@@ -128,6 +128,29 @@ test.describe("offline editing + boot", () => {
         await context.close();
     });
 
+    test("create offline then edit several times → ONE pending create (no duplicates)", async () => {
+        // Regression for the duplicate-task bug: editing a still-offline task
+        // (temp id) must MERGE into the queued create, not stack new changes.
+        const { context, sidePanel } = await launchPanel();
+        const result = await sidePanel.evaluate(async () => {
+            const s = await import("./lib/sync.js");
+            await s._resetForTests();
+            const row = await s.queueTaskUpsert({ title: "Multi", due_at: "2026-05-10T09:00" });
+            const tmp = row.id;                              // temp id, never synced
+            await s.offlineEditTask(tmp, { due_at: "2026-05-10T10:00" });
+            await s.offlineEditTask(tmp, { due_at: "2026-05-10T14:00" });
+            await s.offlineEditTask(tmp, { due_at: "2026-05-10T16:00" });
+            return { pending: await s.local.pending(), tmp };
+        });
+        const ups = result.pending.filter((p) => p.op === "upsert");
+        expect(ups.length).toBe(1);                          // collapsed into ONE
+        expect(ups[0].data.client_id).toBe(result.tmp);      // still a create
+        expect(ups[0].data.id).toBeUndefined();              // not an update
+        expect(ups[0].data.title).toBe("Multi");             // create field preserved
+        expect(ups[0].data.due_at).toBe("2026-05-10T16:00"); // final date wins
+        await context.close();
+    });
+
     test("offline boot shows the app from cache, not the login screen", async () => {
         const { context, sidePanel } = await launchPanel();  // online boot caches `me`
         await sidePanel.waitForTimeout(400);                 // let the cache write land

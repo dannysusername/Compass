@@ -50,17 +50,36 @@
 
     let _tmp = 0;
     const tempId = () => `tmp-${Date.now()}-${_tmp++}`;
+    const isTempId = (v) => typeof v === "string" && v.startsWith("tmp-");
 
-    // Queue an upsert. For a new task pass no id → returns a temp id the
-    // caller stamps on its optimistic row so replay can reconcile it.
-    // `kind` is the server's plural key: "tasks" | "classes" | "tags" | "events".
+    // Queue an upsert and return the row's local id. A row with no id is new:
+    // it gets a temp id + a client_id so replay can map it to the server id.
+    //
+    // CRUCIAL: repeated writes to the SAME row — including editing a task that
+    // was created offline and only has a temp id — MERGE into one pending
+    // change keyed by localId, instead of stacking up. Without this, creating a
+    // task offline and then editing its date replayed as several brand-new
+    // tasks on reconnect (the duplicate-rows-with-weird-dates bug): each edit
+    // coerced the temp id to NaN and enqueued a fresh create.
+    // `kind` is the server plural key: "tasks" | "classes" | "tags" | "events".
     async function queueUpsert(kind, data) {
-        const isNew = data.id == null;
-        const id = isNew ? tempId() : data.id;
+        const raw = data.id;
+        const isNew = raw == null;
+        const isTemp = isTempId(raw);
+        const localId = isNew ? tempId() : (isTemp ? raw : Number(raw));
         const change = Object.assign({}, data, { updated_at: new Date().toISOString() });
-        if (isNew) { delete change.id; change.client_id = id; }
-        await enqueue({ op: "upsert", kind, data: change, localId: id });
-        return id;
+        if (isNew || isTemp) { delete change.id; change.client_id = localId; }
+        else { change.id = localId; }
+        const all = await getQueue();
+        const existing = all.find((e) => e.op === "upsert" && e.localId === localId);
+        if (existing) {
+            existing.data = Object.assign({}, existing.data, change);
+            if (existing.data.client_id) delete existing.data.id;  // stays a create
+            await enqueue(existing);                                // same uid → replace
+        } else {
+            await enqueue({ op: "upsert", kind, data: change, localId });
+        }
+        return localId;
     }
     async function queueDelete(kind, id) {
         if (typeof id === "string" && id.startsWith("tmp-")) {

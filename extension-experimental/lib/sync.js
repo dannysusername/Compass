@@ -83,21 +83,44 @@ export async function pull() {
 // ---- Local writes (queued) ----
 let _tmp = 0;
 const tempId = () => `tmp-${Date.now()}-${_tmp++}`;
+const isTempId = (v) => typeof v === "string" && v.startsWith("tmp-");
 
 // Create/update a row locally (optimistic) + queue it for the next push.
 // `kind` is the server/store plural key: tasks|classes|tags|events. A row
 // with no id is new: gets a temp id locally + a client_id in the queued
 // change so push() can map it to the real server id.
+//
+// Repeated writes to the SAME row — including editing a task that was created
+// offline and only has a temp id — MERGE into one pending change (keyed by
+// localId) + merge onto the mirror row. Without this, creating a task offline
+// then editing it replayed as several brand-new tasks on reconnect (the
+// duplicate-rows bug): each edit coerced the temp id to NaN and stacked a
+// fresh create.
 export async function queueUpsert(kind, data) {
-    const isNew = data.id == null;
-    const id = isNew ? tempId() : data.id;
+    const raw = data.id;
+    const isNew = raw == null;
+    const isTemp = isTempId(raw);
+    const localId = isNew ? tempId() : (isTemp ? raw : Number(raw));
     const updated_at = new Date().toISOString();
-    const row = { ...data, id, updated_at };
+    // Mirror: merge onto the existing row so a partial edit keeps other fields.
+    const rows = await getAll(kind);
+    const prev = rows.find((r) => String(r.id) === String(localId)) || {};
+    const row = { ...prev, ...data, id: localId, updated_at };
     await putAll(kind, [row]);
+    // Pending: collapse create + later edits/toggles into ONE change per row.
     const change = { ...data, updated_at };
-    if (isNew) { delete change.id; change.client_id = id; }
-    await tx("pending", "readwrite", (s) =>
-        s.put({ op: "upsert", kind, data: change, localId: id }));
+    if (isNew || isTemp) { delete change.id; change.client_id = localId; }
+    else { change.id = localId; }
+    const pending = await getAll("pending");
+    const existing = pending.find((p) => p.op === "upsert" && String(p.localId) === String(localId));
+    if (existing) {
+        existing.data = { ...existing.data, ...change };
+        if (existing.data.client_id) delete existing.data.id;  // stays a create
+        await tx("pending", "readwrite", (s) => s.put(existing));
+    } else {
+        await tx("pending", "readwrite", (s) =>
+            s.put({ op: "upsert", kind, data: change, localId }));
+    }
     return row;
 }
 
@@ -189,7 +212,7 @@ const _serverKind = (domKind) => (domKind === "event" ? "events" : "tasks");
 // row's singular kind ("task"/"event"); the queue uses the plural server key.
 export async function offlineToggleItem(domKind, id, completed) {
     await queueUpsert(_serverKind(domKind),
-        { id: Number(id), completed_at: completed ? new Date().toISOString() : null });
+        { id, completed_at: completed ? new Date().toISOString() : null });
     await _patchToday((view) => {
         for (const b of (view.buckets || [])) {
             for (const it of [...(b.items || []), ...(b.overdue_items || [])]) {
@@ -242,7 +265,7 @@ export async function offlineAddTask(taskData) {
 }
 
 export async function offlineMarkTask(id, completed) {
-    await queueTaskUpsert({ id: Number(id), completed_at: completed ? new Date().toISOString() : null });
+    await queueTaskUpsert({ id, completed_at: completed ? new Date().toISOString() : null });
     await _patchToday((view) => {
         for (const b of (view.buckets || [])) {
             for (const it of [...(b.items || []), ...(b.overdue_items || [])]) {
@@ -257,7 +280,7 @@ export async function offlineMarkTask(id, completed) {
 // change updates the field in place; bucket placement reconciles on the
 // next online pull. (Reminders/alerts are separate rows — not synced here.)
 export async function offlineEditTask(id, fields) {
-    await queueTaskUpsert({ id: Number(id), ...fields });
+    await queueTaskUpsert({ id, ...fields });
     const keys = ["title", "due_at", "starts_at", "tag_id", "notes",
                   "is_all_day", "rrule", "rrule_until", "class_id"];
     await _patchToday((view) => {
@@ -272,7 +295,7 @@ export async function offlineEditTask(id, fields) {
 }
 
 export async function offlineDeleteTask(id) {
-    await queueTaskDelete(Number(id));
+    await queueTaskDelete(id);  // raw — queueDelete drops the pending create for temp ids
     await _patchToday((view) => {
         for (const b of (view.buckets || [])) {
             b.items = (b.items || []).filter((it) => !_isTask(it, id));

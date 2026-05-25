@@ -127,6 +127,105 @@ def test_offline_add_shows_optimistic_row_immediately(signed_in_page, server_url
     expect(page.locator(".todo-row[data-title='Shows offline']").first).to_be_visible()
 
 
+def test_offline_create_then_multiple_edits_makes_ONE_task(signed_in_page, server_url):
+    """Regression for the duplicate-task bug: create a task offline, change its
+    date several times (all offline), reconnect — the server must end up with
+    exactly ONE task carrying the final date, not one per edit."""
+    page = signed_in_page
+    page.goto(server_url + "/")
+    page.on("dialog", lambda d: d.accept())
+
+    page.context.set_offline(True)
+    # Create offline.
+    page.click("button[data-open-modal='add-task-modal']")
+    page.fill("#add-task-modal input[name='title']", "Multi edit")
+    page.fill("#add-task-modal input[name='starts_at']", "")
+    page.fill("#add-task-modal input[name='due_at']", _today_iso(9))
+    page.click("#add-task-modal button[type='submit']")
+    row = page.locator(".todo-row[data-title='Multi edit']").first
+    expect(row).to_be_visible()
+
+    # Edit the date three times while still offline.
+    for hour in (10, 14, 16):
+        if not row.locator(".todo-drawer").is_visible():
+            row.locator(".todo-row-main").click()   # open drawer if closed
+        row.locator(".todo-edit").click()           # open edit modal
+        expect(page.locator("#edit-task-modal")).to_be_visible()
+        page.fill("#edit-task-modal input[name='due_at']", _today_iso(hour))
+        page.click("#edit-task-modal button[type='submit']")
+        page.wait_for_timeout(200)
+
+    # Whole create+edits collapsed into ONE queued change.
+    assert _queue_len(page) == 1, "offline create+edits should be one pending change"
+
+    # Reconnect → sync.
+    page.context.set_offline(False)
+    page.wait_for_function("async () => (await window.CompassSync.getQueue()).length === 0")
+
+    # Server has exactly ONE 'Multi edit' task, due at the final time (16:00).
+    data = page.evaluate(
+        "async () => (await fetch('/sync', {credentials:'same-origin', headers:{Accept:'application/json'}})).json()"
+    )
+    matches = [t for t in data["tasks"] if t["title"] == "Multi edit"]
+    assert len(matches) == 1, f"expected 1 task, got {len(matches)}: {matches}"
+    assert matches[0]["due_at"][11:16] == "16:00", f"wrong final date: {matches[0]['due_at']}"
+
+
+def test_offline_create_then_toggle_makes_one_completed_task(signed_in_page, server_url):
+    """Create offline, check it off offline, reconnect → ONE task, completed
+    (the toggle merges into the pending create, not a second task)."""
+    page = signed_in_page
+    page.goto(server_url + "/")
+    page.on("dialog", lambda d: d.accept())
+
+    page.context.set_offline(True)
+    page.click("button[data-open-modal='add-task-modal']")
+    page.fill("#add-task-modal input[name='title']", "Create then toggle")
+    page.fill("#add-task-modal input[name='starts_at']", "")
+    page.fill("#add-task-modal input[name='due_at']", _today_iso(9))
+    page.click("#add-task-modal button[type='submit']")
+    row = page.locator(".todo-row[data-title='Create then toggle']").first
+    expect(row).to_be_visible()
+    row.locator(".todo-toggle").click()
+    assert _queue_len(page) == 1
+
+    page.context.set_offline(False)
+    page.wait_for_function("async () => (await window.CompassSync.getQueue()).length === 0")
+    data = page.evaluate(
+        "async () => (await fetch('/sync', {credentials:'same-origin', headers:{Accept:'application/json'}})).json()"
+    )
+    matches = [t for t in data["tasks"] if t["title"] == "Create then toggle"]
+    assert len(matches) == 1 and matches[0]["completed_at"], f"got {matches}"
+
+
+def test_offline_create_then_delete_makes_zero_tasks(signed_in_page, server_url):
+    """Create offline then delete offline before any sync → the queued create
+    is dropped, so reconnect leaves NO task (no phantom row on the server)."""
+    page = signed_in_page
+    page.goto(server_url + "/")
+    page.on("dialog", lambda d: d.accept())
+
+    page.context.set_offline(True)
+    page.click("button[data-open-modal='add-task-modal']")
+    page.fill("#add-task-modal input[name='title']", "Create then delete")
+    page.fill("#add-task-modal input[name='starts_at']", "")
+    page.fill("#add-task-modal input[name='due_at']", _today_iso(9))
+    page.click("#add-task-modal button[type='submit']")
+    row = page.locator(".todo-row[data-title='Create then delete']").first
+    expect(row).to_be_visible()
+    row.locator(".todo-row-main").click()
+    row.locator(".todo-del").click()
+    expect(page.locator(".todo-row[data-title='Create then delete']")).to_have_count(0)
+    assert _queue_len(page) == 0, "deleting an unsynced create should empty the queue"
+
+    page.context.set_offline(False)
+    page.wait_for_timeout(1500)
+    data = page.evaluate(
+        "async () => (await fetch('/sync', {credentials:'same-origin', headers:{Accept:'application/json'}})).json()"
+    )
+    assert not [t for t in data["tasks"] if t["title"] == "Create then delete"]
+
+
 def test_offline_full_edit_queues_then_syncs(signed_in_page, server_url):
     page = signed_in_page
     row = _make_task(page, server_url, "Edit me offline")
