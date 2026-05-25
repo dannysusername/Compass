@@ -12,7 +12,7 @@
 //
 // Bump CACHE when the precache list or strategy changes to retire old caches.
 
-const CACHE = "compass-v2";
+const CACHE = "compass-v3";
 const OFFLINE_URL = "/static/offline.html";
 const PRECACHE = [
   OFFLINE_URL,

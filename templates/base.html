@@ -52,11 +52,30 @@
     {% if COMPASS_ENV != 'test' %}
     <script>
       // Register the service worker → makes Compass installable and lets it
-      // open + show your tasks offline (Step 1: offline viewing). Skipped in
-      // the test env so a live SW can't cache responses and flake the suite.
+      // open + show your tasks offline. Skipped in the test env so a live SW
+      // can't cache responses and flake the suite.
+      //
+      // Self-updating: check for a new worker on every load, and when one
+      // takes control (after skipWaiting + clients.claim in sw.js) reload once
+      // so the page runs the fresh JS/CSS instead of the old cached bundle.
+      // Without this, an installed PWA stays pinned to stale code until the
+      // user manually clears it — which is exactly the trap a deployed fix
+      // would otherwise fall into.
       if ('serviceWorker' in navigator) {
+        // Only auto-reload when an update REPLACES an existing controller — not
+        // on the very first install (no controller yet → nothing stale to swap).
+        if (navigator.serviceWorker.controller) {
+          var _swRefreshing = false;
+          navigator.serviceWorker.addEventListener('controllerchange', function () {
+            if (_swRefreshing) return;
+            _swRefreshing = true;
+            window.location.reload();
+          });
+        }
         window.addEventListener('load', function () {
-          navigator.serviceWorker.register('/sw.js').catch(function () {});
+          navigator.serviceWorker.register('/sw.js').then(function (reg) {
+            if (reg && reg.update) reg.update();   // pull a newer sw.js if any
+          }).catch(function () {});
         });
       }
     </script>
