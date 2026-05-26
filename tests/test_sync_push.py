@@ -142,6 +142,22 @@ def test_push_resolves_same_batch_temp_ids(auth_client):
     assert task.class_id == idm["cls-tmp"]    # resolved temp class id → real id
 
 
+def test_push_due_at_matches_online_create_path(auth_client):
+    """Offline (push) must store a datetime-local exactly like the online create
+    path — no extra timezone shift. Guards against the 'weird dates' class where
+    an offline-saved task drifts hours from what the user typed."""
+    auth_client.post("/tasks", data={"title": "OnlineDate", "due_at": "2026-05-25T16:00"})
+    online = next(t for t in auth_client.get("/sync").json()["tasks"]
+                  if t["title"] == "OnlineDate")
+    auth_client.post("/sync", json={"changes": {"tasks": [
+        {"client_id": "c1", "title": "OfflineDate", "due_at": "2026-05-25T16:00",
+         "updated_at": "2026-05-25T09:00:00+00:00"}]}})
+    offline = next(t for t in auth_client.get("/sync").json()["tasks"]
+                   if t["title"] == "OfflineDate")
+    assert online["due_at"] == offline["due_at"], \
+        f"offline path shifted the time: online={online['due_at']} offline={offline['due_at']}"
+
+
 def test_push_task_cannot_point_at_another_users_class(auth_client, second_user_client):
     # B makes a class; A pushes a task claiming B's class_id → must be nulled.
     second_user_client.post("/classes", data={"name": "Bio", "code": "BIO101"})
