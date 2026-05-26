@@ -128,6 +128,55 @@ body > header {
 }
 .theme-toggle:active { transform: none; box-shadow: none; }
 
+/* Sync status pill: tiny, quiet — a colored dot + word. Click to sync now. */
+.sync-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: transparent;
+    color: var(--muted);
+    border: 1px solid var(--rule);
+    padding: 5px 10px;
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    cursor: pointer;
+    border-radius: 999px;
+    align-self: center;
+    transition: background 0.12s, border-color 0.12s;
+}
+.sync-status:hover { background: var(--paper-2); }
+.sync-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--muted);
+    flex: none;
+}
+.sync-status[data-state="synced"]  .sync-dot { background: var(--ok); }
+.sync-status[data-state="pending"] .sync-dot { background: var(--warn); }
+.sync-status[data-state="offline"] .sync-dot { background: var(--muted); }
+.sync-status[data-state="syncing"] .sync-dot {
+    background: var(--ink);
+    animation: sync-pulse 1s ease-in-out infinite;
+}
+@keyframes sync-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+@media (prefers-reduced-motion: reduce) {
+    .sync-status[data-state="syncing"] .sync-dot { animation: none; }
+}
+/* On phones, drop the word and keep just the dot to save header width; the
+   color (+ tap to sync) still conveys state. Hidden entirely on very narrow
+   screens where even the dot won't fit beside the nav + actions. */
+@media (max-width: 600px) {
+    .sync-status { padding: 6px; }
+    .sync-label { display: none; }
+}
+@media (max-width: 360px) {
+    .sync-status { display: none; }
+}
+
 main {
     margin: 0 auto;
     padding: 40px 24px 100px;

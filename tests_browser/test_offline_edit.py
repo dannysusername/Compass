@@ -249,6 +249,24 @@ def test_offline_full_edit_queues_then_syncs(signed_in_page, server_url):
     assert task["title"] == "Edited while offline", "offline edit did not sync"
 
 
+def test_sync_status_pill_reflects_state(signed_in_page, server_url):
+    """The header pill shows Synced online, Offline (+count) when a change is
+    queued offline, and returns to Synced after reconnect syncs it."""
+    page = signed_in_page
+    row = _make_task(page, server_url, "Pill task")
+    pill = page.locator("[data-sync-status]")
+    expect(pill).to_be_visible()
+    expect(pill).to_have_attribute("data-state", "synced")   # online, nothing queued
+
+    page.context.set_offline(True)
+    row.locator(".todo-toggle").click()                      # queue an offline change
+    expect(pill).to_have_attribute("data-state", "offline")
+    expect(pill).to_contain_text("waiting")
+
+    page.context.set_offline(False)                          # reconnect → flushes
+    expect(pill).to_have_attribute("data-state", "synced")
+
+
 def test_apply_to_dom_reinstates_a_queued_toggle(signed_in_page, server_url):
     """applyToDom re-marks a queued toggle on a freshly-rendered page (this is
     what makes an offline edit survive a reload behind the service worker)."""

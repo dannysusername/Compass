@@ -48,6 +48,14 @@
         return !navigator.onLine || (err && err.name === "TypeError");
     }
 
+    // Broadcast sync phase changes so the header status pill can reflect them
+    // (queued = a write is waiting, syncing = pushing, synced = all caught up,
+    // error = push failed). The pill reads the live queue length for counts.
+    function emit(phase) {
+        try { global.dispatchEvent(new CustomEvent("compass-sync", { detail: { phase } })); }
+        catch (_) { /* CustomEvent unsupported — pill just won't update */ }
+    }
+
     let _tmp = 0;
     const tempId = () => `tmp-${Date.now()}-${_tmp++}`;
     const isTempId = (v) => typeof v === "string" && v.startsWith("tmp-");
@@ -79,6 +87,7 @@
         } else {
             await enqueue({ op: "upsert", kind, data: change, localId });
         }
+        emit("queued");
         return localId;
     }
     async function queueDelete(kind, id) {
@@ -86,9 +95,11 @@
             // Never synced — just drop its queued upsert(s).
             const all = await getQueue();
             await removeMany(all.filter((e) => e.localId === id).map((e) => e.uid));
+            emit("queued");
             return;
         }
         await enqueue({ op: "delete", kind, id: Number(id) });
+        emit("queued");
     }
     // Back-compat task helpers.
     const queueTaskUpsert = (data) => queueUpsert("tasks", data);
@@ -97,7 +108,8 @@
     // Replay the queue to the server. Returns the id_map (temp → server id).
     async function replay() {
         const pending = await getQueue();
-        if (!pending.length) return { id_map: {} };
+        if (!pending.length) { emit("synced"); return { id_map: {} }; }
+        emit("syncing");
         const changes = {};
         const deletes = {};
         for (const e of pending) {
@@ -105,22 +117,35 @@
             if (e.op === "delete") (deletes[kind] = deletes[kind] || []).push(e.id);
             else (changes[kind] = changes[kind] || []).push(e.data);
         }
-        const r = await fetch("/sync", {
-            method: "POST",
-            credentials: "same-origin",
-            headers: { "Content-Type": "application/json", "Accept": "application/json" },
-            body: JSON.stringify({ changes, deletes }),
-        });
-        if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
-        const res = await r.json();
-        // Reconcile temp ids on any optimistic rows still in the DOM.
-        for (const [clientId, serverId] of Object.entries(res.id_map || {})) {
-            document.querySelectorAll(`.todo-row[data-id="${clientId}"]`).forEach((row) => {
-                row.dataset.id = String(serverId);
+        try {
+            const r = await fetch("/sync", {
+                method: "POST",
+                credentials: "same-origin",
+                headers: { "Content-Type": "application/json", "Accept": "application/json" },
+                body: JSON.stringify({ changes, deletes }),
             });
+            if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+            const res = await r.json();
+            // Reconcile temp ids on any optimistic rows still in the DOM.
+            for (const [clientId, serverId] of Object.entries(res.id_map || {})) {
+                document.querySelectorAll(`.todo-row[data-id="${clientId}"]`).forEach((row) => {
+                    row.dataset.id = String(serverId);
+                });
+            }
+            await removeMany(pending.map((e) => e.uid));
+            emit("synced");
+            return res;
+        } catch (err) {
+            emit("error");
+            throw err;
         }
-        await removeMany(pending.map((e) => e.uid));
-        return res;
+    }
+
+    // Manual "Sync now": flush the queue then refresh the list to canonical
+    // server rows (the header pill's click handler calls this).
+    async function syncNow() {
+        await replay();
+        if (typeof window.compassSoftRefresh === "function") await window.compassSoftRefresh();
     }
 
     // ---- Optimistic row rendering (offline ADD) ----
@@ -344,6 +369,6 @@
 
     global.CompassSync = {
         queueUpsert, queueDelete, queueTaskUpsert, queueTaskDelete,
-        replay, applyToDom, isOffline, getQueue, injectTaskRow, buildTaskRow,
+        replay, syncNow, applyToDom, isOffline, getQueue, injectTaskRow, buildTaskRow,
     };
 })(window);

@@ -37,6 +37,13 @@
         </nav>
         {% endif %}
         <div class="header-actions">
+            {% if request.session.get("user_id") %}
+            <button type="button" class="sync-status" data-sync-status hidden
+                    title="Click to sync now" aria-live="polite">
+                <span class="sync-dot" aria-hidden="true"></span>
+                <span class="sync-label">Synced</span>
+            </button>
+            {% endif %}
             <button type="button" class="theme-toggle" data-theme-toggle aria-label="Toggle dark mode">Dark</button>
             {% if request.session.get("user_id") %}
             <form action="/logout" method="post" class="logout-form">
@@ -98,6 +105,49 @@
           }).catch(function () { /* network blip — try again next load */ });
         } catch (e) { /* old browser, no Intl */ }
       })();
+    </script>
+    <script>
+      // Sync status pill: shows Synced / Syncing… / "N to sync" / Offline so
+      // the auto-sync is visible and trustworthy. Click = sync now. Driven by
+      // the 'compass-sync' events CompassSync emits on every queue write and
+      // push; reads the live queue length for the pending count.
+      // Runs on DOMContentLoaded: the deferred sync.js (which defines
+      // CompassSync) executes before that fires but after inline scripts.
+      window.addEventListener('DOMContentLoaded', function () {
+        var el = document.querySelector('[data-sync-status]');
+        if (!el || !window.CompassSync) return;
+        var label = el.querySelector('.sync-label');
+        var busy = false;
+
+        function pending() {
+          return CompassSync.getQueue().then(function (q) { return q.length; })
+                                       .catch(function () { return 0; });
+        }
+        function show(state, text) { el.dataset.state = state; label.textContent = text; el.hidden = false; }
+        function render() {
+          if (busy) { show('syncing', 'Syncing…'); return Promise.resolve(); }
+          return pending().then(function (n) {
+            if (!navigator.onLine) show('offline', n ? ('Offline · ' + n + ' waiting') : 'Offline');
+            else if (n) show('pending', n + ' to sync');
+            else show('synced', 'Synced');
+          });
+        }
+
+        window.addEventListener('compass-sync', function (e) {
+          busy = e.detail && e.detail.phase === 'syncing';
+          render();
+        });
+        window.addEventListener('online', render);
+        window.addEventListener('offline', render);
+        el.addEventListener('click', function () {
+          if (busy || !navigator.onLine) return render();
+          busy = true; render();
+          CompassSync.syncNow().catch(function () {}).then(function () { busy = false; render(); });
+        });
+
+        render();
+        setInterval(render, 5000);  // backstop in case an event is missed
+      });
     </script>
     {% endif %}
 </body>
