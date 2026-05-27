@@ -277,6 +277,14 @@ class CalendarEvent(SQLModel, table=True):
     ends_at: Optional[datetime] = None
     kind: str  # free-form lowercase noun (quiz, lab, lecture, exam, ...)
     actionable: bool = Field(default=True)  # False = context (lecture topic, holiday)
+    # False = parsed-but-pending (visible only on the class page's review
+    # section); True = on the user's calendar (iCal feed + today/week views).
+    # New parses default to False so the user gets to confirm. The model
+    # default is True so existing/clone/extension code paths that don't pass
+    # the field stay "on calendar" — and so migrate.py emits DEFAULT TRUE,
+    # which keeps already-parsed prod events visible after the column is
+    # added. process_syllabus explicitly sets False for newly-parsed rows.
+    added_to_calendar: bool = Field(default=True)
     position: int = Field(default=0)  # drag-to-reorder priority, shared with Task
     source_text: Optional[str] = Field(default=None)
     completed_at: Optional[datetime] = Field(default=None)
@@ -636,6 +644,10 @@ async def lifespan(app: FastAPI):
             _add_column_if_missing(conn, "syllabus", "outline_json", "TEXT")
             _add_column_if_missing(conn, "calendarevent", "completed_at", "TIMESTAMP")
             _add_column_if_missing(conn, "calendarevent", "actionable", "INTEGER NOT NULL DEFAULT 1")
+            # DEFAULT 1 so pre-existing parsed events stay on the user's
+            # calendar after this column is added. New parses set False
+            # explicitly in process_syllabus.
+            _add_column_if_missing(conn, "calendarevent", "added_to_calendar", "INTEGER NOT NULL DEFAULT 1")
             _add_column_if_missing(conn, "calendarevent", "position", "INTEGER NOT NULL DEFAULT 0")
             _add_column_if_missing(conn, "task", "position", "INTEGER NOT NULL DEFAULT 0")
             _add_column_if_missing(conn, "task", "tag_id", "INTEGER")
@@ -1278,6 +1290,7 @@ def process_syllabus(syllabus_id: int) -> None:
                     ends_at=parse_iso_dt(ev.get("ends_at")),
                     kind=kind,
                     actionable=actionable,
+                    added_to_calendar=False,
                     source_text=ev.get("source_text") or None,
                 ))
 
@@ -1897,9 +1910,9 @@ _PUSH_KINDS = {
         # class_id is non-nullable + only set at create (via _new_event), so
         # it's deliberately not an editable field here.
         "fields": ("title", "starts_at", "ends_at", "kind", "completed_at",
-                   "position", "actionable", "source_text"),
+                   "position", "actionable", "added_to_calendar", "source_text"),
         "dt": {"starts_at", "ends_at", "completed_at"},
-        "bools": {"actionable"}, "ints": {"position"}, "fks": {},
+        "bools": {"actionable", "added_to_calendar"}, "ints": {"position"}, "fks": {},
         "owns": lambda s, row, u: (lambda c: c is not None and c.user_id == u.id)(
             s.get(Class, row.class_id)),
         "new": _new_event,
@@ -2285,6 +2298,7 @@ def class_detail_json(class_id: int, user: User = Depends(require_login)):
                 "is_all_day": False,
                 "completed": ev.completed_at is not None,
                 "actionable": ev.actionable,
+                "added_to_calendar": ev.added_to_calendar,
                 "sub_kind": sys_tag.name if sys_tag else ev.kind,
                 "sub_kind_color": sys_tag.color if sys_tag else None,
                 "tag_color": None, "tag_name": None, "tag_id": None,
@@ -2349,7 +2363,9 @@ def class_detail(request: Request, class_id: int, user: User = Depends(require_l
         cls = session.get(Class, class_id)
         if not cls or cls.user_id != user.id:
             raise HTTPException(404, "Class not found")
-        events = sorted(cls.events, key=event_sort_key)
+        all_events = sorted(cls.events, key=event_sort_key)
+        pending_events = [e for e in all_events if not e.added_to_calendar]
+        added_events = [e for e in all_events if e.added_to_calendar]
         documents = sorted(cls.documents, key=lambda d: d.uploaded_at, reverse=True)
         latest_syllabus = max(cls.syllabi, key=lambda s: s.parsed_at) if cls.syllabi else None
     # Floating tasks panel reuses the home page's today list. Add-task form
@@ -2370,7 +2386,9 @@ def class_detail(request: Request, class_id: int, user: User = Depends(require_l
         ).all()
     return templates.TemplateResponse(request, "class.html", {
         "cls": cls,
-        "events": events,
+        "events": all_events,
+        "pending_events": pending_events,
+        "added_events": added_events,
         "documents": documents,
         "syllabus": latest_syllabus,
         "today": today_start,
@@ -2605,6 +2623,98 @@ def delete_event(event_id: int, request: Request, user: User = Depends(require_l
     if "application/json" in request.headers.get("accept", ""):
         return JSONResponse({"deleted": event_id})
     return RedirectResponse(f"/classes/{cls_id}", status_code=303)
+
+
+def _set_event_on_calendar(event_id: int, user_id: int, on: bool) -> int:
+    """Flip a single event's added_to_calendar flag. Returns the class_id
+    for the redirect. Ownership-checked via _own_event."""
+    with Session(engine) as session:
+        ev = _own_event(session, event_id, user_id)
+        ev.added_to_calendar = on
+        session.add(ev)
+        session.commit()
+        return ev.class_id
+
+
+@app.post("/events/{event_id}/add-to-calendar")
+def add_event_to_calendar(event_id: int, request: Request,
+                          user: User = Depends(require_login)):
+    """Mark a single parsed event as on the user's calendar. Reversible
+    via /events/{id}/remove-from-calendar."""
+    cls_id = _set_event_on_calendar(event_id, user.id, True)
+    if "application/json" in request.headers.get("accept", ""):
+        return JSONResponse({"id": event_id, "added_to_calendar": True})
+    return RedirectResponse(f"/classes/{cls_id}", status_code=303)
+
+
+@app.post("/events/{event_id}/remove-from-calendar")
+def remove_event_from_calendar(event_id: int, request: Request,
+                               user: User = Depends(require_login)):
+    """Take a single event back off the calendar — moves it to the
+    pending review section. Does NOT delete; use /events/{id}/delete
+    for permanent removal."""
+    cls_id = _set_event_on_calendar(event_id, user.id, False)
+    if "application/json" in request.headers.get("accept", ""):
+        return JSONResponse({"id": event_id, "added_to_calendar": False})
+    return RedirectResponse(f"/classes/{cls_id}", status_code=303)
+
+
+@app.post("/classes/{class_id}/events/add-all")
+def add_all_class_events_to_calendar(class_id: int, request: Request,
+                                     user: User = Depends(require_login)):
+    """Bulk-add every pending event for this class. Owned-class check
+    via _own_class; no-op rows (already on calendar) are skipped."""
+    with Session(engine) as session:
+        cls = _own_class(session, class_id, user.id)
+        n = 0
+        for ev in cls.events:
+            if not ev.added_to_calendar:
+                ev.added_to_calendar = True
+                session.add(ev)
+                n += 1
+        session.commit()
+    if "application/json" in request.headers.get("accept", ""):
+        return JSONResponse({"class_id": class_id, "added": n})
+    return RedirectResponse(f"/classes/{class_id}", status_code=303)
+
+
+@app.post("/classes/{class_id}/events/remove-all")
+def remove_all_class_events_from_calendar(class_id: int, request: Request,
+                                          user: User = Depends(require_login)):
+    """Bulk-take every on-calendar event for this class back off the
+    calendar — they survive as pending review rows. Reversible via
+    add-all or per-event add-to-calendar."""
+    with Session(engine) as session:
+        cls = _own_class(session, class_id, user.id)
+        n = 0
+        for ev in cls.events:
+            if ev.added_to_calendar:
+                ev.added_to_calendar = False
+                session.add(ev)
+                n += 1
+        session.commit()
+    if "application/json" in request.headers.get("accept", ""):
+        return JSONResponse({"class_id": class_id, "removed": n})
+    return RedirectResponse(f"/classes/{class_id}", status_code=303)
+
+
+@app.post("/classes/{class_id}/events/delete-all")
+def delete_all_class_events(class_id: int, request: Request,
+                            user: User = Depends(require_login)):
+    """Permanent: wipe every event (pending AND on-calendar) for this
+    class. Writes a Tombstone per row so other devices drop them on
+    next sync."""
+    with Session(engine) as session:
+        cls = _own_class(session, class_id, user.id)
+        deleted_ids = [e.id for e in cls.events]
+        for ev in list(cls.events):
+            session.delete(ev)
+        for eid in deleted_ids:
+            _record_tombstone(session, user.id, "event", eid)
+        session.commit()
+    if "application/json" in request.headers.get("accept", ""):
+        return JSONResponse({"class_id": class_id, "deleted": len(deleted_ids)})
+    return RedirectResponse(f"/classes/{class_id}", status_code=303)
 
 
 # ---- Helpers shared by PDF table marker rendering ----
@@ -3864,6 +3974,9 @@ def _collect_items_in_range(start: datetime, end: datetime, user_id: int,
             for ev in cls.events:
                 if ev.starts_at is None:
                     continue
+                # Pending-review events live on the class page only.
+                if not ev.added_to_calendar:
+                    continue
                 if hide_completed and ev.completed_at is not None:
                     # Same "just-completed-today" rule as tasks above.
                     completed_local = _to_local(ev.completed_at, tz)
@@ -3966,8 +4079,12 @@ def _collect_overdue(user_id: int, tz: ZoneInfo = LOCAL_TZ) -> dict:
                 if ev.starts_at is None:
                     continue
                 # Non-actionable events (past lectures, holidays) aren't
-                # "overdue" — nothing to chase. Skip.
+                # "overdue" — nothing to chase. Skip. Pending-review events
+                # also stay off the overdue list — they aren't on the
+                # calendar yet.
                 if not ev.actionable:
+                    continue
+                if not ev.added_to_calendar:
                     continue
                 local_when = _to_local(ev.starts_at, tz)
                 if local_when < now and local_when >= now - timedelta(days=30):
@@ -4239,11 +4356,14 @@ def _build_ical_for_user(user_id: int, request: Optional[Request] = None) -> byt
             if t.system_key
         }
 
-        # Auto-extracted events from syllabi.
+        # Auto-extracted events from syllabi. Only events the user has
+        # explicitly added to their calendar — pending review events live
+        # on the class page until confirmed.
         events = session.exec(
             select(CalendarEvent).where(
                 CalendarEvent.class_id.in_(owned_class_ids),
                 CalendarEvent.starts_at != None,
+                CalendarEvent.added_to_calendar == True,
             )
         ).all()
         for ev in events:

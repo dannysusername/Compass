@@ -1325,3 +1325,87 @@ details.class-detail-section > summary:hover {
     font-size: 13px;
     margin-bottom: 10px;
 }
+
+/* ---- Event review (parsed-but-pending) UI on class detail. Mirrors
+   the web's events-review-banner / subsection-head / cal-toggle
+   visual vocabulary so the extension and the website match. */
+.events-review-banner {
+    margin: 0 0 12px;
+    padding: 12px 14px;
+    background: var(--paper-2, var(--paper));
+    border: 1px solid var(--rust);
+    border-left: 4px solid var(--rust);
+    border-radius: 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.events-review-banner-text {
+    font-size: 13px;
+    color: var(--ink);
+}
+.events-review-banner-text strong { color: var(--rust); font-weight: 700; }
+.events-review-banner-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.events-section-toolbar {
+    display: flex;
+    justify-content: flex-end;
+    margin: 0 0 8px;
+}
+
+.events-subsection-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 10px 0 6px;
+}
+.events-subsection-head h3 {
+    margin: 0;
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--ink-2, var(--ink));
+}
+.events-subsection-separator {
+    height: 1px;
+    background: var(--ink-3, #ccc);
+    opacity: 0.4;
+    margin: 12px 0;
+}
+
+/* Per-event "+ Add" / "− Remove" pill — small, sits between title and
+   the × delete in the row. */
+.event-cal-add, .event-cal-remove {
+    font-family: var(--mono);
+    font-size: 9px;
+    font-weight: 700;
+    background: transparent;
+    padding: 2px 6px;
+    border-radius: 2px;
+    text-transform: uppercase;
+    letter-spacing: 0.10em;
+    white-space: nowrap;
+    cursor: pointer;
+    margin-right: 4px;
+}
+.event-cal-add { color: var(--rust); border: 1px solid var(--rust); }
+.event-cal-add:hover { background: var(--rust); color: var(--paper); }
+.event-cal-remove {
+    color: var(--ink-3, var(--ink));
+    border: 1px solid var(--ink-3, var(--ink));
+}
+.event-cal-remove:hover { background: var(--ink); color: var(--paper); }
+
+.queued-offline {
+    /* Subtle visual cue that an offline edit is pending sync. */
+    opacity: 0.7;
+    font-style: italic;
+}

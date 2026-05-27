@@ -94,6 +94,16 @@ export const api = {
         request(`/events/${id}/edit`, { method: "POST", body: form }),
     cloneEvent: (id) =>
         request(`/events/${id}/clone`, { method: "POST" }),
+    addEventToCalendar: (id) =>
+        request(`/events/${id}/add-to-calendar`, { method: "POST" }),
+    removeEventFromCalendar: (id) =>
+        request(`/events/${id}/remove-from-calendar`, { method: "POST" }),
+    addAllClassEvents: (classId) =>
+        request(`/classes/${classId}/events/add-all`, { method: "POST" }),
+    removeAllClassEvents: (classId) =>
+        request(`/classes/${classId}/events/remove-all`, { method: "POST" }),
+    deleteAllClassEvents: (classId) =>
+        request(`/classes/${classId}/events/delete-all`, { method: "POST" }),
     saveXaiKey: (key) => {
         const fd = new FormData();
         fd.append("xai_api_key", key);

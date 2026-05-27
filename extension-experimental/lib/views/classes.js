@@ -13,6 +13,7 @@ import { showAddClass } from "../forms/add-class.js";
 import { showSyllabusUpload } from "../forms/syllabus.js";
 import { showSettings, setXaiStatus } from "../forms/settings.js";
 import { load } from "./index.js";
+import { isOfflineError, queueUpsert, queueDelete } from "../sync.js";
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -126,6 +127,7 @@ export async function showClassDetail(classId) {
 
     try {
         const data = await api.classDetail(classId);
+        state.lastClassDetail = data;  // offline fallback for refreshEventsOnly
         $("#class-detail-code").textContent = data.class.code;
         $("#class-detail-name").textContent = data.class.name || "";
 
@@ -157,8 +159,7 @@ export async function showClassDetail(classId) {
         if (data.tasks.length === 0) $("#class-detail-tasks-empty").hidden = false;
         else data.tasks.forEach((t) => tasksUl.appendChild(renderRow(t, false)));
 
-        if (data.events.length === 0) $("#class-detail-events-empty").hidden = false;
-        else data.events.forEach((ev) => eventsUl.appendChild(renderRow(ev, false)));
+        renderEventsForClass(classId, data.events || []);
     } catch (err) {
         if (err instanceof NotAuthenticated) {
             showLogin();
@@ -167,6 +168,235 @@ export async function showClassDetail(classId) {
         $("#class-detail-code").textContent = "Couldn't load";
         $("#class-detail-name").textContent = err.message;
     }
+}
+
+// ---- Events review/calendar UI (parity with web class.html) ----
+// Replaces the legacy flat #class-detail-events list with a banner +
+// "Pending review" / "On calendar" subsections + bulk action buttons.
+// Offline-aware: a network error queues the toggle/delete + leaves the
+// optimistic DOM change in place so the user sees their edit hold.
+
+function renderEventsForClass(classId, events) {
+    const ul = $("#class-detail-events");
+    const empty = $("#class-detail-events-empty");
+    // Wipe any prior render — including the banner/toolbar nodes injected
+    // outside the UL on the previous open.
+    document.querySelectorAll("[data-events-injected]").forEach((n) => n.remove());
+    ul.innerHTML = "";
+    empty.hidden = true;
+
+    if (!events.length) { empty.hidden = false; return; }
+    const pending = events.filter((e) => e.added_to_calendar === false);
+    const added = events.filter((e) => e.added_to_calendar !== false);
+
+    const parent = ul.parentElement;
+    const total = events.length;
+
+    // Banner — only when pending events exist. Carries "Add all" + "Delete all"
+    // side-by-side so the user doesn't scroll.
+    if (pending.length) {
+        const banner = document.createElement("div");
+        banner.className = "events-review-banner";
+        banner.setAttribute("data-events-injected", "1");
+        const text = document.createElement("div");
+        text.className = "events-review-banner-text";
+        text.innerHTML = `<strong>${pending.length} event${pending.length === 1 ? "" : "s"} found</strong> in your syllabus. Add them to your calendar?`;
+        const actions = document.createElement("div");
+        actions.className = "events-review-banner-actions";
+        const addAll = makeBulkBtn("Add all to calendar", "primary",
+            () => doBulkAddAll(classId));
+        const delAll = makeBulkBtn("Delete all events", "danger-btn",
+            () => doBulkDeleteAll(classId, total));
+        actions.appendChild(addAll); actions.appendChild(delAll);
+        banner.appendChild(text); banner.appendChild(actions);
+        parent.insertBefore(banner, ul);
+    } else {
+        // No pending → top toolbar still surfaces Delete all so it's
+        // reachable without scrolling (matches the web's behavior).
+        const toolbar = document.createElement("div");
+        toolbar.className = "events-section-toolbar";
+        toolbar.setAttribute("data-events-injected", "1");
+        toolbar.appendChild(makeBulkBtn("Delete all events", "danger-btn small",
+            () => doBulkDeleteAll(classId, total)));
+        parent.insertBefore(toolbar, ul);
+    }
+
+    if (pending.length) {
+        appendSubsection(parent, ul, "Pending review",
+            makeBulkBtn("Add all to calendar", "small",
+                () => doBulkAddAll(classId)));
+        pending.forEach((ev) => ul.appendChild(renderEventRow(ev, false)));
+    }
+
+    if (added.length) {
+        // Visual divider between the two groups — only when both exist.
+        if (pending.length) {
+            const sep = document.createElement("div");
+            sep.className = "events-subsection-separator";
+            sep.setAttribute("data-events-injected", "1");
+            parent.insertBefore(sep, ul);
+        }
+        appendSubsection(parent, ul, "On calendar",
+            makeBulkBtn("Remove all from calendar", "small",
+                () => doBulkRemoveAll(classId, added.length)));
+        added.forEach((ev) => ul.appendChild(renderEventRow(ev, true)));
+    }
+}
+
+function makeBulkBtn(label, cls, onClick) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = cls;
+    b.textContent = label;
+    b.addEventListener("click", onClick);
+    return b;
+}
+
+function appendSubsection(parent, ul, heading, btn) {
+    const head = document.createElement("div");
+    head.className = "events-subsection-head";
+    head.setAttribute("data-events-injected", "1");
+    const h = document.createElement("h3");
+    h.textContent = heading;
+    head.appendChild(h);
+    head.appendChild(btn);
+    parent.insertBefore(head, ul);
+}
+
+// Per-event row with an Add/Remove button. We don't use renderRow's
+// generic editor wiring here because events on the class-detail surface
+// are about calendar membership, not edit-task flow. Click on the title
+// still opens the event editor (same as the legacy row).
+function renderEventRow(ev, onCalendar) {
+    const row = renderRow(ev, false);
+    const main = row.querySelector(".todo-row-main");
+    const del = main.querySelector(".todo-del");
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = onCalendar ? "event-cal-remove" : "event-cal-add";
+    toggle.textContent = onCalendar ? "− Remove" : "+ Add";
+    toggle.title = onCalendar
+        ? "Move this event back to pending review"
+        : "Add this event to your calendar";
+    toggle.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        await doEventToggle(ev.id, !onCalendar, row);
+    });
+    main.insertBefore(toggle, del);
+    return row;
+}
+
+async function doEventToggle(eventId, addToCal, rowEl) {
+    // Optimistic: swap the row visually right now. Reconciliation comes
+    // on the next class-detail open.
+    rowEl.classList.add("toggling");
+    try {
+        if (addToCal) await api.addEventToCalendar(eventId);
+        else await api.removeEventFromCalendar(eventId);
+        // Re-render the whole events section so the row moves to the
+        // correct subsection.
+        await refreshEventsOnly();
+    } catch (err) {
+        if (err instanceof NotAuthenticated) { showLogin(); return; }
+        if (isOfflineError(err)) {
+            // Queue + leave the optimistic DOM change (we'll repaint on
+            // next reconnect). Sync engine merges newest-wins server-side.
+            await queueUpsert("events",
+                { id: eventId, added_to_calendar: addToCal });
+            rowEl.classList.add("queued-offline");
+            return;
+        }
+        alert("Couldn't update: " + err.message);
+        rowEl.classList.remove("toggling");
+    }
+}
+
+async function doBulkAddAll(classId) {
+    try {
+        await api.addAllClassEvents(classId);
+        await refreshEventsOnly();
+    } catch (err) {
+        if (err instanceof NotAuthenticated) { showLogin(); return; }
+        if (isOfflineError(err)) {
+            // Per-event queue so each event's flag lands correctly under
+            // the newest-wins merge. The mirror is updated via queueUpsert.
+            const pending = state.lastClassDetail?.events?.filter(
+                (e) => e.added_to_calendar === false) || [];
+            for (const ev of pending) {
+                await queueUpsert("events",
+                    { id: ev.id, added_to_calendar: true });
+            }
+            await refreshEventsOnly({ optimisticAddAll: true });
+            return;
+        }
+        alert("Couldn't add: " + err.message);
+    }
+}
+
+async function doBulkRemoveAll(classId, count) {
+    if (!confirm(`Move all ${count} event${count === 1 ? "" : "s"} back to pending review? (Not permanent — you can re-add them.)`)) return;
+    try {
+        await api.removeAllClassEvents(classId);
+        await refreshEventsOnly();
+    } catch (err) {
+        if (err instanceof NotAuthenticated) { showLogin(); return; }
+        if (isOfflineError(err)) {
+            const onCal = state.lastClassDetail?.events?.filter(
+                (e) => e.added_to_calendar !== false) || [];
+            for (const ev of onCal) {
+                await queueUpsert("events",
+                    { id: ev.id, added_to_calendar: false });
+            }
+            await refreshEventsOnly({ optimisticRemoveAll: true });
+            return;
+        }
+        alert("Couldn't remove: " + err.message);
+    }
+}
+
+async function doBulkDeleteAll(classId, count) {
+    if (!confirm(`Permanently delete ALL ${count} event${count === 1 ? "" : "s"} for this class? This cannot be undone.`)) return;
+    try {
+        await api.deleteAllClassEvents(classId);
+        await refreshEventsOnly();
+    } catch (err) {
+        if (err instanceof NotAuthenticated) { showLogin(); return; }
+        if (isOfflineError(err)) {
+            const all = state.lastClassDetail?.events || [];
+            for (const ev of all) await queueDelete("events", ev.id);
+            await refreshEventsOnly({ optimisticDeleteAll: true });
+            return;
+        }
+        alert("Couldn't delete: " + err.message);
+    }
+}
+
+// Re-fetch the class detail (or replay from cached state offline) and
+// re-render only the events section. Keeps the syllabus iframe + tasks
+// intact (no flicker on the rest of the surface).
+async function refreshEventsOnly(opts = {}) {
+    const classId = state.currentClassId;
+    if (!classId) return;
+    let data;
+    try {
+        data = await api.classDetail(classId);
+        state.lastClassDetail = data;
+    } catch (err) {
+        if (isOfflineError(err) && state.lastClassDetail) {
+            // Offline: mutate the cached events to match the queued action.
+            data = state.lastClassDetail;
+            if (opts.optimisticAddAll) {
+                data.events = data.events.map((e) =>
+                    ({ ...e, added_to_calendar: true }));
+            } else if (opts.optimisticRemoveAll) {
+                data.events = data.events.map((e) =>
+                    ({ ...e, added_to_calendar: false }));
+            } else if (opts.optimisticDeleteAll) {
+                data.events = [];
+            }
+        } else { throw err; }
+    }
+    renderEventsForClass(classId, data.events || []);
 }
 
 export function hideClassDetail() {

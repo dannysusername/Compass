@@ -601,6 +601,134 @@ code {
     margin-top: 4px;
 }
 
+/* Per-event "Add / Remove from calendar" toggle buttons.
+   Shape mirrors the legacy .event-add-cal; color signals direction —
+   rust for "add", muted ink for "remove". */
+.event-list .event-cal-toggle-form {
+    margin: 0;
+    padding: 0;
+}
+.event-list .event-cal-add,
+.event-list .event-cal-remove {
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 700;
+    background: transparent;
+    padding: 3px 8px;
+    border-radius: 2px;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background 0.1s, color 0.1s;
+    box-shadow: none;
+}
+.event-list .event-cal-add {
+    color: var(--rust);
+    border: 1px solid var(--rust);
+}
+.event-list .event-cal-add:hover {
+    background: var(--rust);
+    color: var(--paper);
+    transform: none;
+    box-shadow: none;
+}
+.event-list .event-cal-remove {
+    color: var(--ink);
+    border: 1px solid var(--ink-2, var(--ink));
+    opacity: 0.7;
+}
+.event-list .event-cal-remove:hover {
+    background: var(--ink);
+    color: var(--paper);
+    opacity: 1;
+    transform: none;
+    box-shadow: none;
+}
+
+/* Post-parse "we found N events" callout. Set apart from the rest of
+   the Events section so it draws the eye on first land — but not so
+   loud that it's a permanent fixture (it disappears once everything's
+   added or removed). */
+.events-review-banner {
+    margin: 0 0 18px;
+    padding: 16px 18px;
+    background: var(--paper-2);
+    border: 1px solid var(--rust);
+    border-left: 4px solid var(--rust);
+    border-radius: 2px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+.events-review-banner-text {
+    font-family: var(--serif);
+    font-size: 15px;
+    color: var(--ink-2, var(--ink));
+}
+.events-review-banner-text strong {
+    color: var(--rust);
+    font-weight: 700;
+}
+.events-review-banner-actions {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+}
+.events-review-banner-actions .subtle {
+    font-size: 12px;
+    font-family: var(--mono);
+}
+
+/* Pending review / On calendar subsection headers + their bulk-action
+   button. The h3 keeps a narrow visual weight so it doesn't compete
+   with the section h2. */
+.events-subsection {
+    margin-top: 18px;
+}
+.events-subsection:first-child {
+    margin-top: 0;
+}
+.events-subsection-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 8px;
+}
+.events-subsection-head h3 {
+    margin: 0;
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    color: var(--ink);
+}
+.events-subsection-head form.inline {
+    margin: 0;
+}
+
+/* Top-of-section toolbar — surfaces destructive bulk actions (Delete
+   all events) when no review banner is present. When the banner IS
+   present, Delete all lives inside .events-review-banner-actions
+   alongside Add all so the user doesn't have to scroll. */
+.events-section-toolbar {
+    display: flex;
+    justify-content: flex-end;
+    margin: 0 0 12px;
+}
+.events-section-toolbar form.inline { margin: 0; }
+
+@media (max-width: 480px) {
+    .event-list .event-cal-add,
+    .event-list .event-cal-remove { grid-column: 1 / -1; justify-self: start; }
+    .events-review-banner-actions { flex-direction: column; align-items: flex-start; }
+    .events-subsection-head { flex-direction: column; align-items: flex-start; }
+}
+
 /* ---- Syllabus link section (top of class page) ---- */
 
 .syllabus-link {

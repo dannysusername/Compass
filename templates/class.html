@@ -35,48 +35,108 @@
 </section>
 {% endif %}
 
+{% macro render_event(e, on_calendar) %}
+<li>
+    <span class="kind">{{ e.kind }}</span>
+    <span class="title">{{ e.title }}</span>
+    <span class="when">{{ e.starts_at.strftime('%a %b %d %H:%M') if e.starts_at else 'TBD' }}</span>
+    {% if on_calendar %}
+    <form method="post" action="/events/{{ e.id }}/remove-from-calendar" class="event-cal-toggle-form">
+        <button type="submit" class="event-cal-remove" title="Move this event back to pending review">− Remove from calendar</button>
+    </form>
+    {% else %}
+    <form method="post" action="/events/{{ e.id }}/add-to-calendar" class="event-cal-toggle-form">
+        <button type="submit" class="event-cal-add" title="Add this event to your calendar">+ Add to calendar</button>
+    </form>
+    {% endif %}
+    {% if e.source_text %}
+    <details class="source event-source"><summary>show source</summary><blockquote>{{ e.source_text }}</blockquote></details>
+    {% endif %}
+    <details class="row-actions">
+        <summary>Edit</summary>
+        <form method="post" action="/events/{{ e.id }}/edit" class="inline-edit">
+            <label>Title <input type="text" name="title" value="{{ e.title }}" required></label>
+            <label>Kind
+                <input type="text" name="kind" value="{{ e.kind }}" placeholder="quiz, lab, exam, lecture, ...">
+            </label>
+            <label>Starts at (ISO)
+                <input type="text" name="starts_at" value="{{ e.starts_at.strftime('%Y-%m-%dT%H:%M:%S') if e.starts_at else '' }}" placeholder="2026-09-15T23:59:00">
+            </label>
+            <label>Ends at (optional)
+                <input type="text" name="ends_at" value="{{ e.ends_at.strftime('%Y-%m-%dT%H:%M:%S') if e.ends_at else '' }}">
+            </label>
+            <button type="submit">Save</button>
+        </form>
+        <form method="post" action="/events/{{ e.id }}/delete" onsubmit="return confirm('Delete this event permanently?')">
+            <button type="submit" class="danger-btn">Delete</button>
+        </form>
+    </details>
+</li>
+{% endmacro %}
+
 <details class="class-section" data-state-key="class-{{ cls.id }}-events" open>
 <summary class="class-section-summary">
     <h2>Events</h2>
     <span class="section-toggle-chevron" aria-hidden="true"></span>
 </summary>
 <div class="class-section-body">
-    {% if events %}
-    <ul class="event-list">
-        {% for e in events %}
-        <li>
-            <span class="kind">{{ e.kind }}</span>
-            <span class="title">{{ e.title }}</span>
-            <span class="when">{{ e.starts_at.strftime('%a %b %d %H:%M') if e.starts_at else 'TBD' }}</span>
-            <form method="post" action="/events/{{ e.id }}/clone" class="event-add-cal-form">
-                <button type="submit" class="event-add-cal" title="Add a copy of this event to the calendar">+ Add to calendar</button>
+    {% set total_events = (pending_events|length) + (added_events|length) %}
+    {% if pending_events %}
+    <div class="events-review-banner">
+        <div class="events-review-banner-text">
+            <strong>{{ pending_events|length }} event{{ '' if pending_events|length == 1 else 's' }} found</strong> in your syllabus.
+            Add them to your calendar?
+        </div>
+        <div class="events-review-banner-actions">
+            <form method="post" action="/classes/{{ cls.id }}/events/add-all" class="inline">
+                <button type="submit" class="primary">Add all to calendar</button>
             </form>
-            {% if e.source_text %}
-            <details class="source event-source"><summary>show source</summary><blockquote>{{ e.source_text }}</blockquote></details>
-            {% endif %}
-            <details class="row-actions">
-                <summary>Edit</summary>
-                <form method="post" action="/events/{{ e.id }}/edit" class="inline-edit">
-                    <label>Title <input type="text" name="title" value="{{ e.title }}" required></label>
-                    <label>Kind
-                        <input type="text" name="kind" value="{{ e.kind }}" placeholder="quiz, lab, exam, lecture, ...">
-                    </label>
-                    <label>Starts at (ISO)
-                        <input type="text" name="starts_at" value="{{ e.starts_at.strftime('%Y-%m-%dT%H:%M:%S') if e.starts_at else '' }}" placeholder="2026-09-15T23:59:00">
-                    </label>
-                    <label>Ends at (optional)
-                        <input type="text" name="ends_at" value="{{ e.ends_at.strftime('%Y-%m-%dT%H:%M:%S') if e.ends_at else '' }}">
-                    </label>
-                    <button type="submit">Save</button>
-                </form>
-                <form method="post" action="/events/{{ e.id }}/delete" onsubmit="return confirm('Delete this event?')">
-                    <button type="submit" class="danger-btn">Delete</button>
-                </form>
-            </details>
-        </li>
-        {% endfor %}
-    </ul>
-    {% else %}
+            <form method="post" action="/classes/{{ cls.id }}/events/delete-all" class="inline"
+                  onsubmit="return confirm('Permanently delete ALL {{ total_events }} event{{ '' if total_events == 1 else 's' }} for this class? This cannot be undone.')">
+                <button type="submit" class="danger-btn">Delete all events</button>
+            </form>
+            <span class="subtle">or review below — your choice sticks until you change it.</span>
+        </div>
+    </div>
+
+    <div class="events-subsection">
+        <div class="events-subsection-head">
+            <h3>Pending review</h3>
+            <form method="post" action="/classes/{{ cls.id }}/events/add-all" class="inline">
+                <button type="submit" class="small">Add all to calendar</button>
+            </form>
+        </div>
+        <ul class="event-list">
+            {% for e in pending_events %}{{ render_event(e, false) }}{% endfor %}
+        </ul>
+    </div>
+    {% elif added_events %}
+    {# No pending events but the user has on-calendar ones — surface Delete
+       all at the top so it's reachable without scrolling. #}
+    <div class="events-section-toolbar">
+        <form method="post" action="/classes/{{ cls.id }}/events/delete-all" class="inline"
+              onsubmit="return confirm('Permanently delete ALL {{ total_events }} event{{ '' if total_events == 1 else 's' }} for this class? This cannot be undone.')">
+            <button type="submit" class="danger-btn small">Delete all events</button>
+        </form>
+    </div>
+    {% endif %}
+
+    {% if added_events %}
+    <div class="events-subsection">
+        <div class="events-subsection-head">
+            <h3>On calendar</h3>
+            <form method="post" action="/classes/{{ cls.id }}/events/remove-all" class="inline"
+                  onsubmit="return confirm('Move all {{ added_events|length }} event{{ '' if added_events|length == 1 else 's' }} back to pending review? (Not permanent — you can re-add them.)')">
+                <button type="submit" class="small">Remove all from calendar</button>
+            </form>
+        </div>
+        <ul class="event-list">
+            {% for e in added_events %}{{ render_event(e, true) }}{% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+
+    {% if not pending_events and not added_events %}
     <p class="empty">No events yet.</p>
     {% endif %}
 </div>
@@ -136,6 +196,7 @@
 
 <script src="{{ '/static/todo.js' | static_v }}" defer></script>
 <script src="{{ '/static/modal.js' | static_v }}" defer></script>
+<script src="{{ '/static/event-review.js' | static_v }}" defer></script>
 
 <script>
 // Floating tasks panel toggle.

@@ -127,8 +127,40 @@
         });
     }
 
+    function wireSubmitGuard(form) {
+        form.addEventListener("submit", function (e) {
+            if (form.dataset.submitting === "1") {
+                e.preventDefault();
+                return;
+            }
+            var input = form.querySelector('input[type="file"]');
+            if (input && input.required && !(input.files && input.files.length)) {
+                // Let the browser surface its native "please pick a file" prompt;
+                // don't latch the guard.
+                return;
+            }
+            form.dataset.submitting = "1";
+            var btn = form.querySelector('button[type="submit"], input[type="submit"]');
+            if (btn) {
+                btn.disabled = true;
+                btn.setAttribute("aria-busy", "true");
+                if (!btn.dataset.originalLabel) {
+                    btn.dataset.originalLabel = btn.textContent;
+                }
+                btn.textContent = "Uploading…";
+            }
+        });
+    }
+
     function init() {
         document.querySelectorAll("[data-upload-zone]").forEach(wireZone);
+        document.querySelectorAll("[data-upload-zone]").forEach(function (zone) {
+            var form = zone.closest("form");
+            if (form && !form.dataset.submitGuard) {
+                form.dataset.submitGuard = "1";
+                wireSubmitGuard(form);
+            }
+        });
         wireThemeToggle();
     }
 
