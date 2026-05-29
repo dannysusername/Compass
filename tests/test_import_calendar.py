@@ -150,8 +150,14 @@ def test_url_import_blocks_private_address(auth_client):
 # ---- Visibility + collectors + iCal -----------------------------------------
 
 def test_visibility_hides_from_today_but_toggle_restores(auth_client):
-    # Event dated "today" so it lands in the today collector.
-    today = datetime.now().strftime("%Y%m%dT100000Z")
+    # Event dated "today" so it lands in the today collector. Anchor to noon
+    # *today in the app's display tz* (LOCAL_TZ), expressed in UTC: the today
+    # collector buckets in LOCAL_TZ, so a bare datetime.now() (server wall
+    # clock — UTC in CI) drifts onto the wrong calendar day near the date
+    # boundary. Noon is far from any boundary, so this is stable everywhere.
+    today = (datetime.now(main.LOCAL_TZ)
+             .replace(hour=12, minute=0, second=0, microsecond=0)
+             .astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
     ics = _ics(
         f"BEGIN:VEVENT\r\nUID:v@t\r\nSUMMARY:Visible event\r\n"
         f"DTSTART:{today}\r\nEND:VEVENT\r\n"
