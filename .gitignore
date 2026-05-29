@@ -52,4 +52,5 @@ docs/
 extension-experimental/SPEC.md
 extension-experimental/POSSIBILITIES.md
 extension-experimental/SPEC-EDGE-CASES.md
+extension-experimental/tests/README.md
 tests_browser/MOBILE-SPEC.md
