@@ -41,3 +41,15 @@ test_syllabus.pdf
 !requirements.txt
 !requirements-dev.txt
 !runtime.txt
+
+# Claude / project documentation — local-only, never pushed.
+# README.md (and any other non-Claude .md) stays tracked; add those with
+# `git add -f <file>` if a new one falls under an ignored path. notes/ is
+# already ignored above.
+CLAUDE.md
+OFFLINE-PLAN.md
+docs/
+extension-experimental/SPEC.md
+extension-experimental/POSSIBILITIES.md
+extension-experimental/SPEC-EDGE-CASES.md
+tests_browser/MOBILE-SPEC.md
