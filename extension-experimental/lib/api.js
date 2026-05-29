@@ -118,6 +118,8 @@ export const api = {
     },
     syllabusStatus: (id) =>
         request(`/syllabus/${id}/status.json`),
+    reparseSyllabus: (id) =>
+        request(`/syllabus/${id}/reparse`, { method: "POST" }),
     today: () => request("/today.json"),
     week: (days = 7) => request(`/week.json?days=${days}`),
     month: (m) => request("/month.json" + (m ? `?month=${m}` : "")),
@@ -193,6 +195,19 @@ export const api = {
         fd.append("occurrence_at", occurrenceAt);
         return request(`/tasks/${id}/end-after`, { method: "POST", body: fd });
     },
+    // Generic form POST — used by the offline queue to replay raw requests
+    // (recurring exclude / end-after) verbatim on reconnect.
+    postForm: (path, fields) => {
+        const fd = new FormData();
+        for (const [k, v] of Object.entries(fields || {})) fd.append(k, v);
+        return request(path, { method: "POST", body: fd });
+    },
+    postJson: (path, obj) =>
+        request(path, {
+            method: "POST",
+            body: JSON.stringify(obj || {}),
+            headers: { "Content-Type": "application/json" },
+        }),
     // ---- Local-first sync (step 2) ----
     syncPull: (since) =>
         request("/sync" + (since ? `?since=${encodeURIComponent(since)}` : "")),

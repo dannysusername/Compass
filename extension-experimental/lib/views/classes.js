@@ -10,12 +10,30 @@ import { showLogin, showSecondary, returnToList, setFabHidden } from "../nav.js"
 import { renderRow } from "./row.js";
 import { ensureLookups } from "../lookups.js";
 import { showAddClass } from "../forms/add-class.js";
-import { showSyllabusUpload } from "../forms/syllabus.js";
+import { showSyllabusUpload, startReparse } from "../forms/syllabus.js";
 import { showSettings, setXaiStatus } from "../forms/settings.js";
 import { load } from "./index.js";
 import { isOfflineError, queueUpsert, queueDelete } from "../sync.js";
 
 const $ = (sel) => document.querySelector(sel);
+
+// Parsing is allowed when the user has their own key (uncapped) OR the
+// server's free pool is configured and this account still has parses left.
+// Shared by the "+ Upload syllabus" button and the class-detail "Reparse"
+// button — mirrors the server's _parse_gate_response (docs/SYLLABUS.md).
+// free_parses_remaining === null ⇒ uncapped (own key OR admin grant).
+export function canParseNow() {
+    const me = state.me || {};
+    return !!me.xai_api_key_set
+        || me.free_parses_remaining === null
+        || (!!me.server_key_available && (me.free_parses_remaining || 0) > 0);
+}
+function parseBlockMsg() {
+    const me = state.me || {};
+    return me.server_key_available
+        ? "You've used all your free syllabus parses — add your own xAI key in Settings for unlimited."
+        : "Set your xAI API key in Settings first to parse syllabi.";
+}
 
 export async function loadClasses() {
     const target = $("#content");
@@ -47,17 +65,9 @@ function renderClassesList(target, classes) {
     const uploadBtn = document.createElement("button");
     uploadBtn.type = "button";
     uploadBtn.textContent = "+ Upload syllabus";
-    // Parsing is allowed when the user has their own key (uncapped) OR the
-    // server's free pool is configured and this account still has parses
-    // left. Out of free parses (or no key path at all) → bounce to Settings.
-    const me = state.me || {};
-    // free_parses_remaining === null ⇒ uncapped (own key OR admin grant).
-    const canParse = !!me.xai_api_key_set
-        || me.free_parses_remaining === null
-        || (!!me.server_key_available && (me.free_parses_remaining || 0) > 0);
-    const blockMsg = me.server_key_available
-        ? "You've used all your free syllabus parses — add your own xAI key in Settings for unlimited."
-        : "Set your xAI API key in Settings first to parse syllabi.";
+    // Out of free parses (or no key path at all) → bounce to Settings.
+    const canParse = canParseNow();
+    const blockMsg = parseBlockMsg();
     if (state.me && !canParse) {
         uploadBtn.classList.add("is-disabled");
         uploadBtn.title = blockMsg;
@@ -131,6 +141,7 @@ export async function showClassDetail(classId) {
         $("#class-detail-code").textContent = data.class.code;
         $("#class-detail-name").textContent = data.class.name || "";
 
+        state.currentSyllabusId = data.syllabus ? data.syllabus.id : null;
         if (data.syllabus && data.syllabus.filename) {
             const url = await api.fileUrl(data.syllabus.filename);
             $("#class-detail-pdf").src = url;
@@ -145,6 +156,10 @@ export async function showClassDetail(classId) {
             };
             dl.href = url;
             dl.setAttribute("download", data.syllabus.filename);
+            // Reparse is only meaningful with a syllabus present, and is gated
+            // by the same entitlement as a fresh upload.
+            const reparseBtn = $("#class-detail-reparse");
+            reparseBtn.hidden = !canParseNow();
             $("#class-detail-syllabus-section").hidden = false;
         }
 
@@ -444,18 +459,45 @@ async function renderDocRow(d) {
 export function bindClassDetail() {
     $("#class-detail-back").addEventListener("click", hideClassDetail);
 
+    $("#class-detail-reparse").addEventListener("click", () => {
+        const syllabusId = state.currentSyllabusId;
+        const classId = state.currentClassId;
+        if (!syllabusId || !classId) return;
+        if (!canParseNow()) {
+            showSettings();
+            setXaiStatus(parseBlockMsg(), "error");
+            return;
+        }
+        if (!confirm("Reparsing re-runs the AI parse on this syllabus and ERASES the events previously found from it, replacing them with a fresh set. Continue?")) return;
+        startReparse(syllabusId, classId);
+    });
+
     const docForm = $("#class-detail-doc-upload");
+    const fileInput = $("#class-detail-doc-file");
+    const chooseBtn = $("#class-detail-doc-choose");
+    const fileName = $("#class-detail-doc-filename");
+    // The file input is hidden; only the "Choose file" button opens the
+    // picker. Clicking elsewhere on the row does nothing (the bare native
+    // input used to open Finder from anywhere on the row).
+    chooseBtn.addEventListener("click", () => fileInput.click());
+    fileInput.addEventListener("change", () => {
+        const f = fileInput.files[0];
+        fileName.textContent = f ? f.name : "No file chosen";
+        fileName.classList.toggle("has-file", !!f);
+    });
+
     docForm.addEventListener("submit", async (e) => {
         e.preventDefault();
         if (!state.currentClassId) return;
-        const fileInput = $("#class-detail-doc-file");
         const file = fileInput.files[0];
-        if (!file) return;
+        if (!file) { setDocStatus("Choose a file first.", "error"); return; }
         const title = (docForm.title.value || "").trim();
         setDocStatus("Uploading…", "pending");
         try {
             await api.uploadDoc(state.currentClassId, file, title);
             docForm.reset();
+            fileName.textContent = "No file chosen";
+            fileName.classList.remove("has-file");
             setDocStatus("Uploaded ✓", "success");
             setTimeout(() => setDocStatus("", ""), 800);
             await showClassDetail(state.currentClassId);
@@ -467,16 +509,25 @@ export function bindClassDetail() {
 
     $("#class-detail-delete").addEventListener("click", async () => {
         if (!state.currentClassId) return;
+        const id = state.currentClassId;
         const code = $("#class-detail-code").textContent || "this class";
         if (!confirm(`Delete ${code} and everything in it?`)) return;
         try {
-            await api.deleteClass(state.currentClassId);
+            await api.deleteClass(id);
             resetCaches();
             hideClassDetail();
             await ensureLookups();
             await load();
         } catch (err) {
             if (err instanceof NotAuthenticated) { showLogin(); return; }
+            if (isOfflineError(err)) {
+                // Queue the delete (mirror + tombstone-on-push) so it removes
+                // on reconnect; leave the detail surface. Mirrors web parity.
+                await queueDelete("classes", id);
+                resetCaches();
+                hideClassDetail();
+                return;
+            }
             alert("Couldn't delete class: " + err.message);
         }
     });

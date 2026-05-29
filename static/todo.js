@@ -152,6 +152,17 @@
                         // sections so the rows disappear from every view.
                         await softRefresh();
                     } catch (err) {
+                        // Offline: queue the exact request to replay on
+                        // reconnect (server does the exdate/UNTIL date math —
+                        // we don't replicate it). Skip for a never-synced temp
+                        // id (no server row to exclude against yet).
+                        if (window.CompassSync && CompassSync.isOffline(err)
+                            && !String(id).startsWith('tmp-')) {
+                            await CompassSync.queueRequest(`/tasks/${id}/${path}`,
+                                { occurrence_at: occurrenceAt });
+                            removeRowsFromUI('task', id);
+                            return;
+                        }
                         alert('Could not delete: ' + err.message);
                     }
                     return;
@@ -717,7 +728,7 @@
                         title,
                         due_at: due || null,
                         starts_at: starts || null,
-                        tag_id: tagId ? Number(tagId) : null,
+                        tag_id: tagIdForQueue(tagId),
                         notes: notesField ? (notesField.value || null) : null,
                         class_id: newClassId || null,
                         rrule: (rruleSelect && rruleSelect.value) || '',
@@ -883,8 +894,17 @@
                         droppedSourceList.appendChild(droppedRow);
                     }
                 } catch (err) {
-                    console.error('cross-class move failed:', err);
-                    if (droppedSourceList) droppedSourceList.appendChild(droppedRow);
+                    // Offline: keep the move + queue the class_id edit (partial
+                    // update) so it syncs on reconnect.
+                    if (window.CompassSync && CompassSync.isOffline(err)
+                        && !String(taskId).startsWith('tmp-')) {
+                        await CompassSync.queueUpsert('tasks',
+                            { id: taskId, class_id: newClassKey === '0' ? null : newClassKey });
+                        droppedRow.dataset.classId = newClassKey;
+                    } else {
+                        console.error('cross-class move failed:', err);
+                        if (droppedSourceList) droppedSourceList.appendChild(droppedRow);
+                    }
                 }
             }
 
@@ -901,17 +921,23 @@
                 .filter(Boolean);
             if (items.length > 0) {
                 const url = inDayModal ? '/tasks/reorder-day' : '/tasks/reorder';
-                const body = inDayModal
-                    ? JSON.stringify({ day: dayDate, items })
-                    : JSON.stringify({ items });
+                const bodyObj = inDayModal ? { day: dayDate, items } : { items };
                 try {
                     await fetch(url, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-                        body,
+                        body: JSON.stringify(bodyObj),
                     });
                 } catch (err) {
-                    console.error('reorder failed:', err);
+                    // Offline: replay the exact reorder request on reconnect.
+                    // reorder-day writes DayItemPosition and reorder writes the
+                    // global position — neither is a simple push field, so we
+                    // let the server redo it from the queued request.
+                    if (window.CompassSync && CompassSync.isOffline(err)) {
+                        await CompassSync.queueRequest(url, bodyObj, { json: true });
+                    } else {
+                        console.error('reorder failed:', err);
+                    }
                 }
             }
             // Week page: re-pull the calendar so day-cells AND each day's
@@ -984,9 +1010,34 @@
 
     // ---- Add task (with class picker) ----
 
+    // tag_id for the offline queue: preserve a temp id (so the server resolves
+    // a just-created-offline tag in the same push), coerce a real numeric id to
+    // a number, and treat '' as cleared.
+    function tagIdForQueue(tagId) {
+        if (!tagId) return null;
+        return /^tmp-/.test(tagId) ? tagId : Number(tagId);
+    }
+
+    // Make a tag selectable right away in every open picker (used when a tag is
+    // created offline and only has a temp client_id).
+    function injectTagOption(localId, name, color) {
+        document.querySelectorAll('[data-add-task-tag]').forEach((sel) => {
+            if (sel.querySelector(`option[value="${localId}"]`)) return;
+            const opt = document.createElement('option');
+            opt.value = localId;
+            opt.textContent = name;
+            opt.dataset.color = color || '';
+            const newOpt = sel.querySelector('option[value="__new__"]');
+            if (newOpt) sel.insertBefore(opt, newOpt); else sel.appendChild(opt);
+        });
+    }
+
     async function resolveTagId(form) {
-        // Returns a tag id string ('' if no tag, or a numeric id). May
-        // create a new tag on the server if the user picked '+ New tag'.
+        // Returns a tag id string ('' if no tag, or an id). May create a new
+        // tag — on the server when online, or locally (queued, returning a temp
+        // id) when offline so the inline "+ New tag" flow still works. The
+        // task that uses the temp id queues with it; the server resolves both
+        // in the same push (cross-entity temp-id resolution).
         const tagSelect = form.querySelector('[data-add-task-tag]');
         if (!tagSelect) return '';
         if (tagSelect.value !== '__new__') return tagSelect.value;
@@ -1000,17 +1051,26 @@
         const fd = new FormData();
         fd.append('name', name);
         fd.append('color', color);
-        const r = await fetch('/tags', {
-            method: 'POST', body: fd,
-            headers: { 'Accept': 'application/json' },
-        });
-        if (!r.ok) {
-            let detail = `${r.status} ${r.statusText}`;
-            try { const j = await r.json(); if (j.detail) detail = j.detail; } catch (_) {}
-            throw new Error(detail);
+        try {
+            const r = await fetch('/tags', {
+                method: 'POST', body: fd,
+                headers: { 'Accept': 'application/json' },
+            });
+            if (!r.ok) {
+                let detail = `${r.status} ${r.statusText}`;
+                try { const j = await r.json(); if (j.detail) detail = j.detail; } catch (_) {}
+                throw new Error(detail);
+            }
+            const tag = await r.json();
+            return String(tag.id);
+        } catch (err) {
+            if (window.CompassSync && CompassSync.isOffline(err)) {
+                const localId = await CompassSync.queueUpsert('tags', { name, color });
+                injectTagOption(localId, name, color);
+                return String(localId);
+            }
+            throw err;
         }
-        const tag = await r.json();
-        return String(tag.id);
     }
 
     function bindTagPicker(form) {
@@ -1166,7 +1226,7 @@
                         starts_at: (startsInput && startsInput.value) || null,
                         is_all_day: !!(allDayCheckbox && allDayCheckbox.checked),
                         rrule: (rruleSelect && rruleSelect.value) || '',
-                        tag_id: tagId ? Number(tagId) : null,
+                        tag_id: tagIdForQueue(tagId),
                         class_id: classId || null,
                         notes: (notesField && notesField.value.trim()) || null,
                     };
@@ -1301,13 +1361,11 @@
         const modal = document.getElementById('manage-tags-modal');
         if (!modal) return;
         const list = modal.querySelector('[data-tag-manage-list]');
+        let cachedTags = [];  // last-known tags so offline edits/deletes re-render
 
-        async function refresh() {
+        function render(tags) {
             list.innerHTML = '';
-            const r = await fetch('/tags.json', { headers: { 'Accept': 'application/json' } });
-            if (!r.ok) { list.innerHTML = '<li class="empty">Could not load tags.</li>'; return; }
-            const tags = await r.json();
-            if (tags.length === 0) {
+            if (!tags || tags.length === 0) {
                 list.innerHTML = '<li class="empty">No tags yet.</li>';
                 return;
             }
@@ -1342,6 +1400,22 @@
             });
         }
 
+        async function refresh() {
+            try {
+                const r = await fetch('/tags.json', { headers: { 'Accept': 'application/json' } });
+                if (!r.ok) throw new Error(`${r.status}`);
+                cachedTags = await r.json();
+            } catch (err) {
+                // Offline (or transient): keep showing the last-known list so an
+                // offline edit/delete stays visible instead of wiping to an error.
+                if (!(window.CompassSync && CompassSync.isOffline(err))) {
+                    list.innerHTML = '<li class="empty">Could not load tags.</li>';
+                    return;
+                }
+            }
+            render(cachedTags);
+        }
+
         function editInline(li, tag) {
             li.innerHTML = `
                 <input type="color" data-edit-color>
@@ -1360,25 +1434,41 @@
                 const newName = (li.querySelector('[data-edit-name]').value || '').trim();
                 const newColor = li.querySelector('[data-edit-color]').value;
                 if (!newName) return;
+                const tagId = String(tag.id);
+                const applyEdit = () => {
+                    applyTagEditToTree(document, tagId, newName, newColor);
+                    document.querySelectorAll('template[data-day-modal-content]').forEach((tpl) => {
+                        applyTagEditToTree(tpl.content, tagId, newName, newColor);
+                    });
+                    const cached = cachedTags.find((t) => String(t.id) === tagId);
+                    if (cached) { cached.name = newName; cached.color = newColor; }
+                };
                 const fd = new FormData();
                 fd.append('name', newName);
                 fd.append('color', newColor);
-                const r = await fetch(`/tags/${tag.id}/edit`, {
-                    method: 'POST', body: fd,
-                    headers: { 'Accept': 'application/json' },
-                });
-                if (!r.ok) {
-                    let detail = `${r.status} ${r.statusText}`;
-                    try { const j = await r.json(); if (j.detail) detail = j.detail; } catch (_) {}
-                    alert('Could not save: ' + detail);
-                    return;
+                try {
+                    const r = await fetch(`/tags/${tag.id}/edit`, {
+                        method: 'POST', body: fd,
+                        headers: { 'Accept': 'application/json' },
+                    });
+                    if (!r.ok) {
+                        let detail = `${r.status} ${r.statusText}`;
+                        try { const j = await r.json(); if (j.detail) detail = j.detail; } catch (_) {}
+                        alert('Could not save: ' + detail);
+                        return;
+                    }
+                    applyEdit();
+                    refresh();
+                } catch (err) {
+                    if (window.CompassSync && CompassSync.isOffline(err)) {
+                        await CompassSync.queueUpsert('tags',
+                            { id: tagIdForQueue(tagId), name: newName, color: newColor });
+                        applyEdit();
+                        render(cachedTags);   // exit edit mode without a refetch
+                        return;
+                    }
+                    alert('Could not save: ' + (err.message || err));
                 }
-                const tagId = String(tag.id);
-                applyTagEditToTree(document, tagId, newName, newColor);
-                document.querySelectorAll('template[data-day-modal-content]').forEach((tpl) => {
-                    applyTagEditToTree(tpl.content, tagId, newName, newColor);
-                });
-                refresh();
             });
         }
 
@@ -1437,24 +1527,38 @@
 
         async function deleteTag(tag) {
             if (!confirm(`Delete tag "${tag.name}"? Tasks using it will become untagged.`)) return;
-            const r = await fetch(`/tags/${tag.id}/delete`, {
-                method: 'POST', headers: { 'Accept': 'application/json' },
-            });
-            if (!r.ok) {
-                let detail = `${r.status} ${r.statusText}`;
-                try { const j = await r.json(); if (j.detail) detail = j.detail; } catch (_) {}
-                alert('Could not delete: ' + detail);
-                return;
-            }
             const tagId = String(tag.id);
-            applyTagDeletionToTree(document, tagId);
-            // Week view stashes per-day todo-rows inside <template> elements
-            // that get cloned when a day cell is clicked — patch those too
-            // so the modal opened later doesn't show the dead tag.
-            document.querySelectorAll('template[data-day-modal-content]').forEach((tpl) => {
-                applyTagDeletionToTree(tpl.content, tagId);
-            });
-            refresh();
+            const applyDel = () => {
+                applyTagDeletionToTree(document, tagId);
+                // Week view stashes per-day todo-rows inside <template> elements
+                // that get cloned when a day cell is clicked — patch those too
+                // so the modal opened later doesn't show the dead tag.
+                document.querySelectorAll('template[data-day-modal-content]').forEach((tpl) => {
+                    applyTagDeletionToTree(tpl.content, tagId);
+                });
+                cachedTags = cachedTags.filter((t) => String(t.id) !== tagId);
+            };
+            try {
+                const r = await fetch(`/tags/${tag.id}/delete`, {
+                    method: 'POST', headers: { 'Accept': 'application/json' },
+                });
+                if (!r.ok) {
+                    let detail = `${r.status} ${r.statusText}`;
+                    try { const j = await r.json(); if (j.detail) detail = j.detail; } catch (_) {}
+                    alert('Could not delete: ' + detail);
+                    return;
+                }
+                applyDel();
+                refresh();
+            } catch (err) {
+                if (window.CompassSync && CompassSync.isOffline(err)) {
+                    await CompassSync.queueDelete('tags', tag.id);
+                    applyDel();
+                    render(cachedTags);   // drop the row without a refetch
+                    return;
+                }
+                alert('Could not delete: ' + (err.message || err));
+            }
         }
 
         document.querySelectorAll('[data-open-manage-tags]').forEach((btn) => {
@@ -1588,7 +1692,13 @@
                     body: JSON.stringify({ order }),
                 });
             } catch (err) {
-                console.error('class reorder failed:', err);
+                // Offline: class order lives on User.class_order_json (not a
+                // push field), so replay the exact request on reconnect.
+                if (window.CompassSync && CompassSync.isOffline(err)) {
+                    await CompassSync.queueRequest('/classes/reorder', { order }, { json: true });
+                } else {
+                    console.error('class reorder failed:', err);
+                }
             }
         }
 

@@ -26,6 +26,11 @@
         &middot;
         <a href="/uploads/{{ syllabus.filename }}" download="{{ syllabus.filename }}">Download</a>
     </p>
+    <form method="post" action="/syllabus/{{ syllabus.id }}/reparse" class="syllabus-reparse"
+          onsubmit="return confirm('Reparsing re-runs the AI parse on this syllabus and ERASES the events previously found from it, replacing them with a fresh set. Continue?')">
+        <button type="submit" class="small">↻ Reparse syllabus</button>
+        <span class="subtle">Re-run the AI parse — replaces the events found from this syllabus.</span>
+    </form>
 </div>
 </details>
 {% else %}
@@ -197,6 +202,7 @@
 <script src="{{ '/static/todo.js' | static_v }}" defer></script>
 <script src="{{ '/static/modal.js' | static_v }}" defer></script>
 <script src="{{ '/static/event-review.js' | static_v }}" defer></script>
+<script src="{{ '/static/class-actions.js' | static_v }}" defer></script>
 
 <script>
 // Floating tasks panel toggle.

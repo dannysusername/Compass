@@ -103,6 +103,8 @@
                 ·
                 <a href="#" id="class-pdf-download" download>Download</a>
             </p>
+            <button type="button" id="class-detail-reparse" class="muted-btn" hidden
+                    title="Re-run the AI parse — replaces the events found from this syllabus">↻ Reparse syllabus</button>
         </details>
         <details class="class-detail-section" open>
             <summary class="day-block-head">Documents</summary>
@@ -114,7 +116,9 @@
                     <input type="text" name="title" placeholder="e.g. Lecture 3 slides">
                 </label>
                 <div class="doc-upload-row">
-                    <input type="file" name="file" id="class-detail-doc-file" required>
+                    <input type="file" name="file" id="class-detail-doc-file" hidden>
+                    <button type="button" class="doc-choose-btn" id="class-detail-doc-choose">Choose file</button>
+                    <span class="doc-filename" id="class-detail-doc-filename">No file chosen</span>
                     <button type="submit" class="primary doc-upload-btn">Upload</button>
                 </div>
                 <div id="class-detail-doc-status" class="status" hidden></div>

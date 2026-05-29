@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-from datetime import datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from email.message import EmailMessage
 from io import BytesIO
 from pathlib import Path
@@ -7,12 +7,16 @@ from types import SimpleNamespace
 from typing import Optional, List, Union
 from zoneinfo import ZoneInfo
 import hashlib
+import ipaddress
 import json
 import logging
 import os
 import secrets
 import smtplib
+import socket
 import ssl
+import urllib.request
+import urllib.parse
 import uuid
 
 from fastapi import (
@@ -295,6 +299,27 @@ class CalendarEvent(SQLModel, table=True):
     cls: Optional[Class] = Relationship(back_populates="events")
 
 
+class ImportedCalendar(SQLModel, table=True):
+    """A one-time import of an external calendar (.ics file or fetched URL).
+    Its events are stored as Task rows carrying `imported_calendar_id`, so
+    they reuse the whole task pipeline — recurrence expansion, done-toggle,
+    edit/delete, week/today/iCal rendering — instead of a parallel table.
+    `visible` toggles the calendar's events on the Weekly page AND in the
+    iCal export feed; `color` is the swatch + the color of its events."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    name: str
+    color: str  # hex
+    source_type: str = Field(default="file")  # "file" | "url"
+    source_ref: Optional[str] = Field(default=None)  # filename or URL (reference)
+    visible: bool = Field(default=True)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: Optional[datetime] = Field(  # sync change-tracking
+        default_factory=lambda: datetime.now(timezone.utc),
+        sa_column_kwargs={"onupdate": lambda: datetime.now(timezone.utc)},
+    )
+
+
 class Task(SQLModel, table=True):
     """User-typed to-do item, optionally attached to a class. Sits alongside
     CalendarEvent on the today/week views — both can be marked done with the
@@ -311,6 +336,10 @@ class Task(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="user.id", index=True)
     class_id: Optional[int] = Field(default=None, foreign_key="class.id")
+    # A task belongs to a class, an imported calendar, or neither (Personal).
+    # Set only for events brought in via an .ics import (docs/IMPORT-CALENDAR.md).
+    imported_calendar_id: Optional[int] = Field(
+        default=None, foreign_key="importedcalendar.id", index=True)
     title: str
     notes: Optional[str] = Field(default=None)  # free-form, surfaced in iCal DESCRIPTION
     starts_at: Optional[datetime] = None  # range start; None = single-date task
@@ -668,6 +697,9 @@ async def lifespan(app: FastAPI):
             _add_column_if_missing(conn, "task", "is_all_day", "INTEGER NOT NULL DEFAULT 0")
             _add_column_if_missing(conn, "task", "rrule_until", "TIMESTAMP")
             _add_column_if_missing(conn, "task", "rrule_exdates", "TEXT")
+            # Imported-calendar membership (docs/IMPORT-CALENDAR.md). The
+            # importedcalendar table itself is created by create_all above.
+            _add_column_if_missing(conn, "task", "imported_calendar_id", "INTEGER")
             # Sync change-tracking columns (local-first step 2).
             _add_column_if_missing(conn, "task", "updated_at", "TIMESTAMP")
             _add_column_if_missing(conn, "class", "updated_at", "TIMESTAMP")
@@ -1001,6 +1033,14 @@ def _own_syllabus(session: "Session", syllabus_id: int, user_id: int) -> Optiona
     if not cls or cls.user_id != user_id:
         return None
     return syl
+
+
+def _own_imported_calendar(session: "Session", calendar_id: int, user_id: int) -> "ImportedCalendar":
+    """404 on missing or cross-user — imported calendars carry user_id."""
+    cal = session.get(ImportedCalendar, calendar_id)
+    if not cal or cal.user_id != user_id:
+        raise HTTPException(404, "Calendar not found")
+    return cal
 
 
 # ---- Helpers ----
@@ -2432,6 +2472,42 @@ def delete_class(class_id: int, request: Request, user: User = Depends(require_l
 
 # ---- Routes: Syllabus upload + parsing ----
 
+def _parse_gate_response(usage: dict, wants_json: bool):
+    """Entitlement gate shared by syllabus upload + reparse. Returns a block
+    response (JSON 400 / 303 to Settings) when the user can't parse, or None
+    to proceed. Keep in lockstep with docs/SYLLABUS.md."""
+    if usage["own_key"]:
+        return None
+    if not usage["server_key_available"]:
+        if wants_json:
+            return JSONResponse({"error": "need_key"}, status_code=400)
+        return RedirectResponse("/settings?need_key=1", status_code=303)
+    # remaining is None for an own-key/admin-granted account → uncapped. A
+    # finite remaining at/below 0 is the only block here.
+    if usage["free_parses_remaining"] is not None and usage["free_parses_remaining"] <= 0:
+        if wants_json:
+            return JSONResponse(
+                {"error": "limit_reached", "free_parse_limit": FREE_PARSE_LIMIT},
+                status_code=400,
+            )
+        return RedirectResponse("/settings?limit=1", status_code=303)
+    return None
+
+
+def _spend_parse_credit(user_id: int, usage: dict) -> None:
+    """Spend one free parse on the capped path (no own key AND no admin grant
+    — both make free_parses_remaining None). No-op when uncapped. Counting at
+    enqueue (not on parse success) keeps the remaining count truthful and
+    stops a burst from slipping past the cap. See docs/SYLLABUS.md."""
+    if usage["free_parses_remaining"] is None:
+        return
+    with Session(engine) as session:
+        u = session.get(User, user_id)
+        u.free_parses_used = (u.free_parses_used or 0) + 1
+        session.add(u)
+        session.commit()
+
+
 @app.post("/syllabus")
 async def syllabus_upload(
     request: Request,
@@ -2441,25 +2517,13 @@ async def syllabus_upload(
 ):
     wants_json = "application/json" in request.headers.get("accept", "")
     usage = _parse_usage(user)
-    # Entitlement gate. Users on their own key sail through (uncapped).
-    # Keyless users ride the shared server key up to FREE_PARSE_LIMIT; past
-    # that they must add their own key. If no server key is configured at
-    # all (dev/tests), keyless upload is blocked outright as before.
-    if not usage["own_key"]:
-        if not usage["server_key_available"]:
-            if wants_json:
-                return JSONResponse({"error": "need_key"}, status_code=400)
-            return RedirectResponse("/settings?need_key=1", status_code=303)
-        # remaining is None for an admin-granted account → uncapped, falls
-        # through. A finite remaining at/below 0 is the only block here.
-        if usage["free_parses_remaining"] is not None and usage["free_parses_remaining"] <= 0:
-            if wants_json:
-                return JSONResponse(
-                    {"error": "limit_reached",
-                     "free_parse_limit": FREE_PARSE_LIMIT},
-                    status_code=400,
-                )
-            return RedirectResponse("/settings?limit=1", status_code=303)
+    # Entitlement gate (shared with reparse). Users on their own key sail
+    # through (uncapped). Keyless users ride the shared server key up to
+    # FREE_PARSE_LIMIT; past that they must add their own key. If no server
+    # key is configured at all (dev/tests), keyless upload is blocked.
+    block = _parse_gate_response(usage, wants_json)
+    if block:
+        return block
     content = await file.read()
     validate_pdf(content)
 
@@ -2490,18 +2554,9 @@ async def syllabus_upload(
         syllabus_id = syllabus.id
         class_id = cls.id
 
-    # Spend one free parse — only on the capped path (no own key AND no
-    # admin grant; both make free_parses_remaining None). Counting at
-    # enqueue (not on parse success) keeps the remaining count the user
-    # sees immediately truthful and stops a burst of uploads from slipping
-    # past the cap before any job finishes. A failed parse therefore still
-    # costs a credit; acceptable at this cap.
-    if usage["free_parses_remaining"] is not None:
-        with Session(engine) as session:
-            u = session.get(User, user.id)
-            u.free_parses_used = (u.free_parses_used or 0) + 1
-            session.add(u)
-            session.commit()
+    # Spend one free parse on the capped path (no-op when uncapped). A failed
+    # parse therefore still costs a credit; acceptable at this cap.
+    _spend_parse_credit(user.id, usage)
 
     parse_jobs[syllabus_id] = "pending"
     background_tasks.add_task(process_syllabus, syllabus_id)
@@ -2545,6 +2600,286 @@ def syllabus_status_json(syllabus_id: int, user: User = Depends(require_login)):
             return JSONResponse({"status": "missing"})
         status = parse_jobs.get(syllabus_id, "unknown")
         return JSONResponse({"status": status, "class_id": syllabus.class_id})
+
+
+@app.post("/syllabus/{syllabus_id}/reparse")
+def syllabus_reparse(
+    syllabus_id: int,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    user: User = Depends(require_login),
+):
+    """Re-run the Grok parse on an already-uploaded syllabus. process_syllabus
+    deletes + recreates this class's CalendarEvent rows, so reparsing REPLACES
+    the previously-found events (the web/extension button warns the user
+    first). Gated + counted exactly like a fresh upload (docs/SYLLABUS.md)."""
+    wants_json = "application/json" in request.headers.get("accept", "")
+    with Session(engine) as session:
+        syllabus = _own_syllabus(session, syllabus_id, user.id)
+        if not syllabus:
+            if wants_json:
+                return JSONResponse({"error": "not_found"}, status_code=404)
+            raise HTTPException(404, "Syllabus not found")
+    usage = _parse_usage(user)
+    block = _parse_gate_response(usage, wants_json)
+    if block:
+        return block
+    _spend_parse_credit(user.id, usage)
+    parse_jobs[syllabus_id] = "pending"
+    background_tasks.add_task(process_syllabus, syllabus_id)
+    if wants_json:
+        return JSONResponse({"syllabus_id": syllabus_id})
+    return RedirectResponse(url=f"/syllabus/{syllabus_id}/status", status_code=303)
+
+
+# ---- Routes: Imported calendars (external .ics → Task rows) ----
+# An imported calendar is a named, colored group whose events are stored as
+# Task rows (imported_calendar_id set) so they reuse the task pipeline. See
+# docs/IMPORT-CALENDAR.md.
+
+def _clean_hex_color(raw: str, fallback: str) -> str:
+    s = (raw or "").strip().lower()
+    return s if _HEX_COLOR_RE.match(s) else fallback
+
+
+def _ical_dt_to_local(dt) -> tuple[Optional[datetime], bool]:
+    """icalendar .dt (date or datetime) → (LOCAL_TZ-aware datetime, is_all_day)."""
+    if isinstance(dt, datetime):
+        return (dt if dt.tzinfo else dt.replace(tzinfo=LOCAL_TZ)), False
+    if isinstance(dt, date):  # bare date → all-day
+        return datetime(dt.year, dt.month, dt.day, tzinfo=LOCAL_TZ), True
+    return None, False
+
+
+def _ical_rrule_to_supported(comp) -> tuple[Optional[str], Optional[datetime]]:
+    """Best-effort map a VEVENT's RRULE onto Compass's supported rule set.
+    Returns (rrule_or_None, until_or_None). INTERVAL!=1 and exotic rules fall
+    back to a single instance (rrule None) — a documented v1 limitation."""
+    rr = comp.get("RRULE")
+    if not rr:
+        return None, None
+    def first(key):
+        v = rr.get(key)
+        return v[0] if isinstance(v, list) and v else v
+    interval = first("INTERVAL")
+    try:
+        interval = int(interval) if interval is not None else 1
+    except (TypeError, ValueError):
+        interval = 1
+    until_raw = first("UNTIL")
+    until = _ical_dt_to_local(until_raw)[0] if until_raw is not None else None
+    if interval != 1:
+        return None, until  # e.g. biweekly → single instance
+    freq = str(first("FREQ") or "").upper()
+    if freq == "DAILY":
+        return "FREQ=DAILY", until
+    if freq == "MONTHLY":
+        return "FREQ=MONTHLY", until
+    if freq == "WEEKLY":
+        byday = rr.get("BYDAY")
+        days = ({str(d).upper() for d in byday} if isinstance(byday, list)
+                else ({str(byday).upper()} if byday else set()))
+        if days == {"MO", "TU", "WE", "TH", "FR"}:
+            return "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR", until
+        return "FREQ=WEEKLY", until
+    return None, until
+
+
+def _parse_ics_events(data: bytes) -> list[dict]:
+    """Parse an .ics blob into task-field dicts (one per VEVENT). Raises 400
+    on unparseable input. DTSTART is required; events without one are skipped."""
+    try:
+        cal = Calendar.from_ical(data)
+    except Exception as e:
+        raise HTTPException(400, f"Couldn't read that as a calendar (.ics): {str(e)[:200]}")
+    out: list[dict] = []
+    for comp in cal.walk("VEVENT"):
+        dtstart = comp.get("DTSTART")
+        if dtstart is None:
+            continue
+        start_dt, all_day = _ical_dt_to_local(dtstart.dt)
+        if start_dt is None:
+            continue
+        dtend = comp.get("DTEND")
+        end_dt = _ical_dt_to_local(dtend.dt)[0] if dtend is not None else None
+        if all_day:
+            # iCal all-day DTEND is exclusive. Single-day all-day → no range.
+            if end_dt is not None and (end_dt - start_dt).days > 1:
+                starts_s, due_s = start_dt.isoformat(), (end_dt - timedelta(days=1)).isoformat()
+            else:
+                starts_s, due_s = "", start_dt.isoformat()
+        else:
+            starts_s = start_dt.isoformat()
+            due_s = end_dt.isoformat() if end_dt is not None else ""
+        starts_dt, due_dt = _normalize_task_range(starts_s, due_s)
+        rrule, until = _ical_rrule_to_supported(comp)
+        title = (str(comp.get("SUMMARY") or "Untitled").strip() or "Untitled")[:500]
+        desc = comp.get("DESCRIPTION")
+        notes = (str(desc).strip() or None) if desc is not None else None
+        out.append({
+            "title": title, "notes": notes, "is_all_day": all_day,
+            "starts_at": starts_dt, "due_at": due_dt,
+            "rrule": rrule, "rrule_until": until,
+        })
+    return out
+
+
+def _is_public_url(parsed) -> bool:
+    """SSRF guard: the host must resolve only to public IPs. Blocks loopback,
+    private, link-local, reserved, multicast targets."""
+    host = parsed.hostname
+    if not host:
+        return False
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror:
+        return False
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            return False
+        if (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+            return False
+    return True
+
+
+def _fetch_ics_from_url(url: str) -> bytes:
+    u = (url or "").strip()
+    if u.lower().startswith("webcal://"):
+        u = "https://" + u[len("webcal://"):]
+    parsed = urllib.parse.urlparse(u)
+    if parsed.scheme not in ("http", "https"):
+        raise HTTPException(400, "Calendar URL must start with http://, https://, or webcal://")
+    if not _is_public_url(parsed):
+        raise HTTPException(400, "That calendar URL isn't reachable (or points to a private address).")
+    limit = MAX_UPLOAD_MB * 1024 * 1024
+    req = urllib.request.Request(u, headers={"User-Agent": "Compass/1.0 (+calendar-import)"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310 (scheme checked above)
+            data = resp.read(limit + 1)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(400, f"Couldn't fetch the calendar URL: {str(e)[:200]}")
+    if len(data) > limit:
+        raise HTTPException(400, f"Calendar is too large (max {MAX_UPLOAD_MB} MB).")
+    return data
+
+
+@app.post("/calendars/import")
+async def import_calendar(
+    request: Request,
+    name: str = Form(""),
+    color: str = Form(""),
+    source_url: str = Form(""),
+    file: Optional[UploadFile] = File(None),
+    user: User = Depends(require_login),
+):
+    """Import an external calendar once, from a .ics file OR a fetched URL.
+    Each VEVENT becomes a Task carrying imported_calendar_id (reusing the
+    task pipeline). Recurring source events get best-effort expansion."""
+    wants_json = "application/json" in request.headers.get("accept", "")
+    cal_name = (name or "").strip() or "Imported calendar"
+    cal_color = _clean_hex_color(color, _pick_tag_color(cal_name))
+
+    has_file = file is not None and bool(file.filename)
+    if has_file:
+        data = await file.read()
+        source_type, source_ref = "file", safe_filename(file.filename)
+    elif source_url.strip():
+        data = _fetch_ics_from_url(source_url)
+        source_type, source_ref = "url", source_url.strip()[:1000]
+    else:
+        if wants_json:
+            return JSONResponse({"error": "no_source"}, status_code=400)
+        raise HTTPException(400, "Choose a .ics file or paste a calendar URL.")
+
+    if len(data) > MAX_UPLOAD_MB * 1024 * 1024:
+        raise HTTPException(400, f"Calendar is too large (max {MAX_UPLOAD_MB} MB).")
+    events = _parse_ics_events(data)
+
+    with Session(engine) as session:
+        cal = ImportedCalendar(
+            user_id=user.id, name=cal_name, color=cal_color,
+            source_type=source_type, source_ref=source_ref,
+        )
+        session.add(cal)
+        session.flush()
+        now = datetime.now(timezone.utc)
+        for ev in events:
+            session.add(Task(
+                user_id=user.id, class_id=None, imported_calendar_id=cal.id,
+                title=ev["title"], notes=ev["notes"],
+                starts_at=ev["starts_at"], due_at=ev["due_at"],
+                is_all_day=ev["is_all_day"],
+                rrule=ev["rrule"], rrule_until=ev["rrule_until"],
+                created_at=now,
+            ))
+        session.commit()
+        cal_id, count = cal.id, len(events)
+
+    if wants_json:
+        return JSONResponse(
+            {"id": cal_id, "name": cal_name, "color": cal_color, "event_count": count})
+    return RedirectResponse(url="/week", status_code=303)
+
+
+@app.post("/calendars/{calendar_id}/toggle")
+def toggle_calendar(calendar_id: int, request: Request, user: User = Depends(require_login)):
+    """Flip a calendar's visibility — hides/shows its events on the Weekly
+    page AND in the iCal export feed."""
+    with Session(engine) as session:
+        cal = _own_imported_calendar(session, calendar_id, user.id)
+        cal.visible = not cal.visible
+        session.add(cal)
+        session.commit()
+        visible = cal.visible
+    if "application/json" in request.headers.get("accept", ""):
+        return JSONResponse({"id": calendar_id, "visible": visible})
+    return RedirectResponse(url="/week", status_code=303)
+
+
+@app.post("/calendars/{calendar_id}/edit")
+def edit_calendar(
+    calendar_id: int, request: Request,
+    name: str = Form(""), color: str = Form(""),
+    user: User = Depends(require_login),
+):
+    with Session(engine) as session:
+        cal = _own_imported_calendar(session, calendar_id, user.id)
+        new_name = (name or "").strip()
+        if new_name:
+            cal.name = new_name
+        cal.color = _clean_hex_color(color, cal.color)
+        session.add(cal)
+        session.commit()
+    if "application/json" in request.headers.get("accept", ""):
+        return JSONResponse({"id": calendar_id})
+    return RedirectResponse(url="/week", status_code=303)
+
+
+@app.post("/calendars/{calendar_id}/delete")
+def delete_calendar(calendar_id: int, request: Request, user: User = Depends(require_login)):
+    """Delete a calendar and all its imported Task rows (tombstoned so the
+    deletion propagates to synced devices)."""
+    with Session(engine) as session:
+        cal = _own_imported_calendar(session, calendar_id, user.id)
+        tasks = session.exec(
+            select(Task).where(
+                Task.imported_calendar_id == calendar_id,
+                Task.user_id == user.id,
+            )
+        ).all()
+        for t in tasks:
+            _record_tombstone(session, user.id, "task", t.id)
+            session.delete(t)
+        session.delete(cal)
+        session.commit()
+    if "application/json" in request.headers.get("accept", ""):
+        return JSONResponse({"deleted": calendar_id})
+    return RedirectResponse(url="/week", status_code=303)
 
 
 # ---- Routes: Event edit/delete ----
@@ -3777,6 +4112,17 @@ def delete_task(task_id: int, request: Request, user: User = Depends(require_log
 PERSONAL_BUCKET = SimpleNamespace(id=0, code="Personal", name="", is_personal=True)
 
 
+def _imported_bucket(cal) -> SimpleNamespace:
+    """Synthetic display bucket for one imported calendar. Keyed by a string
+    so it never collides with real (int) class ids; `is_imported` tells the
+    template to render a colored, non-link header (like Personal)."""
+    return SimpleNamespace(
+        id=f"imp-{cal.id}", code=cal.name, name="",
+        is_personal=False, is_imported=True,
+        color=cal.color, calendar_id=cal.id,
+    )
+
+
 def _merge_today_with_overdue(today_items: dict, overdue: dict, user_id: int) -> dict:
     """Combine today's items + overdue into one {class_id: bucket} dict.
     Each bucket carries both `items` (today) and `overdue_items` (past).
@@ -3991,12 +4337,40 @@ def _collect_items_in_range(start: datetime, end: datetime, user_id: int,
                          sub_kind_color=sys_tag.color if sys_tag else None,
                          sub_kind_id=sys_tag.id if sys_tag else None,
                          actionable=ev.actionable)
-        # Personal tasks (no class) — bucket under PERSONAL_BUCKET.
+        # Personal tasks (no class, not imported) — bucket under PERSONAL_BUCKET.
         personal_tasks = session.exec(
-            select(Task).where(Task.user_id == user_id, Task.class_id == None)
+            select(Task).where(
+                Task.user_id == user_id,
+                Task.class_id == None,
+                Task.imported_calendar_id == None,
+            )
         ).all()
         for t in personal_tasks:
             _emit_task(PERSONAL_BUCKET, t)
+        # Imported-calendar events (stored as Tasks). One display bucket per
+        # VISIBLE calendar, colored by the calendar. Reassigning one to a
+        # class (class_id set) moves it into that class bucket instead — the
+        # class_id == None filter keeps it from rendering in both places.
+        for cal in session.exec(
+            select(ImportedCalendar).where(
+                ImportedCalendar.user_id == user_id,
+                ImportedCalendar.visible == True,
+            )
+        ).all():
+            bucket = _imported_bucket(cal)
+            for t in session.exec(
+                select(Task).where(
+                    Task.user_id == user_id,
+                    Task.imported_calendar_id == cal.id,
+                    Task.class_id == None,
+                )
+            ).all():
+                _emit_task(bucket, t)
+            slot = out.get(bucket.id)
+            if slot:
+                for it in slot["items"]:
+                    it["tag_color"] = cal.color   # color rows by the calendar
+                    it["class_id"] = 0            # edit modal treats as Personal
     # Per-day position overrides (week tab only). Map (kind, item_id) →
     # override position; missing keys fall back to the row's global position.
     overrides: dict[tuple[str, int], int] = {}
@@ -4108,11 +4482,36 @@ def _collect_overdue(user_id: int, tz: ZoneInfo = LOCAL_TZ) -> dict:
                         "rrule": None,
                         "is_all_day": False,
                     })
-        # Personal tasks (no class) — bucket under PERSONAL_BUCKET.
+        # Personal tasks (no class, not imported) — bucket under PERSONAL_BUCKET.
         for t in session.exec(
-            select(Task).where(Task.user_id == user_id, Task.class_id == None)
+            select(Task).where(
+                Task.user_id == user_id,
+                Task.class_id == None,
+                Task.imported_calendar_id == None,
+            )
         ).all():
             _emit_overdue_task(PERSONAL_BUCKET, t)
+        # Imported-calendar overdue events (visible calendars only).
+        for cal in session.exec(
+            select(ImportedCalendar).where(
+                ImportedCalendar.user_id == user_id,
+                ImportedCalendar.visible == True,
+            )
+        ).all():
+            bucket = _imported_bucket(cal)
+            for t in session.exec(
+                select(Task).where(
+                    Task.user_id == user_id,
+                    Task.imported_calendar_id == cal.id,
+                    Task.class_id == None,
+                )
+            ).all():
+                _emit_overdue_task(bucket, t)
+            slot = out.get(bucket.id)
+            if slot:
+                for it in slot["items"]:
+                    it["tag_color"] = cal.color
+                    it["class_id"] = 0
     for slot in out.values():
         slot["items"].sort(key=lambda it: (it["position"], it["due_at"] or datetime.max.replace(tzinfo=tz)))
     return _apply_class_order(out, user_id)
@@ -4194,6 +4593,11 @@ def week_view(request: Request, user: User = Depends(require_login), month: Opti
         all_tags = session.exec(
             select(Tag).where(Tag.user_id == user.id).order_by(Tag.name)
         ).all()
+        imported_calendars = session.exec(
+            select(ImportedCalendar)
+            .where(ImportedCalendar.user_id == user.id)
+            .order_by(ImportedCalendar.created_at)
+        ).all()
     return templates.TemplateResponse(request, "week.html", {
         "first_of_month": first_of_month,
         "days": days,
@@ -4202,6 +4606,7 @@ def week_view(request: Request, user: User = Depends(require_login), month: Opti
         "all_classes": all_classes,
         "default_class_id": (all_classes[0].id if all_classes else None),
         "all_tags": all_tags,
+        "imported_calendars": imported_calendars,
     })
 
 
@@ -4386,12 +4791,17 @@ def _build_ical_for_user(user_id: int, request: Optional[Request] = None) -> byt
 
         # Manual tasks (only those with a due date — undated backlog tasks
         # can't appear on a calendar, and completed tasks aren't worth
-        # cluttering the feed with).
+        # cluttering the feed with). Imported-calendar events are excluded:
+        # the user already subscribes to that calendar elsewhere, so
+        # re-exporting them here would duplicate events (and add reminder
+        # spam) in their external calendar app. They live in-app only
+        # (week/today views), gated by the calendar's visibility toggle.
         tasks = session.exec(
             select(Task).where(
                 Task.user_id == user_id,
                 Task.due_at != None,
                 Task.completed_at == None,
+                Task.imported_calendar_id == None,
             )
         ).all()
         # Build a class_id -> code map for the task summary prefix.

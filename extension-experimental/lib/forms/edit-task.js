@@ -22,7 +22,7 @@ import { alertLabel, formatLocal, formatLocalDate, addFilesToBuffer } from "../u
 import { isItemOverdue } from "../views/row.js";
 import { load } from "../views/index.js";
 import { showRecurringSheet } from "../behaviors/recurring-sheet.js";
-import { offlineEditTask, isOfflineError } from "../sync.js";
+import { offlineEditTask, isOfflineError, tagIdForQueue } from "../sync.js";
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -526,7 +526,7 @@ export function bindEditTask() {
                     title,
                     due_at: editForm.due_at.value || null,
                     starts_at: editForm.starts_at.value || null,
-                    tag_id: editForm.tag_id.value ? Number(editForm.tag_id.value) : null,
+                    tag_id: tagIdForQueue(editForm.tag_id.value),
                     notes: editForm.notes.value || null,
                     class_id: editForm.class_id.value || null,
                     rrule: editForm.rrule.value || "",

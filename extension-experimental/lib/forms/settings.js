@@ -4,6 +4,7 @@
 // add). Source of truth = state.me; refreshed after any settings mutation.
 
 import { api, NotAuthenticated } from "../api.js";
+import { isOfflineError, queueUpsert, queueDelete } from "../sync.js";
 import { state, clearForLogout, resetCaches } from "../state.js";
 import { showLogin, showSecondary, returnToList } from "../nav.js";
 
@@ -95,6 +96,12 @@ function renderManageTagRow(t) {
             state.tagsPromise = null;
         } catch (err) {
             if (err instanceof NotAuthenticated) { showLogin(); return; }
+            if (isOfflineError(err)) {
+                await queueUpsert("tags", { id: t.id, name: t.name, color: swatch.value });
+                t.color = swatch.value;
+                state.tagsPromise = null;
+                return;
+            }
             alert("Couldn't recolor: " + err.message);
         }
     });
@@ -119,8 +126,14 @@ function renderManageTagRow(t) {
             t.name = newName;
             state.tagsPromise = null;
         } catch (err) {
+            if (err instanceof NotAuthenticated) { name.value = t.name; showLogin(); return; }
+            if (isOfflineError(err)) {
+                await queueUpsert("tags", { id: t.id, name: newName, color: swatch.value });
+                t.name = newName;
+                state.tagsPromise = null;
+                return;
+            }
             name.value = t.name;
-            if (err instanceof NotAuthenticated) { showLogin(); return; }
             alert("Couldn't rename: " + err.message);
         }
     });
@@ -142,6 +155,12 @@ function renderManageTagRow(t) {
             state.tagsPromise = null;
         } catch (err) {
             if (err instanceof NotAuthenticated) { showLogin(); return; }
+            if (isOfflineError(err)) {
+                await queueDelete("tags", t.id);
+                li.remove();
+                state.tagsPromise = null;
+                return;
+            }
             alert("Couldn't delete: " + err.message);
         }
     });
@@ -233,6 +252,19 @@ export function bindSettings() {
             populateManageTags();
         } catch (err) {
             if (err instanceof NotAuthenticated) { showLogin(); return; }
+            if (isOfflineError(err)) {
+                // Queue locally + show the new row optimistically; populateManageTags
+                // would refetch (fails offline), so append the row ourselves.
+                const row = await queueUpsert("tags", { name, color });
+                newTagForm.reset();
+                newTagForm.color.value = "#A04528";
+                resetCaches();
+                const ul = $("#settings-tags-list");
+                if (ul) ul.appendChild(renderManageTagRow(
+                    { id: row.id, name, color, is_system: false }));
+                setManageTagsStatus("Saved offline — will sync", "");
+                return;
+            }
             setManageTagsStatus(err.message || "Couldn't add.", "error");
         }
     });

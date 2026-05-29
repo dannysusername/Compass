@@ -2854,6 +2854,75 @@ details.class-section > summary.class-section-summary .section-toggle-chevron {
 .link-btn.danger { color: var(--rust); }
 .link-btn.danger:hover { color: var(--ink); }
 
+/* ---- Imported-calendar legend (Weekly page) ---- */
+.cal-legend {
+    margin: 0 0 16px;
+    padding: 12px 14px;
+    background: var(--paper-2);
+    border: 1px solid var(--paper-3);
+    border-radius: 8px;
+}
+.cal-legend-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+.cal-legend-title {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--ink-2);
+}
+.cal-legend-empty { margin: 8px 0 0; font-size: 13px; }
+.cal-legend-list {
+    list-style: none;
+    margin: 8px 0 0;
+    padding: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 16px;
+}
+.cal-legend-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.cal-legend-item.is-hidden { opacity: 0.5; }
+.cal-legend-item form.inline { display: inline; margin: 0; }
+.cal-swatch {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border-radius: 3px;
+    background: var(--cal-color, var(--rust));
+    flex: 0 0 auto;
+}
+.cal-name { font-size: 13px; color: var(--ink-2); }
+.class-block-head-imported {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 6px;
+}
+.class-block-head-imported .class-code {
+    font-family: var(--serif);
+    font-weight: 700;
+    font-style: italic;
+    color: var(--muted);
+}
+.import-source-toggle {
+    display: flex;
+    gap: 16px;
+    font-size: 14px;
+    margin: 4px 0;
+}
+.import-source-toggle label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
 .tag-manage-list {
     list-style: none;
     margin: 12px 0 0;

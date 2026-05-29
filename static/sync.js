@@ -101,6 +101,15 @@
         await enqueue({ op: "delete", kind, id: Number(id) });
         emit("queued");
     }
+    // Queue a raw form POST to replay verbatim on reconnect. Used for
+    // server-authoritative operations that aren't simple field upserts —
+    // recurring exclude / end-after, whose date math (exdate format, UNTIL
+    // offset) we must NOT replicate client-side. The server does it identically
+    // to the online path. body is a flat {field: value} object.
+    async function queueRequest(url, body, opts) {
+        await enqueue({ op: "request", url, body: body || {}, json: !!(opts && opts.json) });
+        emit("queued");
+    }
     // Back-compat task helpers.
     const queueTaskUpsert = (data) => queueUpsert("tasks", data);
     const queueTaskDelete = (id) => queueDelete("tasks", id);
@@ -110,27 +119,52 @@
         const pending = await getQueue();
         if (!pending.length) { emit("synced"); return { id_map: {} }; }
         emit("syncing");
+        const requests = pending.filter((e) => e.op === "request");
+        const syncable = pending.filter((e) => e.op !== "request");
         const changes = {};
         const deletes = {};
-        for (const e of pending) {
+        for (const e of syncable) {
             const kind = e.kind || "tasks";
             if (e.op === "delete") (deletes[kind] = deletes[kind] || []).push(e.id);
             else (changes[kind] = changes[kind] || []).push(e.data);
         }
         try {
-            const r = await fetch("/sync", {
-                method: "POST",
-                credentials: "same-origin",
-                headers: { "Content-Type": "application/json", "Accept": "application/json" },
-                body: JSON.stringify({ changes, deletes }),
-            });
-            if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
-            const res = await r.json();
-            // Reconcile temp ids on any optimistic rows still in the DOM.
-            for (const [clientId, serverId] of Object.entries(res.id_map || {})) {
-                document.querySelectorAll(`.todo-row[data-id="${clientId}"]`).forEach((row) => {
-                    row.dataset.id = String(serverId);
+            let res = { id_map: {} };
+            if (syncable.length) {
+                const r = await fetch("/sync", {
+                    method: "POST",
+                    credentials: "same-origin",
+                    headers: { "Content-Type": "application/json", "Accept": "application/json" },
+                    body: JSON.stringify({ changes, deletes }),
                 });
+                if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+                res = await r.json();
+                // Reconcile temp ids on any optimistic rows still in the DOM.
+                for (const [clientId, serverId] of Object.entries(res.id_map || {})) {
+                    document.querySelectorAll(`.todo-row[data-id="${clientId}"]`).forEach((row) => {
+                        row.dataset.id = String(serverId);
+                    });
+                }
+            }
+            // Replay raw POSTs verbatim (recurring exclude / end-after = form;
+            // reorder = JSON). The server does the real mutation identically to
+            // the online path.
+            for (const e of requests) {
+                let opts;
+                if (e.json) {
+                    opts = { method: "POST", credentials: "same-origin",
+                        headers: { "Content-Type": "application/json", "Accept": "application/json" },
+                        body: JSON.stringify(e.body || {}) };
+                } else {
+                    const fd = new FormData();
+                    for (const [k, v] of Object.entries(e.body || {})) fd.append(k, v);
+                    opts = { method: "POST", credentials: "same-origin",
+                        headers: { "Accept": "application/json" }, body: fd };
+                }
+                const rr = await fetch(e.url, opts);
+                if (!rr.ok && rr.status !== 303 && rr.status !== 302) {
+                    throw new Error(`${rr.status} ${rr.statusText}`);
+                }
             }
             await removeMany(pending.map((e) => e.uid));
             emit("synced");
@@ -368,7 +402,7 @@
     });
 
     global.CompassSync = {
-        queueUpsert, queueDelete, queueTaskUpsert, queueTaskDelete,
+        queueUpsert, queueDelete, queueRequest, queueTaskUpsert, queueTaskDelete,
         replay, syncNow, applyToDom, isOffline, getQueue, injectTaskRow, buildTaskRow,
     };
 })(window);

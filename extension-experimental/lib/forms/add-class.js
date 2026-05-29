@@ -2,6 +2,7 @@
 // Classes tab's "+ Add class" button.
 
 import { api, NotAuthenticated } from "../api.js";
+import { isOfflineError, queueUpsert } from "../sync.js";
 import { resetCaches } from "../state.js";
 import { showLogin, showSecondary, returnToList } from "../nav.js";
 import { ensureLookups } from "../lookups.js";
@@ -46,6 +47,16 @@ export function bindAddClass() {
             await load();
         } catch (err) {
             if (err instanceof NotAuthenticated) { showLogin(); hideAddClass(); return; }
+            if (isOfflineError(err)) {
+                // Queue the create (mirror + pending) so it syncs on reconnect;
+                // stay on the surface with a confirmation. Mirrors the web
+                // class-actions.js offline path.
+                await queueUpsert("classes", { code: code.toUpperCase(), name });
+                resetCaches();
+                f.reset();
+                setStatus("Saved offline — will sync", "");
+                return;
+            }
             setStatus("Couldn't add: " + err.message, "error");
         }
     });

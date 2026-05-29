@@ -121,6 +121,40 @@ export function bindSyllabus() {
     $("#syllabus-retry").addEventListener("click", () => showSyllabusUpload());
 }
 
+// Reparse an existing syllabus from the class-detail surface: kick the
+// server route, then reuse the upload view's parse-stage + poll. On done,
+// poll() returns the user to the (now-refreshed) class detail.
+export async function startReparse(syllabusId, classId) {
+    showSecondary("#syllabus-upload-view");
+    $("#syllabus-upload-stage").hidden = true;
+    $("#syllabus-parse-stage").hidden = false;
+    $("#syllabus-parse-actions").hidden = true;
+    $("#syllabus-parse-status").textContent = "Reparsing…";
+    try {
+        await api.reparseSyllabus(syllabusId);
+        poll(syllabusId, classId);
+    } catch (err) {
+        if (err instanceof NotAuthenticated) { showLogin(); hideSyllabusUpload(); return; }
+        const m = err.message || "";
+        if (m.includes("need_key")) {
+            hideSyllabusUpload();
+            showSettings();
+            setXaiStatus("Set your xAI API key first to parse syllabi.", "error");
+            return;
+        }
+        if (m.includes("limit_reached")) {
+            hideSyllabusUpload();
+            showSettings();
+            setXaiStatus(
+                "You've used all your free syllabus parses. Add your own xAI key below for unlimited parsing.",
+                "error");
+            return;
+        }
+        $("#syllabus-parse-status").textContent = m || "Couldn't reparse.";
+        $("#syllabus-parse-actions").hidden = false;
+    }
+}
+
 function poll(syllabusId, classId) {
     api.syllabusStatus(syllabusId).then((s) => {
         const status = s && s.status;

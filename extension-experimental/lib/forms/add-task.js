@@ -15,7 +15,7 @@ import {
     formatLocal, formatLocalDate, addFilesToBuffer,
 } from "../util.js";
 import { load } from "../views/index.js";
-import { offlineAddTask, isOfflineError } from "../sync.js";
+import { offlineAddTask, isOfflineError, tagIdForQueue } from "../sync.js";
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -471,8 +471,7 @@ export function bindAddTask() {
                     starts_at: starts || null,
                     is_all_day: addForm.is_all_day.checked,
                     rrule: addForm.rrule.value || "",
-                    tag_id: (addForm.tag_id.value && addForm.tag_id.value !== "__new__")
-                        ? Number(addForm.tag_id.value) : null,
+                    tag_id: tagIdForQueue(addForm.tag_id.value),
                     class_id: classId || null,
                     notes: addForm.notes.value.trim() || null,
                 });

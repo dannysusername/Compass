@@ -141,18 +141,35 @@ export async function queueDelete(kind, id) {
 export const queueTaskUpsert = (data) => queueUpsert("tasks", data);
 export const queueTaskDelete = (id) => queueDelete("tasks", id);
 
+// tag_id for the offline queue: '' / '__new__' → null; a temp id stays a
+// string (so the server resolves a just-created-offline tag in the same push);
+// a real numeric id is coerced to a number. Keeps a temp tag id from becoming
+// NaN (the same corruption that caused the historical duplicate-task bug).
+export function tagIdForQueue(v) {
+    if (!v || v === "__new__") return null;
+    return /^tmp-/.test(v) ? v : Number(v);
+}
+
 // ---- Push ----
 export async function push() {
     const pending = await getAll("pending");
     if (!pending.length) return { id_map: {} };
+    const requests = pending.filter((p) => p.op === "request");
+    const syncable = pending.filter((p) => p.op !== "request");
     const changes = {};
     const deletes = {};
-    for (const p of pending) {
+    for (const p of syncable) {
         const k = p.kind === "task" ? "tasks" : p.kind;  // tolerate legacy singular
         if (p.op === "delete") (deletes[k] = deletes[k] || []).push(p.id);
         else (changes[k] = changes[k] || []).push(p.data);
     }
-    const res = await api.syncPush({ changes, deletes });
+    const res = syncable.length ? await api.syncPush({ changes, deletes }) : { id_map: {} };
+    // Replay raw form POSTs (recurring exclude / end-after) verbatim — the
+    // server does the date math identically to the online path.
+    for (const p of requests) {
+        if (p.json) await api.postJson(p.url, p.body || {});
+        else await api.postForm(p.url, p.body || {});
+    }
     // Drop temp rows whose server id we now know — the next pull brings the
     // canonical server row. A temp id could live in any store.
     for (const clientId of Object.keys(res.id_map || {})) {
@@ -228,6 +245,28 @@ export async function offlineDeleteItem(domKind, id) {
         for (const b of (view.buckets || [])) {
             b.items = (b.items || []).filter((it) => !_isItem(it, domKind, id));
             b.overdue_items = (b.overdue_items || []).filter((it) => !_isItem(it, domKind, id));
+        }
+    });
+}
+
+// Queue a raw form POST to replay verbatim on reconnect (server-authoritative
+// ops whose date math we don't replicate client-side).
+export async function queueRequest(url, body, opts) {
+    return tx("pending", "readwrite", (s) =>
+        s.put({ op: "request", url, body: body || {}, json: !!(opts && opts.json) }));
+}
+
+// Offline recurring delete: 'this' (exclude one occurrence) / 'future'
+// (end-after). Queues the exact /exclude or /end-after request and drops the
+// occurrence from the cached Today view. The server appends the exdate / sets
+// UNTIL on reconnect — identical to the online path, no tz/format replication.
+export async function offlineRecurringDelete(mode, id, occurrenceAt) {
+    const url = mode === "future" ? `/tasks/${id}/end-after` : `/tasks/${id}/exclude`;
+    await queueRequest(url, { occurrence_at: occurrenceAt });
+    await _patchToday((view) => {
+        for (const b of (view.buckets || [])) {
+            b.items = (b.items || []).filter((it) => !_isTask(it, id));
+            b.overdue_items = (b.overdue_items || []).filter((it) => !_isTask(it, id));
         }
     });
 }

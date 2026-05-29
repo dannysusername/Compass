@@ -7,7 +7,7 @@ import { api, NotAuthenticated } from "../api.js";
 import { showLogin } from "../nav.js";
 import { showRecurringSheet } from "./recurring-sheet.js";
 import { load } from "../views/index.js";
-import { offlineToggleItem, offlineDeleteItem, isOfflineError } from "../sync.js";
+import { offlineToggleItem, offlineDeleteItem, offlineRecurringDelete, isOfflineError } from "../sync.js";
 
 export async function onToggle(rowEl) {
     const kind = rowEl.dataset.kind;
@@ -81,11 +81,19 @@ export async function runDelete(rowEl, mode) {
             return;
         }
         // Offline delete of a plain task/event: keep it removed + queue the
-        // delete. (Recurring this/future still needs the server, so revert.)
+        // delete.
         if ((kind === "task" || kind === "event") && mode === "all"
                 && !rowEl.dataset.rrule && isOfflineError(err)) {
             await offlineDeleteItem(kind, id);
             return;
+        }
+        // Offline recurring this/future: queue the exact request to replay on
+        // reconnect (server does the exdate/UNTIL math). Skip never-synced temp
+        // ids — there's no server row to exclude against yet.
+        if ((mode === "this" || mode === "future") && isOfflineError(err)
+                && !String(id).startsWith("tmp-")) {
+            await offlineRecurringDelete(mode, id, dueAt);
+            return;  // row already removed from the DOM
         }
         if (parent) parent.insertBefore(rowEl, next);  // revert
         alert("Couldn't delete: " + err.message);

@@ -4,6 +4,7 @@
 // selected here, and the form hides again.
 
 import { api, NotAuthenticated } from "../api.js";
+import { isOfflineError, queueUpsert } from "../sync.js";
 import { state } from "../state.js";
 import { showLogin } from "../nav.js";
 
@@ -79,6 +80,26 @@ export function bindInlineNewTag(sel) {
             statusEl.hidden = true;
         } catch (err) {
             if (err instanceof NotAuthenticated) { showLogin(); return; }
+            if (isOfflineError(err)) {
+                // Create the tag locally (temp id) + make it pickable now. The
+                // task that selects it queues with this temp id; the server
+                // resolves both on reconnect (cross-entity temp-id resolution).
+                const row = await queueUpsert("tags", { name, color: colorInput.value });
+                const localId = String(row.id);
+                state.tagsPromise = null;
+                document.querySelectorAll("select[name='tag_id']").forEach((s) => {
+                    if (s.querySelector(`option[value="${localId}"]`)) return;
+                    const opt = document.createElement("option");
+                    opt.value = localId;
+                    opt.textContent = name;
+                    const newOpt = s.querySelector("option[value='__new__']");
+                    if (newOpt) s.insertBefore(opt, newOpt); else s.appendChild(opt);
+                });
+                sel.value = localId;
+                wrap.classList.add("hidden");
+                statusEl.hidden = true;
+                return;
+            }
             statusEl.textContent = err.message || "Couldn't create.";
             statusEl.className = "status error";
         }

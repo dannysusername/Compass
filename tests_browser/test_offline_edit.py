@@ -249,6 +249,255 @@ def test_offline_full_edit_queues_then_syncs(signed_in_page, server_url):
     assert task["title"] == "Edited while offline", "offline edit did not sync"
 
 
+def test_offline_create_class_queues_then_syncs(signed_in_page, server_url):
+    """Add a class while offline → it queues as a `classes` upsert with a
+    client_id and creates on the server when the connection returns."""
+    page = signed_in_page
+    page.goto(server_url + "/")
+    page.locator("details.manual-add summary").click()   # reveal the manual add-class form
+
+    page.context.set_offline(True)
+    page.fill("form.add-class input[name='code']", "MATH 250")
+    page.fill("form.add-class input[name='name']", "Calculus II")
+    page.click("form.add-class button[type='submit']")
+
+    page.wait_for_function("async () => (await window.CompassSync.getQueue()).length === 1")
+    q = page.evaluate("async () => await window.CompassSync.getQueue()")
+    assert q[0]["kind"] == "classes" and q[0]["data"]["client_id"]
+    assert q[0]["data"]["code"] == "MATH 250" and q[0]["data"]["name"] == "Calculus II"
+
+    page.context.set_offline(False)
+    page.wait_for_function("async () => (await window.CompassSync.getQueue()).length === 0")
+    data = page.evaluate(
+        "async () => (await fetch('/sync', {credentials:'same-origin', headers:{Accept:'application/json'}})).json()"
+    )
+    assert any(c["code"] == "MATH 250" for c in data["classes"]), "class did not sync"
+
+
+def test_offline_create_class_then_task_resolves_both(signed_in_page, server_url):
+    """The cross-entity flow: create a class offline, then add a task to that
+    (still-temp) class offline. On reconnect the server resolves the class's
+    temp id and the task lands attached to the real class."""
+    page = signed_in_page
+    page.goto(server_url + "/")
+    page.locator("details.manual-add summary").click()
+    page.on("dialog", lambda d: d.accept())   # "Saved offline" task alert
+
+    page.context.set_offline(True)
+    # Class offline.
+    page.fill("form.add-class input[name='code']", "CHEM 101")
+    page.fill("form.add-class input[name='name']", "Gen Chem")
+    page.click("form.add-class button[type='submit']")
+    page.wait_for_function("async () => (await window.CompassSync.getQueue()).length === 1")
+
+    # The new class is now an option in the add-task class picker (injected
+    # with its temp client_id). Add a task assigned to it, still offline.
+    page.click("button[data-open-modal='add-task-modal']")
+    page.fill("#add-task-modal input[name='title']", "Lab report")
+    page.fill("#add-task-modal input[name='starts_at']", "")
+    page.fill("#add-task-modal input[name='due_at']", _today_iso(15))
+    # Select the offline class by its visible label.
+    page.select_option("#add-task-modal select[name='class_id']", label="CHEM 101 — Gen Chem")
+    page.click("#add-task-modal button[type='submit']")
+    page.wait_for_function("async () => (await window.CompassSync.getQueue()).length === 2")
+
+    page.context.set_offline(False)
+    page.wait_for_function("async () => (await window.CompassSync.getQueue()).length === 0")
+
+    data = page.evaluate(
+        "async () => (await fetch('/sync', {credentials:'same-origin', headers:{Accept:'application/json'}})).json()"
+    )
+    cls = next(c for c in data["classes"] if c["code"] == "CHEM 101")
+    task = next(t for t in data["tasks"] if t["title"] == "Lab report")
+    assert task["class_id"] == cls["id"], "offline task didn't resolve to the offline class"
+
+
+def test_offline_delete_class_queues_then_syncs(signed_in_page, server_url):
+    """Delete a class from its page while offline → queues a `classes` delete,
+    shows an in-place 'will sync' notice (no navigation to a stale cached
+    home), and removes it on the server on reconnect."""
+    page = signed_in_page
+    resp = page.request.post(server_url + "/classes",
+                             form={"code": "DROP1", "name": "To Delete"},
+                             headers={"Accept": "application/json"})
+    cid = resp.json()["id"]
+    page.goto(server_url + f"/classes/{cid}")
+    page.on("dialog", lambda d: d.accept())   # confirm("Delete this class...")
+
+    page.context.set_offline(True)
+    page.click(f"form[action$='/classes/{cid}/delete'] button[type='submit']")
+    page.wait_for_function("async () => (await window.CompassSync.getQueue()).length === 1")
+    q = page.evaluate("async () => await window.CompassSync.getQueue()")
+    assert q[0]["op"] == "delete" and q[0]["kind"] == "classes" and q[0]["id"] == cid
+    expect(page.locator("[data-class-deleted]")).to_be_visible()  # in-place notice, no nav
+
+    page.context.set_offline(False)
+    page.wait_for_function("async () => (await window.CompassSync.getQueue()).length === 0")
+    data = page.evaluate(
+        "async () => (await fetch('/sync', {credentials:'same-origin', headers:{Accept:'application/json'}})).json()"
+    )
+    assert not any(c["id"] == cid for c in data["classes"]), "class delete did not sync"
+
+
+def test_offline_inline_new_tag_then_task_resolves_both(signed_in_page, server_url):
+    """The inline '+ New tag' flow offline: create a tag while adding a task,
+    all offline. Both queue (tag with a client_id, task with tag_id = that temp
+    id); on reconnect the server resolves the tag's temp id and the task lands
+    tagged with the real tag."""
+    page = signed_in_page
+    page.goto(server_url + "/")
+    page.on("dialog", lambda d: d.accept())  # "Saved offline" alert
+
+    page.context.set_offline(True)
+    page.click("button[data-open-modal='add-task-modal']")
+    page.fill("#add-task-modal input[name='title']", "Tagged offline")
+    page.fill("#add-task-modal input[name='starts_at']", "")
+    page.fill("#add-task-modal input[name='due_at']", _today_iso(12))
+    page.select_option("#add-task-modal [data-add-task-tag]", "__new__")
+    page.fill("#add-task-modal [data-new-tag-name]", "OfflineTag")
+    page.click("#add-task-modal button[type='submit']")
+
+    page.wait_for_function("async () => (await window.CompassSync.getQueue()).length === 2")
+    q = page.evaluate("async () => await window.CompassSync.getQueue()")
+    tag_entry = next(e for e in q if e["kind"] == "tags")
+    task_entry = next(e for e in q if e["kind"] == "tasks")
+    assert tag_entry["data"]["client_id"]
+    assert task_entry["data"]["tag_id"] == tag_entry["data"]["client_id"]  # task → temp tag id
+
+    page.context.set_offline(False)
+    page.wait_for_function("async () => (await window.CompassSync.getQueue()).length === 0")
+    data = page.evaluate(
+        "async () => (await fetch('/sync', {credentials:'same-origin', headers:{Accept:'application/json'}})).json()"
+    )
+    tag = next(t for t in data["tags"] if t["name"] == "OfflineTag")
+    task = next(t for t in data["tasks"] if t["title"] == "Tagged offline")
+    assert task["tag_id"] == tag["id"], "offline task didn't resolve to the offline tag"
+
+
+def test_offline_tag_edit_queues_then_syncs(signed_in_page, server_url):
+    """Rename a tag from the manage-tags modal while offline → queues a tags
+    upsert and renames on the server on reconnect."""
+    page = signed_in_page
+    page.request.post(server_url + "/tags", form={"name": "EditTag", "color": "#00ff00"})
+    page.goto(server_url + "/")
+    page.click("button[data-open-modal='add-task-modal']")
+    page.click("#add-task-modal [data-open-manage-tags]")
+    expect(page.locator("#manage-tags-modal")).to_be_visible()
+    row = page.locator("#manage-tags-modal li.tag-manage-row").filter(has_text="EditTag")
+    expect(row).to_be_visible()
+
+    page.context.set_offline(True)
+    row.locator("button", has_text="Edit").click()
+    # Once in edit mode the row's text is in inputs, not the row's text content,
+    # so target the editor fields modal-scoped rather than via the row filter.
+    page.fill("#manage-tags-modal [data-edit-name]", "EditTagRenamed")
+    page.click("#manage-tags-modal [data-edit-save]")
+    page.wait_for_function(
+        "async () => (await window.CompassSync.getQueue()).filter(e=>e.kind==='tags'&&e.op==='upsert').length === 1"
+    )
+
+    page.context.set_offline(False)
+    page.wait_for_function("async () => (await window.CompassSync.getQueue()).length === 0")
+    data = page.evaluate(
+        "async () => (await fetch('/sync', {credentials:'same-origin', headers:{Accept:'application/json'}})).json()"
+    )
+    assert any(t["name"] == "EditTagRenamed" for t in data["tags"]), "tag edit didn't sync"
+
+
+def test_offline_tag_delete_queues_then_syncs(signed_in_page, server_url):
+    """Delete a user tag from the manage-tags modal while offline → queues a
+    tags delete and removes it on the server on reconnect."""
+    page = signed_in_page
+    page.request.post(server_url + "/tags", form={"name": "DelTag", "color": "#ff0000"})
+    page.goto(server_url + "/")
+    page.on("dialog", lambda d: d.accept())  # confirm("Delete tag ...?")
+    page.click("button[data-open-modal='add-task-modal']")
+    page.click("#add-task-modal [data-open-manage-tags]")
+    expect(page.locator("#manage-tags-modal")).to_be_visible()
+    row = page.locator("#manage-tags-modal li.tag-manage-row").filter(has_text="DelTag")
+    expect(row).to_be_visible()
+
+    page.context.set_offline(True)
+    row.locator("button.danger", has_text="Delete").click()
+    page.wait_for_function(
+        "async () => (await window.CompassSync.getQueue()).filter(e=>e.kind==='tags'&&e.op==='delete').length === 1"
+    )
+
+    page.context.set_offline(False)
+    page.wait_for_function("async () => (await window.CompassSync.getQueue()).length === 0")
+    data = page.evaluate(
+        "async () => (await fetch('/sync', {credentials:'same-origin', headers:{Accept:'application/json'}})).json()"
+    )
+    assert not any(t["name"] == "DelTag" for t in data["tags"]), "tag delete didn't sync"
+
+
+def test_offline_recurring_exclude_queues_request_then_syncs(signed_in_page, server_url):
+    """Delete just-this-occurrence of a recurring task while offline → queues a
+    replayable request (not a field upsert); on reconnect the server appends the
+    exdate and the occurrence disappears from Today."""
+    page = signed_in_page
+    page.request.post(server_url + "/tasks",
+                      form={"title": "Daily standup", "due_at": _today_iso(9), "rrule": "FREQ=DAILY"})
+    page.goto(server_url + "/")
+    row = page.locator(".todo-row[data-title='Daily standup']").first
+    expect(row).to_be_visible()
+    tid = int(row.get_attribute("data-id"))
+
+    page.context.set_offline(True)
+    row.locator(".todo-row-main").click()       # open drawer
+    row.locator(".todo-del").click()            # recurring → opens the picker
+    expect(page.locator("#delete-recurring-modal")).to_be_visible()
+    page.locator("#delete-recurring-modal button[data-delete-mode='this']").click()
+
+    page.wait_for_function(
+        "async () => (await window.CompassSync.getQueue()).filter(e=>e.op==='request').length === 1"
+    )
+    req = page.evaluate("async () => (await window.CompassSync.getQueue()).find(e=>e.op==='request')")
+    assert req["url"] == f"/tasks/{tid}/exclude"
+    assert req["body"]["occurrence_at"]
+
+    page.context.set_offline(False)
+    page.wait_for_function("async () => (await window.CompassSync.getQueue()).length === 0")
+    # End-to-end: today's occurrence is now excluded, so the row is gone.
+    page.goto(server_url + "/")
+    expect(page.locator(".todo-row[data-title='Daily standup']")).to_have_count(0)
+
+
+def test_offline_reorder_request_replays_as_json(signed_in_page, server_url):
+    """Reorder writes positions the /sync push doesn't carry (global position /
+    DayItemPosition / class order), so an offline drop queues the exact JSON
+    request and replays it on reconnect. Here we queue a /tasks/reorder the way
+    persistDrop does, go offline→online, and confirm the server applied it."""
+    page = signed_in_page
+    page.request.post(server_url + "/tasks", form={"title": "First", "due_at": _today_iso(9)})
+    page.request.post(server_url + "/tasks", form={"title": "Second", "due_at": _today_iso(10)})
+    page.goto(server_url + "/")
+    ids = page.evaluate(
+        """() => Array.from(document.querySelectorAll('.todo-row[data-kind="task"]'))
+            .map(r => ({ kind: r.dataset.kind, id: Number(r.dataset.id), title: r.dataset.title }))"""
+    )
+    by_title = {r["title"]: r for r in ids}
+    # Requested order: Second before First.
+    items = [{"kind": "task", "id": by_title["Second"]["id"]},
+             {"kind": "task", "id": by_title["First"]["id"]}]
+
+    page.context.set_offline(True)
+    page.evaluate(
+        "async (items) => { await window.CompassSync.queueRequest('/tasks/reorder', {items}, {json:true}); }",
+        items,
+    )
+    q = page.evaluate("async () => await window.CompassSync.getQueue()")
+    assert q[0]["op"] == "request" and q[0]["json"] is True and q[0]["url"] == "/tasks/reorder"
+
+    page.context.set_offline(False)
+    page.wait_for_function("async () => (await window.CompassSync.getQueue()).length === 0")
+    data = page.evaluate(
+        "async () => (await fetch('/sync', {credentials:'same-origin', headers:{Accept:'application/json'}})).json()"
+    )
+    pos = {t["title"]: t["position"] for t in data["tasks"] if t["title"] in ("First", "Second")}
+    assert pos["Second"] < pos["First"], f"reorder didn't sync: {pos}"
+
+
 def test_sync_status_pill_reflects_state(signed_in_page, server_url):
     """The header pill shows Synced online, Offline (+count) when a change is
     queued offline, and returns to Synced after reconnect syncs it."""

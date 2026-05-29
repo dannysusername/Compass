@@ -11,6 +11,7 @@
 
 import { api } from "../api.js";
 import { state } from "../state.js";
+import { isOfflineError, queueRequest, queueUpsert } from "../sync.js";
 
 const DRAG_THRESHOLD = 5;
 
@@ -175,7 +176,10 @@ export function bindDrag() {
         try {
             await api.reorderClasses(order);
         } catch (err) {
-            console.error("class reorder failed:", err);
+            // Offline: class order is a User field (not a push field) — replay
+            // the exact request on reconnect.
+            if (isOfflineError(err)) await queueRequest("/classes/reorder", { order }, { json: true });
+            else console.error("class reorder failed:", err);
         }
     });
 }
@@ -191,7 +195,13 @@ async function persistDragDrop(row, sourceClassId, scope) {
                 await api.editTask(row.dataset.id, fd);
                 row.dataset.classId = newClassId;
             } catch (err) {
-                console.error("cross-class move failed:", err);
+                if (isOfflineError(err) && !String(row.dataset.id).startsWith("tmp-")) {
+                    await queueUpsert("tasks",
+                        { id: row.dataset.id, class_id: newClassId === "0" ? null : newClassId });
+                    row.dataset.classId = newClassId;
+                } else {
+                    console.error("cross-class move failed:", err);
+                }
             }
         }
     }
@@ -205,7 +215,8 @@ async function persistDragDrop(row, sourceClassId, scope) {
         try {
             await api.reorderTasksDay(day, items);
         } catch (err) {
-            console.error("reorder-day failed:", err);
+            if (isOfflineError(err)) await queueRequest("/tasks/reorder-day", { day, items }, { json: true });
+            else console.error("reorder-day failed:", err);
         }
         return;
     }
@@ -216,6 +227,7 @@ async function persistDragDrop(row, sourceClassId, scope) {
     try {
         await api.reorderTasks(items);
     } catch (err) {
-        console.error("reorder failed:", err);
+        if (isOfflineError(err)) await queueRequest("/tasks/reorder", { items }, { json: true });
+        else console.error("reorder failed:", err);
     }
 }

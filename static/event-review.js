@@ -82,8 +82,13 @@
 
     function bindBulk(form, kind) {
         form.addEventListener("submit", function (e) {
-            // Bulk Remove / Delete carry an onsubmit confirm; let it run
-            // first (if it returned false, the submit never reaches here).
+            // Bulk Remove / Delete carry an inline `onsubmit="return
+            // confirm(...)"`. When the user clicks Cancel, that handler
+            // returns false → the browser sets defaultPrevented and
+            // skips the native POST, but addEventListener listeners
+            // still fire. Bail here so a cancelled confirm doesn't get
+            // turned into a fetch() that goes through anyway.
+            if (e.defaultPrevented) return;
             e.preventDefault();
             var section = form.closest(".events-subsection") || form.closest(".class-section-body");
             var rows = section ? section.querySelectorAll(".event-list li") : [];

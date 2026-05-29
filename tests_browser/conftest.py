@@ -111,6 +111,14 @@ def _next_user_email() -> str:
     return f"browser_user_{_USER_COUNTER}@example.com"
 
 
+@pytest.fixture(scope="session")
+def test_db_path():
+    """Expose the throwaway browser-test SQLite path so individual tests
+    can seed rows the UI has no creation flow for (e.g. CalendarEvent —
+    those normally come from syllabus parses)."""
+    return str(_TEST_DB)
+
+
 @pytest.fixture
 def signed_in_page(page, server_url):
     """Playwright `page` already signed up + logged in to a fresh user.

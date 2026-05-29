@@ -552,12 +552,21 @@ span.class-block-label:hover .class-code { color: inherit; }
     align-items: stretch;
     margin-top: 4px;
 }
-.doc-upload-row input[type="file"] {
+.doc-choose-btn {
+    flex: 0 0 auto;
+    padding: 6px 12px;
+    font-size: 12px;
+}
+.doc-filename {
     flex: 1 1 auto;
     min-width: 0;
     font-size: 12px;
-    padding: 6px 8px;
+    color: var(--ink-3);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
+.doc-filename.has-file { color: inherit; }
 .doc-upload-btn {
     flex: 0 0 auto;
     padding: 6px 14px;

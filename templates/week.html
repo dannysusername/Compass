@@ -56,6 +56,34 @@
 </li>
 {%- endmacro %}
 
+<section class="cal-legend" aria-label="Imported calendars">
+    <div class="cal-legend-head">
+        <h2 class="cal-legend-title">Calendars</h2>
+        <button type="button" class="small" data-open-modal="import-calendar-modal">+ Import calendar</button>
+    </div>
+    {% if imported_calendars %}
+    <ul class="cal-legend-list">
+        {% for cal in imported_calendars %}
+        <li class="cal-legend-item {% if not cal.visible %}is-hidden{% endif %}">
+            <span class="cal-swatch" style="--cal-color: {{ cal.color }}"></span>
+            <span class="cal-name">{{ cal.name }}</span>
+            <form method="post" action="/calendars/{{ cal.id }}/toggle" class="inline">
+                <button type="submit" class="link-btn">{{ 'Hide' if cal.visible else 'Show' }}</button>
+            </form>
+            <button type="button" class="link-btn" data-edit-calendar
+                    data-cal-id="{{ cal.id }}" data-cal-name="{{ cal.name }}" data-cal-color="{{ cal.color }}">Edit</button>
+            <form method="post" action="/calendars/{{ cal.id }}/delete" class="inline"
+                  onsubmit="return confirm('Delete the calendar “{{ cal.name }}” and all its imported events? This cannot be undone.')">
+                <button type="submit" class="link-btn danger">Delete</button>
+            </form>
+        </li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <p class="subtle cal-legend-empty">No imported calendars yet — bring in a Google / Apple / Outlook calendar from an .ics file or a link.</p>
+    {% endif %}
+</section>
+
 <div class="month-weekdays">
     <div>Mon</div><div>Tue</div><div>Wed</div><div>Thu</div><div>Fri</div><div>Sat</div><div>Sun</div>
 </div>
@@ -104,7 +132,12 @@
                         <span class="class-block-drag" title="Drag to reorder this class" aria-label="Drag class">
                             <span class="class-block-drag-grip" aria-hidden="true"></span>
                         </span>
-                        {% if slot.cls.is_personal is defined and slot.cls.is_personal %}
+                        {% if slot.cls.is_imported is defined and slot.cls.is_imported %}
+                        <div class="class-block-head class-block-head-imported">
+                            <span class="cal-swatch" style="--cal-color: {{ slot.cls.color }}"></span>
+                            <span class="class-code">{{ slot.cls.code }}</span>
+                        </div>
+                        {% elif slot.cls.is_personal is defined and slot.cls.is_personal %}
                         <div class="class-block-head class-block-head-personal">
                             <span class="class-code">{{ slot.cls.code }}</span>
                         </div>
@@ -384,6 +417,66 @@
     </div>
 </div>
 
+<div class="modal-overlay" id="import-calendar-modal" hidden>
+    <div class="modal-dialog" role="dialog" aria-labelledby="import-calendar-title">
+        <div class="modal-head">
+            <h2 id="import-calendar-title">Import a calendar</h2>
+            <button type="button" class="modal-close" data-close-modal aria-label="Close">×</button>
+        </div>
+        <form method="post" action="/calendars/import" enctype="multipart/form-data"
+              class="add-task-form" data-import-calendar>
+            <label>
+                <span class="add-task-label">Calendar name</span>
+                <input type="text" name="name" placeholder="e.g. Work, Soccer, Family" required>
+            </label>
+            <label>
+                <span class="add-task-label">Color</span>
+                <input type="color" name="color" value="#3a6b6e">
+            </label>
+            <div class="import-source-toggle" role="radiogroup" aria-label="Import source">
+                <label><input type="radio" name="source_kind" value="file" checked> Upload .ics file</label>
+                <label><input type="radio" name="source_kind" value="url"> Paste a link</label>
+            </div>
+            <label data-import-file-row>
+                <span class="add-task-label">Calendar file (.ics)</span>
+                <input type="file" name="file" accept=".ics,text/calendar">
+            </label>
+            <label data-import-url-row hidden>
+                <span class="add-task-label">Calendar URL (webcal:// or https://…)</span>
+                <input type="url" name="source_url" placeholder="https://calendar.google.com/…/basic.ics">
+            </label>
+            <p class="subtle">Imported once — events show on your calendar grouped under this name. Google / Apple / Outlook all export .ics or offer a secret link.</p>
+            <div class="modal-actions">
+                <button type="submit">Import</button>
+                <button type="button" class="secondary" data-close-modal>Cancel</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<div class="modal-overlay" id="edit-calendar-modal" hidden>
+    <div class="modal-dialog" role="dialog" aria-labelledby="edit-calendar-title">
+        <div class="modal-head">
+            <h2 id="edit-calendar-title">Edit calendar</h2>
+            <button type="button" class="modal-close" data-close-modal aria-label="Close">×</button>
+        </div>
+        <form method="post" action="" class="add-task-form" data-edit-calendar-form>
+            <label>
+                <span class="add-task-label">Calendar name</span>
+                <input type="text" name="name" data-edit-cal-name required>
+            </label>
+            <label>
+                <span class="add-task-label">Color</span>
+                <input type="color" name="color" data-edit-cal-color value="#3a6b6e">
+            </label>
+            <div class="modal-actions">
+                <button type="submit">Save</button>
+                <button type="button" class="secondary" data-close-modal>Cancel</button>
+            </div>
+        </form>
+    </div>
+</div>
+
 <script src="{{ '/static/todo.js' | static_v }}" defer></script>
 <script src="{{ '/static/modal.js' | static_v }}" defer></script>
 <script>
@@ -460,6 +553,41 @@
     // freshly-rendered day cells get click/keyboard handlers re-attached.
     window.rebindDayCells = bindAll;
     bindAll();
+})();
+</script>
+
+<script>
+// Imported-calendar legend: source toggle in the import modal + prefill/open
+// for the per-calendar Edit button. Opening the import modal + all closing is
+// handled generically by modal.js (data-open-modal / data-close-modal).
+(function () {
+    // Import modal: swap the visible source row when the radio changes.
+    const importForm = document.querySelector('[data-import-calendar]');
+    if (importForm) {
+        const fileRow = importForm.querySelector('[data-import-file-row]');
+        const urlRow = importForm.querySelector('[data-import-url-row]');
+        importForm.querySelectorAll('input[name="source_kind"]').forEach((radio) => {
+            radio.addEventListener('change', () => {
+                const useUrl = importForm.querySelector('input[name="source_kind"]:checked').value === 'url';
+                fileRow.hidden = useUrl;
+                urlRow.hidden = !useUrl;
+            });
+        });
+    }
+
+    // Edit button → prefill the edit modal's action + fields, then show it.
+    const editModal = document.getElementById('edit-calendar-modal');
+    const editForm = document.querySelector('[data-edit-calendar-form]');
+    document.querySelectorAll('[data-edit-calendar]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+            if (!editModal || !editForm) return;
+            editForm.action = '/calendars/' + btn.dataset.calId + '/edit';
+            editForm.querySelector('[data-edit-cal-name]').value = btn.dataset.calName || '';
+            editForm.querySelector('[data-edit-cal-color]').value = btn.dataset.calColor || '#3a6b6e';
+            editModal.hidden = false;
+            document.body.classList.add('modal-open');
+        });
+    });
 })();
 </script>
 {% endblock %}
