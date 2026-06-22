@@ -165,13 +165,20 @@ def test_visibility_hides_from_today_but_toggle_restores(auth_client):
     assert _import_file(auth_client, ics).status_code == 200
     cal_id = _calendars()[0].id
 
-    assert "Visible event" in auth_client.get("/today").text
+    # The /today page is a React island; assert against the JSON it renders.
+    def today_titles():
+        data = auth_client.get("/today.json").json()
+        return {it["title"]
+                for bucket in data["buckets"]
+                for it in bucket["items"]}
+
+    assert "Visible event" in today_titles()
     # Hide → drops from the view.
     auth_client.post(f"/calendars/{cal_id}/toggle", follow_redirects=False)
-    assert "Visible event" not in auth_client.get("/today").text
+    assert "Visible event" not in today_titles()
     # Show again → back.
     auth_client.post(f"/calendars/{cal_id}/toggle", follow_redirects=False)
-    assert "Visible event" in auth_client.get("/today").text
+    assert "Visible event" in today_titles()
 
 
 def test_imported_events_excluded_from_ical_feed(auth_client):
