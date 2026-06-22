@@ -95,16 +95,26 @@
             <h2 id="class-detail-code"></h2>
             <p id="class-detail-name" class="muted"></p>
         </header>
-        <details class="class-detail-section" id="class-detail-syllabus-section" hidden open>
+        <details class="class-detail-section" id="class-detail-syllabus-section" open>
             <summary class="day-block-head">Syllabus</summary>
-            <iframe id="class-detail-pdf" class="class-pdf-frame" title="Syllabus PDF"></iframe>
-            <p class="class-pdf-meta">
-                <a href="#" id="class-pdf-open-tab" target="_blank" rel="noopener">Open in new tab</a>
-                ·
-                <a href="#" id="class-pdf-download" download>Download</a>
-            </p>
-            <button type="button" id="class-detail-reparse" class="muted-btn" hidden
-                    title="Re-run the AI parse — replaces the events found from this syllabus">↻ Reparse syllabus</button>
+            <div id="class-detail-syllabus-present" hidden>
+                <iframe id="class-detail-pdf" class="class-pdf-frame" title="Syllabus PDF"></iframe>
+                <p class="class-pdf-meta">
+                    <a href="#" id="class-pdf-open-tab" target="_blank" rel="noopener">Open in new tab</a>
+                    ·
+                    <a href="#" id="class-pdf-download" download>Download</a>
+                </p>
+                <div class="class-syllabus-actions">
+                    <button type="button" id="class-detail-reparse" class="muted-btn" hidden
+                            title="Re-run the AI parse — replaces the events found from this syllabus">↻ Reparse syllabus</button>
+                    <button type="button" id="class-detail-syllabus-delete" class="muted-btn danger"
+                            title="Delete the saved PDF so you can upload a different one">🗑 Delete PDF</button>
+                </div>
+            </div>
+            <div id="class-detail-syllabus-empty" hidden>
+                <p class="muted day-empty">No syllabus uploaded for this class yet.</p>
+                <button type="button" id="class-detail-syllabus-upload" class="primary">+ Upload syllabus</button>
+            </div>
         </details>
         <details class="class-detail-section" open>
             <summary class="day-block-head">Documents</summary>

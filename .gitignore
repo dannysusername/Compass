@@ -25,6 +25,8 @@ Thumbs.db
 .vscode/
 *.log
 
+
+
 # Node / Playwright
 node_modules/
 test-results/
@@ -48,9 +50,16 @@ test_syllabus.pdf
 # already ignored above.
 CLAUDE.md
 OFFLINE-PLAN.md
+PROJECT_GUIDE.md
 docs/
 extension-experimental/SPEC.md
 extension-experimental/POSSIBILITIES.md
 extension-experimental/SPEC-EDGE-CASES.md
 extension-experimental/tests/README.md
 tests_browser/MOBILE-SPEC.md
+
+# Local-only tests — kept on disk, not pushed.
+tests/test_syllabus_class_upload.py
+tests_browser/test_mobile_task_titles.py
+tests_browser/test_syllabus_class_upload.py
+extension-experimental/tests/specs/syllabus-upload-delete.spec.js

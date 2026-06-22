@@ -9,7 +9,7 @@
     <link rel="apple-touch-icon" href="/static/icon-192.png">
     <link rel="stylesheet" href="{{ '/static/styles.css' | static_v }}">
     <!-- Offline write-queue (PWA). Deferred in <head> so it runs before the
-         per-page todo.js, which calls into window.CompassSync. -->
+         per-page scripts (and the React islands) that call window.CompassSync. -->
     <script src="{{ '/static/sync.js' | static_v }}" defer></script>
     <script>
       // Apply saved theme before paint to avoid a flash of light mode.

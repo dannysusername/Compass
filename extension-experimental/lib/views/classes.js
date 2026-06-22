@@ -131,7 +131,8 @@ export async function showClassDetail(classId) {
     $("#class-detail-tasks-empty").hidden = true;
     $("#class-detail-events-empty").hidden = true;
     $("#class-detail-docs-empty").hidden = true;
-    $("#class-detail-syllabus-section").hidden = true;
+    $("#class-detail-syllabus-present").hidden = true;
+    $("#class-detail-syllabus-empty").hidden = true;
     $("#class-detail-code").textContent = "Loading…";
     $("#class-detail-name").textContent = "";
 
@@ -160,7 +161,12 @@ export async function showClassDetail(classId) {
             // by the same entitlement as a fresh upload.
             const reparseBtn = $("#class-detail-reparse");
             reparseBtn.hidden = !canParseNow();
-            $("#class-detail-syllabus-section").hidden = false;
+            $("#class-detail-syllabus-present").hidden = false;
+            $("#class-detail-syllabus-empty").hidden = true;
+        } else {
+            // No syllabus yet (e.g. a manually-created class) — offer upload.
+            $("#class-detail-syllabus-present").hidden = true;
+            $("#class-detail-syllabus-empty").hidden = false;
         }
 
         if (data.documents && data.documents.length) {
@@ -470,6 +476,34 @@ export function bindClassDetail() {
         }
         if (!confirm("Reparsing re-runs the AI parse on this syllabus and ERASES the events previously found from it, replacing them with a fresh set. Continue?")) return;
         startReparse(syllabusId, classId);
+    });
+
+    // No-syllabus state: open the upload view targeting THIS class.
+    $("#class-detail-syllabus-upload").addEventListener("click", () => {
+        const classId = state.currentClassId;
+        if (!classId) return;
+        if (!canParseNow()) {
+            showSettings();
+            setXaiStatus(parseBlockMsg(), "error");
+            return;
+        }
+        showSyllabusUpload(classId);
+    });
+
+    // Delete the saved PDF so the user can upload a replacement. Events
+    // already found from it stay on the class (a re-upload replaces them).
+    $("#class-detail-syllabus-delete").addEventListener("click", async () => {
+        const syllabusId = state.currentSyllabusId;
+        const classId = state.currentClassId;
+        if (!syllabusId || !classId) return;
+        if (!confirm("Delete this saved syllabus PDF? The events already found from it stay on the class — you can upload a replacement afterward.")) return;
+        try {
+            await api.deleteSyllabus(syllabusId);
+            showClassDetail(classId);
+        } catch (err) {
+            if (err instanceof NotAuthenticated) { showLogin(); return; }
+            alert("Couldn't delete: " + err.message);
+        }
     });
 
     const docForm = $("#class-detail-doc-upload");

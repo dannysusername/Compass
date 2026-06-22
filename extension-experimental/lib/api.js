@@ -116,10 +116,19 @@ export const api = {
         fd.append("file", file);
         return request("/syllabus", { method: "POST", body: fd });
     },
+    // Attach a syllabus to an EXISTING class (vs uploadSyllabus, which makes a
+    // new one). Lets a manually-created class get a syllabus.
+    uploadSyllabusToClass: (classId, file) => {
+        const fd = new FormData();
+        fd.append("file", file);
+        return request(`/classes/${classId}/syllabus`, { method: "POST", body: fd });
+    },
     syllabusStatus: (id) =>
         request(`/syllabus/${id}/status.json`),
     reparseSyllabus: (id) =>
         request(`/syllabus/${id}/reparse`, { method: "POST" }),
+    deleteSyllabus: (id) =>
+        request(`/syllabus/${id}/delete`, { method: "POST" }),
     today: () => request("/today.json"),
     week: (days = 7) => request(`/week.json?days=${days}`),
     month: (m) => request("/month.json" + (m ? `?month=${m}` : "")),

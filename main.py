@@ -79,9 +79,9 @@ XAI_MODEL = os.environ.get("XAI_MODEL", "grok-4-fast-reasoning").strip()
 # the cap entirely (their quota, their bill).
 XAI_API_KEY = os.environ.get("XAI_API_KEY", "").strip()
 try:
-    FREE_PARSE_LIMIT = max(0, int(os.environ.get("FREE_PARSE_LIMIT", "5")))
+    FREE_PARSE_LIMIT = max(0, int(os.environ.get("FREE_PARSE_LIMIT", "3")))
 except ValueError:
-    FREE_PARSE_LIMIT = 5
+    FREE_PARSE_LIMIT = 3
 # Owner allowlist for the admin dashboard. Comma-separated emails, matched
 # case-insensitively against the logged-in user's email. Empty = nobody is
 # admin (the /admin routes 404 for everyone). This is the security boundary:
@@ -558,6 +558,11 @@ class User(SQLModel, table=True):
     # same effect as bringing your own key, but spent on the owner's quota.
     # Set/cleared only by an ADMIN_EMAILS account; users can't self-grant.
     unlimited_parses: bool = Field(default=False)
+    # Admin-set (via /admin) per-user revocation of the shared server key.
+    # When True, this account gets 0 free parses on the shared key and must
+    # bring its own xAI key — UNLESS it also has an unlimited grant, which
+    # wins. Independent of the global SHARED_PARSES_ENABLED kill-switch.
+    shared_key_blocked: bool = Field(default=False)
     # Unguessable token embedded in the iCal subscription URL. Lets Apple
     # Calendar (and other clients) poll the feed without sending a session
     # cookie — cookies don't survive long-lived subscriptions. Regenerating
@@ -598,6 +603,17 @@ class PasswordResetToken(SQLModel, table=True):
         default_factory=lambda: datetime.now(timezone.utc))
     expires_at: datetime
     used_at: Optional[datetime] = Field(default=None)
+
+
+class AppSetting(SQLModel, table=True):
+    """Tiny key/value store for owner-controlled global flags that must be
+    toggleable live from /admin (env vars can't be flipped without a redeploy)
+    and persist across restarts/dynos. Currently holds `shared_parses_enabled`
+    — the global kill-switch for free parses on the shared server key. Brand-new
+    table → auto-created by the lifespan create_all on both SQLite and Postgres;
+    no manual DDL. Read/written via get_setting / set_setting."""
+    key: str = Field(primary_key=True)
+    value: str
 
 
 class DayItemPosition(SQLModel, table=True):
@@ -689,6 +705,7 @@ async def lifespan(app: FastAPI):
             _add_column_if_missing(conn, "user", "xai_api_key", "TEXT")
             _add_column_if_missing(conn, "user", "free_parses_used", "INTEGER NOT NULL DEFAULT 0")
             _add_column_if_missing(conn, "user", "unlimited_parses", "INTEGER NOT NULL DEFAULT 0")
+            _add_column_if_missing(conn, "user", "shared_key_blocked", "INTEGER NOT NULL DEFAULT 0")
             _add_column_if_missing(conn, "user", "calendar_token", "TEXT")
             _add_column_if_missing(conn, "user", "class_order_json", "TEXT")
             _add_column_if_missing(conn, "user", "timezone", "TEXT")
@@ -873,6 +890,37 @@ templates.env.filters["static_v"] = _static_v
 # Exposed to templates so base.html can skip service-worker registration in
 # the test env (a live SW would cache responses and flake the browser suite).
 templates.env.globals["COMPASS_ENV"] = COMPASS_ENV
+
+
+# ---- Vite / React integration (incremental migration) ----
+# Pages migrated to React are server-rendered shells that load a Vite bundle.
+# Dev: run `npm run dev` in frontend/ and set VITE_DEV=1 — the template loads
+#      modules from the Vite dev server (:5173) with hot reload.
+# Prod: `npm run build` writes static/dist/ + a manifest; we serve the hashed
+#       files. VITE_DEV unset (the default) selects this path.
+VITE_DEV = bool(os.environ.get("VITE_DEV", "").strip())
+VITE_DEV_URL = os.environ.get("VITE_DEV_URL", "http://localhost:5173").rstrip("/")
+_vite_manifest_cache: Optional[dict] = None
+
+
+def _vite_asset(entry: str) -> str:
+    """Map a Vite entry (e.g. 'src/week/main.jsx') to its built, hashed URL
+    under /static/dist via the build manifest. Only used in production; in dev
+    the template loads the entry straight from the Vite server instead."""
+    global _vite_manifest_cache
+    if _vite_manifest_cache is None:
+        mpath = Path(__file__).parent / "static" / "dist" / ".vite" / "manifest.json"
+        try:
+            _vite_manifest_cache = json.loads(mpath.read_text())
+        except OSError:
+            _vite_manifest_cache = {}
+    info = _vite_manifest_cache.get(entry)
+    return f"/static/dist/{info['file']}" if info else ""
+
+
+templates.env.globals["VITE_DEV"] = VITE_DEV
+templates.env.globals["VITE_DEV_URL"] = VITE_DEV_URL
+templates.env.globals["vite_asset"] = _vite_asset
 
 
 # ---- Parse-job status (in-memory; resets on restart) ----
@@ -1605,6 +1653,37 @@ def _mask_key(key: Optional[str]) -> Optional[str]:
     return f"{key[:6]}…{key[-4:]}"
 
 
+SHARED_PARSES_SETTING = "shared_parses_enabled"
+
+
+def get_setting(key: str, default: Optional[str] = None) -> Optional[str]:
+    """Read an owner-controlled global flag from the AppSetting table.
+    Missing key → `default`."""
+    with Session(engine) as session:
+        row = session.get(AppSetting, key)
+        return row.value if row else default
+
+
+def set_setting(key: str, value: str) -> None:
+    """Upsert an owner-controlled global flag."""
+    with Session(engine) as session:
+        row = session.get(AppSetting, key)
+        if row:
+            row.value = value
+        else:
+            row = AppSetting(key=key, value=value)
+        session.add(row)
+        session.commit()
+
+
+def shared_parses_enabled() -> bool:
+    """Global kill-switch for free parses on the shared server key. Default ON
+    (absent setting == enabled) so existing deploys are unaffected until the
+    owner flips it off in /admin. When OFF, only own-key and admin-granted
+    accounts can parse — every other current/new account gets 0 free parses."""
+    return get_setting(SHARED_PARSES_SETTING, "1") != "0"
+
+
 def _parse_usage(user: User) -> dict:
     """Single source of truth for syllabus-parse entitlement, shared by
     /me.json, /settings and the /syllabus gate so the count the user sees
@@ -1613,6 +1692,11 @@ def _parse_usage(user: User) -> dict:
     own_key        → user pays, uncapped (free_parses_remaining is None).
     unlimited_grant → admin flipped this user uncapped on the SHARED key
                    (free_parses_remaining is None, but no own key needed).
+                   Wins over both block flags below — an explicit admin allow.
+    shared_revoked → the account is barred from the shared key, either because
+                   the owner blocked this specific user (shared_key_blocked) or
+                   globally disabled the shared key (shared_parses_enabled off).
+                   free_parses_remaining is 0 → must bring an own key.
     server_key_available → the shared key is configured; keyless accounts
                    can parse up to FREE_PARSE_LIMIT.
     Neither        → keyless upload is blocked (old "add a key" behaviour).
@@ -1624,15 +1708,29 @@ def _parse_usage(user: User) -> dict:
     own = bool((user.xai_api_key or "").strip())
     granted = bool(getattr(user, "unlimited_parses", False))
     uncapped = own or granted
+    blocked = bool(getattr(user, "shared_key_blocked", False))
+    global_on = shared_parses_enabled()
+    # A capped account loses shared-key access if it's individually blocked or
+    # the global switch is off. Uncapped accounts (own key / grant) are immune.
+    shared_revoked = (not uncapped) and (blocked or not global_on)
     used = user.free_parses_used or 0
+    if uncapped:
+        remaining = None
+    elif shared_revoked:
+        remaining = 0
+    else:
+        remaining = max(0, FREE_PARSE_LIMIT - used)
     return {
         "own_key": own,
         "unlimited_grant": granted,
+        "shared_key_blocked": blocked,
+        "shared_parses_enabled": global_on,
+        "shared_revoked": shared_revoked,
         "server_key_available": bool(XAI_API_KEY),
         "free_parses_used": used,
         "free_parse_limit": FREE_PARSE_LIMIT,
-        # None == unlimited (own key or admin-granted).
-        "free_parses_remaining": None if uncapped else max(0, FREE_PARSE_LIMIT - used),
+        # None == unlimited (own key or admin-granted); 0 when revoked.
+        "free_parses_remaining": remaining,
     }
 
 
@@ -1767,6 +1865,10 @@ def admin_dashboard(request: Request, admin: User = Depends(require_admin)):
                 status = "Own key (uncapped)"
             elif usage["unlimited_grant"]:
                 status = "Unlimited — granted"
+            elif usage["shared_key_blocked"]:
+                status = "Blocked — shared key"
+            elif not usage["shared_parses_enabled"]:
+                status = "Blocked — shared key off"
             elif not usage["server_key_available"]:
                 status = "No key configured"
             else:
@@ -1777,12 +1879,14 @@ def admin_dashboard(request: Request, admin: User = Depends(require_admin)):
                 "created_at": u.created_at,
                 "free_parses_used": u.free_parses_used or 0,
                 "unlimited": bool(u.unlimited_parses),
+                "blocked": bool(getattr(u, "shared_key_blocked", False)),
                 "is_self": u.id == admin.id,
                 "status": status,
             })
     return templates.TemplateResponse(request, "admin.html", {
         "rows": rows,
         "free_parse_limit": FREE_PARSE_LIMIT,
+        "shared_parses_enabled": shared_parses_enabled(),
         "saved": bool(request.query_params.get("saved")),
     })
 
@@ -1807,6 +1911,46 @@ def admin_set_unlimited(
         session.commit()
     if "application/json" in request.headers.get("accept", ""):
         return JSONResponse({"id": user_id, "unlimited": want})
+    return RedirectResponse("/admin?saved=1", status_code=303)
+
+
+@app.post("/admin/users/{user_id}/shared-key")
+def admin_set_shared_key_block(
+    request: Request,
+    user_id: int,
+    block: str = Form(...),
+    admin: User = Depends(require_admin),
+):
+    """Block/unblock one user from the shared server key. Blocked accounts get
+    0 free parses and must bring their own xAI key (an unlimited grant still
+    overrides this). Cross-user by design — same sanctioned exception as the
+    unlimited toggle (the ownership helpers deliberately 404 cross-user)."""
+    want = block.strip() == "1"
+    with Session(engine) as session:
+        target = session.get(User, user_id)
+        if not target:
+            raise HTTPException(404)
+        target.shared_key_blocked = want
+        session.add(target)
+        session.commit()
+    if "application/json" in request.headers.get("accept", ""):
+        return JSONResponse({"id": user_id, "shared_key_blocked": want})
+    return RedirectResponse("/admin?saved=1", status_code=303)
+
+
+@app.post("/admin/shared-parses")
+def admin_set_shared_parses(
+    request: Request,
+    enabled: str = Form(...),
+    admin: User = Depends(require_admin),
+):
+    """Global kill-switch for free parses on the shared server key. When set
+    off, every account WITHOUT its own key or an unlimited grant — current and
+    future — gets 0 free parses. Persisted in AppSetting so it survives
+    restarts and applies across dynos without a redeploy."""
+    set_setting(SHARED_PARSES_SETTING, "1" if enabled.strip() == "1" else "0")
+    if "application/json" in request.headers.get("accept", ""):
+        return JSONResponse({"shared_parses_enabled": enabled.strip() == "1"})
     return RedirectResponse("/admin?saved=1", status_code=303)
 
 
@@ -2191,6 +2335,8 @@ def today_json(user: User = Depends(require_login)):
                 "code": slot["cls"].code,
                 "name": getattr(slot["cls"], "name", "") or "",
                 "is_personal": getattr(slot["cls"], "is_personal", False),
+                "is_imported": getattr(slot["cls"], "is_imported", False),
+                "color": getattr(slot["cls"], "color", None),
                 "items": [_serialize_item(it) for it in slot["items"]],
                 "overdue_items": [_serialize_item(it) for it in slot["overdue_items"]],
             }
@@ -2238,10 +2384,21 @@ def week_json(user: User = Depends(require_login), days: int = 7):
 
 
 @app.get("/month.json")
-def month_json(user: User = Depends(require_login), month: Optional[str] = None):
+def month_json(
+    user: User = Depends(require_login),
+    month: Optional[str] = None,
+    grid: int = 0,
+):
     """All days in the requested YYYY-MM, JSON shape. Powers the
     extension side panel's Month view — vertical list of day-cards with
-    prev/next month nav. Same per-day bucket shape as `/week.json`."""
+    prev/next month nav. Same per-day bucket shape as `/week.json`.
+
+    `grid=1` switches to the web month-grid layout: a 6-week (42-cell)
+    Monday-aligned window starting on the Monday on-or-before the 1st, so
+    leading/trailing days from adjacent months are included and flagged
+    with `in_month=False`. This mirrors `week_view`'s grid so the React
+    Week island can render the same calendar. The default (grid=0) shape
+    is unchanged — the extension relies on the in-month-only list."""
     tz = _user_tz(user)
     today_start = _today_local(tz)
     target_year, target_month = today_start.year, today_start.month
@@ -2254,18 +2411,25 @@ def month_json(user: User = Depends(require_login), month: Optional[str] = None)
         except (ValueError, AttributeError):
             pass
     anchor = datetime(target_year, target_month, 1, tzinfo=tz)
-    next_first = (anchor.replace(day=28) + timedelta(days=4)).replace(day=1)
-    n_days = (next_first - anchor).days
+    if grid:
+        # 6-week grid: start on the Monday on-or-before the 1st, 42 cells.
+        span_start = anchor - timedelta(days=anchor.weekday())
+        n_cells = 42
+    else:
+        # In-month days only (extension's vertical Month list).
+        span_start = anchor
+        next_first = (anchor.replace(day=28) + timedelta(days=4)).replace(day=1)
+        n_cells = (next_first - anchor).days
     out_days = []
-    for i in range(n_days):
-        day_start = anchor + timedelta(days=i)
+    for i in range(n_cells):
+        day_start = span_start + timedelta(days=i)
         day_end = day_start + timedelta(days=1)
         items_by_class = _collect_items_in_range(
             day_start, day_end, user.id,
             tz=tz,
             day_for_overrides=day_start.strftime("%Y-%m-%d"),
         )
-        out_days.append({
+        day_out = {
             "date": day_start.date().isoformat(),
             "is_today": day_start.date() == today_start.date(),
             "buckets": [
@@ -2274,11 +2438,16 @@ def month_json(user: User = Depends(require_login), month: Optional[str] = None)
                     "code": slot["cls"].code,
                     "name": getattr(slot["cls"], "name", "") or "",
                     "is_personal": getattr(slot["cls"], "is_personal", False),
+                    "is_imported": getattr(slot["cls"], "is_imported", False),
+                    "color": getattr(slot["cls"], "color", None),
                     "items": [_serialize_item(it) for it in slot["items"]],
                 }
                 for slot in items_by_class.values()
             ],
-        })
+        }
+        if grid:
+            day_out["in_month"] = day_start.month == target_month
+        out_days.append(day_out)
     if target_month == 1:
         prev_y, prev_m = target_year - 1, 12
     else:
@@ -2408,22 +2577,9 @@ def class_detail(request: Request, class_id: int, user: User = Depends(require_l
         added_events = [e for e in all_events if e.added_to_calendar]
         documents = sorted(cls.documents, key=lambda d: d.uploaded_at, reverse=True)
         latest_syllabus = max(cls.syllabi, key=lambda s: s.parsed_at) if cls.syllabi else None
-    # Floating tasks panel reuses the home page's today list. Add-task form
-    # defaults to the current class.
-    tz = _user_tz(user)
-    today_start = _today_local(tz)
-    today_end = today_start + timedelta(days=1)
-    today_items = _collect_items_in_range(today_start, today_end, user.id,
-                                          tz=tz, hide_completed=True)
-    overdue = _collect_overdue(user.id, tz=tz)
-    today_buckets = _merge_today_with_overdue(today_items, overdue, user.id)
-    with Session(engine, expire_on_commit=False) as session:
-        all_classes = session.exec(
-            select(Class).where(Class.user_id == user.id).order_by(Class.code)
-        ).all()
-        all_tags = session.exec(
-            select(Tag).where(Tag.user_id == user.id).order_by(Tag.name)
-        ).all()
+    # The floating tasks panel is the React Today island (mounted client-side,
+    # pre-selecting this class for new tasks); it fetches its own data, so the
+    # route no longer builds today_buckets / all_classes / all_tags here.
     return templates.TemplateResponse(request, "class.html", {
         "cls": cls,
         "events": all_events,
@@ -2431,11 +2587,6 @@ def class_detail(request: Request, class_id: int, user: User = Depends(require_l
         "added_events": added_events,
         "documents": documents,
         "syllabus": latest_syllabus,
-        "today": today_start,
-        "today_buckets": today_buckets,
-        "all_classes": all_classes,
-        "default_class_id": cls.id,
-        "all_tags": all_tags,
     })
 
 
@@ -2630,6 +2781,101 @@ def syllabus_reparse(
     if wants_json:
         return JSONResponse({"syllabus_id": syllabus_id})
     return RedirectResponse(url=f"/syllabus/{syllabus_id}/status", status_code=303)
+
+
+@app.post("/classes/{class_id}/syllabus")
+async def class_syllabus_upload(
+    class_id: int,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    user: User = Depends(require_login),
+):
+    """Attach a syllabus to an EXISTING class and parse it. The `/syllabus`
+    route always creates a *new* class, so a manually-created class had no way
+    to get a syllabus — this fills that gap. Any syllabus already on the class
+    is replaced (its PDF deleted) so the page's single-syllabus view stays
+    truthful; process_syllabus then wipes + recreates the class's events.
+    Gated + counted exactly like a fresh upload (docs/SYLLABUS.md), ownership
+    via _own_class (404 cross-user)."""
+    wants_json = "application/json" in request.headers.get("accept", "")
+    with Session(engine) as session:
+        _own_class(session, class_id, user.id)  # 404 cross-user before any work
+    usage = _parse_usage(user)
+    block = _parse_gate_response(usage, wants_json)
+    if block:
+        return block
+    content = await file.read()
+    validate_pdf(content)
+
+    safe_name = safe_filename(file.filename or "syllabus.pdf")
+    filename = f"{uuid.uuid4().hex[:8]}_{safe_name}"
+    storage.save(filename, content, content_type="application/pdf")
+
+    try:
+        raw_text = extract_pdf_text(content)
+    except Exception as e:
+        raise HTTPException(400, f"Could not extract text from PDF: {e}")
+    if not raw_text.strip():
+        raise HTTPException(400, "PDF appears to have no extractable text (might be a scanned image)")
+
+    with Session(engine) as session:
+        cls = _own_class(session, class_id, user.id)
+        # Replace any prior syllabus PDFs for this class — the class page
+        # shows exactly one, so don't let stale rows/files accumulate.
+        old_syllabus_ids = [s.id for s in cls.syllabi]
+        for s in list(cls.syllabi):
+            try:
+                storage.delete(s.filename)
+            except Exception:
+                pass
+            session.delete(s)
+        syllabus = Syllabus(
+            class_id=cls.id,
+            filename=filename,
+            raw_text=raw_text,
+            parsed_at=datetime.now(timezone.utc),
+        )
+        session.add(syllabus)
+        session.commit()
+        syllabus_id = syllabus.id
+    for sid in old_syllabus_ids:
+        parse_jobs.pop(sid, None)
+
+    _spend_parse_credit(user.id, usage)
+    parse_jobs[syllabus_id] = "pending"
+    background_tasks.add_task(process_syllabus, syllabus_id)
+
+    if wants_json:
+        return JSONResponse({"syllabus_id": syllabus_id, "class_id": class_id})
+    return RedirectResponse(url=f"/syllabus/{syllabus_id}/status", status_code=303)
+
+
+@app.post("/syllabus/{syllabus_id}/delete")
+def syllabus_delete(syllabus_id: int, request: Request, user: User = Depends(require_login)):
+    """Delete a class's saved syllabus PDF so the user can upload a
+    replacement. Removes the stored PDF + Syllabus row only — the calendar
+    events already parsed from it stay on the class (least-destructive; a
+    re-upload replaces them via process_syllabus). Ownership via _own_syllabus
+    (404 cross-user)."""
+    wants_json = "application/json" in request.headers.get("accept", "")
+    with Session(engine) as session:
+        syllabus = _own_syllabus(session, syllabus_id, user.id)
+        if not syllabus:
+            if wants_json:
+                return JSONResponse({"error": "not_found"}, status_code=404)
+            raise HTTPException(404, "Syllabus not found")
+        class_id = syllabus.class_id
+        try:
+            storage.delete(syllabus.filename)
+        except Exception:
+            pass
+        session.delete(syllabus)
+        session.commit()
+    parse_jobs.pop(syllabus_id, None)
+    if wants_json:
+        return JSONResponse({"deleted": syllabus_id, "class_id": class_id})
+    return RedirectResponse(url=f"/classes/{class_id}", status_code=303)
 
 
 # ---- Routes: Imported calendars (external .ics → Task rows) ----
@@ -4545,8 +4791,11 @@ def today_view(request: Request, user: User = Depends(require_login)):
 
 @app.get("/week", response_class=HTMLResponse)
 def week_view(request: Request, user: User = Depends(require_login), month: Optional[str] = None):
-    """Month-grid view (Mon-Sun, 6 weeks) for the requested YYYY-MM.
-    Defaults to the current month."""
+    """Month-view page shell for the requested YYYY-MM (defaults to current).
+    The grid itself is rendered by the React Week island (fed by
+    /month.json?grid=1); this route only supplies the month label + nav and the
+    imported-calendars legend/modals. Classes + tags for the add/edit form come
+    from /classes.json and /tags.json, so they're no longer queried here."""
     tz = _user_tz(user)
     today_start = _today_local(tz)
     # Parse the requested month; fall back to today's month on bad input.
@@ -4560,23 +4809,6 @@ def week_view(request: Request, user: User = Depends(require_login), month: Opti
         except (ValueError, AttributeError):
             pass
     first_of_month = datetime(target_year, target_month, 1, tzinfo=tz)
-    # Grid starts on the Monday on-or-before the 1st.
-    grid_start = first_of_month - timedelta(days=first_of_month.weekday())
-    days = []
-    for i in range(42):  # 6 weeks × 7 days
-        day_start = grid_start + timedelta(days=i)
-        day_end = day_start + timedelta(days=1)
-        items_by_class = _collect_items_in_range(
-            day_start, day_end, user.id,
-            day_for_overrides=day_start.strftime("%Y-%m-%d"),
-            tz=tz,
-        )
-        days.append({
-            "date": day_start,
-            "in_month": day_start.month == target_month,
-            "is_today": day_start == today_start,
-            "items_by_class": items_by_class,
-        })
     # Prev / next month nav.
     if target_month == 1:
         prev_y, prev_m = target_year - 1, 12
@@ -4587,12 +4819,6 @@ def week_view(request: Request, user: User = Depends(require_login), month: Opti
     else:
         next_y, next_m = target_year, target_month + 1
     with Session(engine, expire_on_commit=False) as session:
-        all_classes = session.exec(
-            select(Class).where(Class.user_id == user.id).order_by(Class.code)
-        ).all()
-        all_tags = session.exec(
-            select(Tag).where(Tag.user_id == user.id).order_by(Tag.name)
-        ).all()
         imported_calendars = session.exec(
             select(ImportedCalendar)
             .where(ImportedCalendar.user_id == user.id)
@@ -4600,12 +4826,8 @@ def week_view(request: Request, user: User = Depends(require_login), month: Opti
         ).all()
     return templates.TemplateResponse(request, "week.html", {
         "first_of_month": first_of_month,
-        "days": days,
         "prev_month": f"{prev_y:04d}-{prev_m:02d}",
         "next_month": f"{next_y:04d}-{next_m:02d}",
-        "all_classes": all_classes,
-        "default_class_id": (all_classes[0].id if all_classes else None),
-        "all_tags": all_tags,
         "imported_calendars": imported_calendars,
     })
 

@@ -1,0 +1,24 @@
+{
+  "_useTaskMutations-Cl__uWaF.js": {
+    "file": "assets/useTaskMutations-Cl__uWaF.js",
+    "name": "useTaskMutations"
+  },
+  "src/today/main.jsx": {
+    "file": "assets/today-CxHs_6PM.js",
+    "name": "today",
+    "src": "src/today/main.jsx",
+    "isEntry": true,
+    "imports": [
+      "_useTaskMutations-Cl__uWaF.js"
+    ]
+  },
+  "src/week/main.jsx": {
+    "file": "assets/week-CUR_joZa.js",
+    "name": "week",
+    "src": "src/week/main.jsx",
+    "isEntry": true,
+    "imports": [
+      "_useTaskMutations-Cl__uWaF.js"
+    ]
+  }
+}

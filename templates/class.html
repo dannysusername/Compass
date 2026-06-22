@@ -26,18 +26,46 @@
         &middot;
         <a href="/uploads/{{ syllabus.filename }}" download="{{ syllabus.filename }}">Download</a>
     </p>
-    <form method="post" action="/syllabus/{{ syllabus.id }}/reparse" class="syllabus-reparse"
-          onsubmit="return confirm('Reparsing re-runs the AI parse on this syllabus and ERASES the events previously found from it, replacing them with a fresh set. Continue?')">
-        <button type="submit" class="small">↻ Reparse syllabus</button>
-        <span class="subtle">Re-run the AI parse — replaces the events found from this syllabus.</span>
-    </form>
+    <div class="syllabus-actions">
+        <form method="post" action="/syllabus/{{ syllabus.id }}/reparse" class="syllabus-reparse"
+              onsubmit="return confirm('Reparsing re-runs the AI parse on this syllabus and ERASES the events previously found from it, replacing them with a fresh set. Continue?')">
+            <button type="submit" class="small">↻ Reparse syllabus</button>
+            <span class="subtle">Re-run the AI parse — replaces the events found from this syllabus.</span>
+        </form>
+        <form method="post" action="/syllabus/{{ syllabus.id }}/delete" class="syllabus-delete"
+              onsubmit="return confirm('Delete this saved syllabus PDF? The events already found from it stay on the class — you can upload a replacement afterward.')">
+            <button type="submit" class="small danger-btn">🗑 Delete PDF</button>
+            <span class="subtle">Remove the saved PDF so you can upload a different one.</span>
+        </form>
+    </div>
 </div>
 </details>
 {% else %}
-<section class="syllabus-link">
+<details class="class-section" data-state-key="class-{{ cls.id }}-pdf" open>
+<summary class="class-section-summary">
     <h2>Syllabus</h2>
-    <p class="empty">No syllabus uploaded for this class yet. Upload one from the home page.</p>
-</section>
+    <span class="section-toggle-chevron" aria-hidden="true"></span>
+</summary>
+<div class="class-section-body">
+    <p class="empty">No syllabus uploaded for this class yet.</p>
+    <form method="post" action="/classes/{{ cls.id }}/syllabus" enctype="multipart/form-data" class="add-doc syllabus-upload-form">
+        <h3>Upload a syllabus</h3>
+        <p class="subtle">Compass extracts policies and pulls exam dates from the PDF, adding them to this class's calendar.</p>
+        <div class="drop-zone" data-upload-zone>
+            <input type="file" name="file" accept="application/pdf,.pdf" required>
+            <div class="drop-prompt">
+                <div class="drop-glyph">. . .</div>
+                <p class="drop-line">
+                    Drop a PDF here<span class="or">or</span><span class="underline">choose a file</span>
+                </p>
+                <div class="drop-hint">PDF &middot; up to 25&nbsp;MB</div>
+            </div>
+            <div class="drop-picked"></div>
+        </div>
+        <button type="submit">Upload syllabus</button>
+    </form>
+</div>
+</details>
 {% endif %}
 
 {% macro render_event(e, on_calendar) %}
@@ -196,13 +224,30 @@
     <span class="task-fab-text">Tasks</span>
 </button>
 <div class="task-fab-panel" id="task-fab-panel" hidden>
-    {% include "_today_list.html" %}
+    {# React Today island (same component as / and /today). The class id pre-
+       selects this class in the add-task form. #}
+    <div id="today-root" data-default-class-id="{{ cls.id }}"></div>
 </div>
 
-<script src="{{ '/static/todo.js' | static_v }}" defer></script>
 <script src="{{ '/static/modal.js' | static_v }}" defer></script>
 <script src="{{ '/static/event-review.js' | static_v }}" defer></script>
 <script src="{{ '/static/class-actions.js' | static_v }}" defer></script>
+
+{# ---- React island loader (Today view) ---- #}
+{% if VITE_DEV %}
+<script type="module">
+  import RefreshRuntime from "{{ VITE_DEV_URL }}/@react-refresh";
+  RefreshRuntime.injectIntoGlobalHook(window);
+  window.$RefreshReg$ = () => {};
+  window.$RefreshSig$ = () => (type) => type;
+  window.__vite_plugin_react_preamble_installed__ = true;
+</script>
+<script type="module" src="{{ VITE_DEV_URL }}/@vite/client"></script>
+<script type="module" src="{{ VITE_DEV_URL }}/src/today/main.jsx"></script>
+{% else %}
+{% set today_bundle = vite_asset('src/today/main.jsx') %}
+{% if today_bundle %}<script type="module" src="{{ today_bundle }}"></script>{% endif %}
+{% endif %}
 
 <script>
 // Floating tasks panel toggle.

@@ -184,7 +184,9 @@ def test_delete_all_confirm_wipes_events(seed_class_with_events):
     page.wait_for_load_state("networkidle")
 
     expect(page.locator(".class-section-body .event-list li")).to_have_count(0)
-    expect(page.locator(".class-section-body .empty")).to_have_text(
+    # Scope to the events section — a class with no syllabus now also renders
+    # an upload section with its own `.class-section-body .empty`.
+    expect(page.locator('details[data-state-key$="-events"] .empty')).to_have_text(
         "No events yet."
     )
 

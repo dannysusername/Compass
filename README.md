@@ -80,6 +80,9 @@ Then open `http://localhost:8000` (or `http://<your-lan-ip>:8000` from your phon
 | `FREE_PARSE_LIMIT` | optional | Free parses per account on the shared key (default 5) |
 | `ADMIN_EMAILS` | optional | Comma-separated emails that can reach `/admin` and grant uncapped parsing |
 | `STORAGE_BACKEND=s3` + `STORAGE_*` | ✅ (prod) | Heroku's filesystem is ephemeral — use S3/R2 for uploads |
+| `SENDGRID_API_KEY` | optional | Enables transactional email (password reset). Unset = email flows are disabled. |
+| `EMAIL_FROM` | optional | From-address for sent email. |
+| `APP_BASE_URL` | optional | Public base URL used to build links in emails (e.g. password-reset links). |
 
 ### Parse entitlement model
 
@@ -105,4 +108,4 @@ Workflow lives in `.github/workflows/ci.yml`; deploy auth is the `HEROKU_API_KEY
 
 ## Architecture
 
-`main.py` is a single ~1700-line FastAPI app: every SQLModel table, the startup migration, every route, and the syllabus-parsing pipeline. It is intentionally *not* split into a package (`compass_tray.py` and the Heroku `Procfile` import `main:app` directly). For the full architecture — auth, per-user data scoping, recurrence/alerts, the iCal feed, the storage abstraction, the extension contract — see **[CLAUDE.md](CLAUDE.md)**, which is kept current with every architecture-level change.
+`main.py` is a single ~1700-line FastAPI app: every SQLModel table, the startup migration, every route, and the syllabus-parsing pipeline. It is intentionally *not* split into a package (`compass_tray.py` and the Heroku `Procfile` import `main:app` directly). The UI is server-rendered Jinja2 templates plus the JS in `static/`; a React/Vite client is also taking shape in `frontend/`. For the full architecture — auth, per-user data scoping, recurrence/alerts, the iCal feed, the storage abstraction, the extension contract — see **[CLAUDE.md](CLAUDE.md)** and the per-area docs in **[docs/](docs/)**, kept current with every architecture-level change.

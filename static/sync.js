@@ -7,8 +7,8 @@
 // load so an offline edit survives a reload (the cached HTML doesn't know
 // about it). Tasks only, matching the server's /sync push.
 //
-// Exposes window.CompassSync. todo.js calls into it from its toggle / delete
-// / add handlers when a write hits a network error.
+// Exposes window.CompassSync. The React task islands call into it from their
+// toggle / delete / add handlers when a write hits a network error.
 (function (global) {
     "use strict";
     const DB_NAME = "compass-web-sync";
@@ -184,8 +184,8 @@
 
     // ---- Optimistic row rendering (offline ADD) ----
     // The site is server-rendered, so an offline-added task has no row until a
-    // reload reaches the server. These build a row matching templates/_today_list.html
-    // (render_item) in JS so the task shows the instant it's added offline, and
+    // reload reaches the server. These build a row matching the todo-list markup
+    // in JS so the task shows the instant it's added offline, and
     // survives an offline reload (applyToDom re-injects it from the queue). On
     // reconnect a softRefresh swaps the whole list for the canonical server HTML.
     const _bucketKey = (classId) =>

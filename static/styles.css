@@ -893,6 +893,16 @@ form.add-class, form.add-doc {
 }
 form.add-class h3, form.add-doc h3 { margin: 0 0 8px; }
 
+/* Syllabus actions row (Reparse + Delete PDF) sit side by side, each with
+   its button over an explanatory line; wrap to a column on narrow screens. */
+.syllabus-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px 28px;
+    margin-top: 20px;
+}
+.syllabus-actions form { margin-top: 0; gap: 6px; }
+
 label {
     display: flex;
     flex-direction: column;
@@ -2044,7 +2054,12 @@ section h2 .add-syllabus-btn,
 
 /* ---- Modal (syllabus upload) ---- */
 
-.modal-overlay {
+/* `.react-modal-overlay` is the React-owned variant: same backdrop styling,
+   but a distinct class so modal.js's delegated open/close/Escape handlers
+   (which match the bare `.modal-overlay` token) leave it alone. React manages
+   its own open/close state instead. */
+.modal-overlay,
+.react-modal-overlay {
     position: fixed;
     inset: 0;
     background: rgba(0, 0, 0, 0.45);
@@ -2889,7 +2904,15 @@ details.class-section > summary.class-section-summary .section-toggle-chevron {
     gap: 8px;
 }
 .cal-legend-item.is-hidden { opacity: 0.5; }
-.cal-legend-item form.inline { display: inline; margin: 0; }
+/* The Hide/Delete actions are <form>-wrapped buttons; Edit is a bare
+   button. Inline forms inherit the body's tall line-height, so their
+   buttons sat lower than Edit. inline-flex + center collapses each form
+   to its button's height so all three actions share one baseline. */
+.cal-legend-item form.inline {
+    display: inline-flex;
+    align-items: center;
+    margin: 0;
+}
 .cal-swatch {
     display: inline-block;
     width: 12px;
@@ -3286,7 +3309,12 @@ details.class-section > summary.class-section-summary .section-toggle-chevron {
    selector scopes this to pages that render the grid, leaving home/class
    layout untouched. */
 body:has(.month-grid) { min-height: 100vh; display: flex; flex-direction: column; }
-body:has(.month-grid) main { flex: 1; display: flex; flex-direction: column; }
+/* margin-inline: 0 cancels the base `main { margin: 0 auto }`. Auto side
+   margins in a flex column make the item shrink-to-fit its content and
+   center — so an empty grid rendered narrow and only "widened" once an
+   event gave a cell more content. Zeroing them lets main stretch to the
+   full body width, so the calendar always fills the screen. */
+body:has(.month-grid) main { flex: 1; display: flex; flex-direction: column; margin-inline: 0; }
 body:has(.month-grid) .month-grid { flex: 1; }
 
 .day-cell {
@@ -3519,6 +3547,21 @@ body:has(.month-grid) .month-grid { flex: 1; }
     }
     .day-cell-date { font-size: 15px; }
     .day-cell-item { font-size: 13px; }
+
+    /* Task rows: the time + tag chips are flex-shrink:0, so in a narrow
+       container (320px home column, the day modal) they reserved space on
+       the title's row and squeezed it into a one-word-per-line column.
+       flex-wrap lets the meta drop to its own line ONLY when the title is
+       long enough to need the room — short titles keep the single row.
+       margin-left:auto on the first meta element (whatever immediately
+       follows the title: .todo-when / .todo-range / .todo-tag) tucks the
+       wrapped meta into the bottom-right instead of under the drag handle. */
+    .todo-row-main { flex-wrap: wrap; row-gap: 2px; }
+    /* flex-basis:auto (not the default `flex:1` → basis 0%) so a long title
+       contributes its content width to line-breaking and bumps the meta to
+       the next line; a short title still fits beside the meta on one row. */
+    .todo-row-main .todo-title { flex: 1 1 auto; min-width: 0; }
+    .todo-row-main .todo-title + * { margin-left: auto; }
 }
 
 /* Touch devices: grow tap targets to ~44px without touching the
@@ -3553,6 +3596,29 @@ body:has(.month-grid) .month-grid { flex: 1; }
 .admin-table tbody tr { border-bottom: 1px solid var(--rule); }
 .admin-table .admin-status-on { color: var(--accent, #5b9d5b); }
 .admin-table .admin-action-form { margin: 0; }
+.admin-status-on { color: var(--accent, #5b9d5b); }
+
+/* Per-row action buttons sit side by side (Grant/Revoke + Block/Unblock). */
+.admin-action-group {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+/* Global shared-key kill-switch banner above the user table. */
+.admin-global-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-top: 20px;
+    padding: 14px 16px;
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+}
+.admin-global-toggle-text { display: flex; flex-direction: column; gap: 4px; }
+.admin-global-toggle .admin-action-form { margin: 0; }
 
 @media (max-width: 640px) {
     /* The masthead was 7px too wide at 320px (logo + hamburger +

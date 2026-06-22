@@ -46,9 +46,8 @@
 </main>
 
 <aside class="home-todo-col">
-    {% with all_classes = classes %}
-    {% include "_today_list.html" %}
-    {% endwith %}
+    {# React Today island (same component as /today). #}
+    <div id="today-root"></div>
 </aside>
 </div>
 
@@ -79,8 +78,23 @@
     </div>
 </div>
 
-<script src="{{ '/static/todo.js' | static_v }}" defer></script>
 <script src="{{ '/static/modal.js' | static_v }}" defer></script>
 <script src="{{ '/static/class-actions.js' | static_v }}" defer></script>
+
+{# ---- React island loader (Today view) ---- #}
+{% if VITE_DEV %}
+<script type="module">
+  import RefreshRuntime from "{{ VITE_DEV_URL }}/@react-refresh";
+  RefreshRuntime.injectIntoGlobalHook(window);
+  window.$RefreshReg$ = () => {};
+  window.$RefreshSig$ = () => (type) => type;
+  window.__vite_plugin_react_preamble_installed__ = true;
+</script>
+<script type="module" src="{{ VITE_DEV_URL }}/@vite/client"></script>
+<script type="module" src="{{ VITE_DEV_URL }}/src/today/main.jsx"></script>
+{% else %}
+{% set today_bundle = vite_asset('src/today/main.jsx') %}
+{% if today_bundle %}<script type="module" src="{{ today_bundle }}"></script>{% endif %}
+{% endif %}
 
 {% endblock %}

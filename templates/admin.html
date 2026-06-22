@@ -7,13 +7,42 @@
     <p class="subtle">
         Owner-only. Flip a user to <strong>Unlimited</strong> to let them
         parse syllabi on the shared server key with no cap (same as bringing
-        their own key, but on your xAI quota). Everyone else is capped at
-        {{ free_parse_limit }} free parses.
+        their own key, but on your xAI quota). <strong>Block</strong> a user to
+        bar them from the shared key entirely (they must add their own key).
+        Everyone else is capped at {{ free_parse_limit }} free parses.
     </p>
 
     {% if saved %}
         <p class="subtle" style="color: var(--accent, #5b9d5b)">Saved.</p>
     {% endif %}
+
+    <div class="admin-global-toggle">
+        <div class="admin-global-toggle-text">
+            <strong>Shared key for free parses:
+                {% if shared_parses_enabled %}
+                    <span class="admin-status-on">ON</span>
+                {% else %}
+                    <span style="color: var(--danger, #b04a4a)">OFF</span>
+                {% endif %}
+            </strong>
+            <span class="hint">
+                When off, <em>no</em> user — current or new — can parse on your
+                key unless they have their own key or an Unlimited grant.
+            </span>
+        </div>
+        <form method="post" action="/admin/shared-parses" class="admin-action-form">
+            {% if shared_parses_enabled %}
+                <input type="hidden" name="enabled" value="0">
+                <button type="submit" class="danger-btn"
+                        onclick="return confirm('Turn OFF the shared key for everyone? Capped users (no own key, no Unlimited grant) will be unable to parse until you turn it back on.')">
+                    Turn off for everyone
+                </button>
+            {% else %}
+                <input type="hidden" name="enabled" value="1">
+                <button type="submit">Turn back on</button>
+            {% endif %}
+        </form>
+    </div>
 
     <table class="admin-table">
         <thead>
@@ -43,15 +72,26 @@
                     {% endif %}
                 </td>
                 <td data-label="Action">
-                    <form method="post" action="/admin/users/{{ r.id }}/unlimited" class="admin-action-form">
-                        {% if r.unlimited %}
-                            <input type="hidden" name="grant" value="0">
-                            <button type="submit" class="secondary">Revoke</button>
-                        {% else %}
-                            <input type="hidden" name="grant" value="1">
-                            <button type="submit">Grant unlimited</button>
-                        {% endif %}
-                    </form>
+                    <div class="admin-action-group">
+                        <form method="post" action="/admin/users/{{ r.id }}/unlimited" class="admin-action-form">
+                            {% if r.unlimited %}
+                                <input type="hidden" name="grant" value="0">
+                                <button type="submit" class="secondary">Revoke</button>
+                            {% else %}
+                                <input type="hidden" name="grant" value="1">
+                                <button type="submit">Grant unlimited</button>
+                            {% endif %}
+                        </form>
+                        <form method="post" action="/admin/users/{{ r.id }}/shared-key" class="admin-action-form">
+                            {% if r.blocked %}
+                                <input type="hidden" name="block" value="0">
+                                <button type="submit" class="secondary">Unblock</button>
+                            {% else %}
+                                <input type="hidden" name="block" value="1">
+                                <button type="submit" class="danger-btn">Block</button>
+                            {% endif %}
+                        </form>
+                    </div>
                 </td>
             </tr>
         {% endfor %}

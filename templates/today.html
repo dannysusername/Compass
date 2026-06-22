@@ -2,10 +2,25 @@
 {% block title %}Today — Compass{% endblock %}
 {% block content %}
 
-{# Reuses the shared today-list partial so /today and / render with the
-   same row layout (collapsed-by-default, click to expand drawer). #}
-{% include "_today_list.html" %}
+{# React Today island. The same component (src/today/TodayApp.jsx) backs
+   /today, /, and the class page's floating tasks panel. #}
+<div id="today-root"></div>
 
-<script src="{{ '/static/todo.js' | static_v }}" defer></script>
-<script src="{{ '/static/modal.js' | static_v }}" defer></script>
+{# ---- React island loader (Today view) ----
+   Dev: modules from the Vite hot-reload server (with the Fast Refresh
+   preamble). Prod: the hashed bundle from the Vite manifest. #}
+{% if VITE_DEV %}
+<script type="module">
+  import RefreshRuntime from "{{ VITE_DEV_URL }}/@react-refresh";
+  RefreshRuntime.injectIntoGlobalHook(window);
+  window.$RefreshReg$ = () => {};
+  window.$RefreshSig$ = () => (type) => type;
+  window.__vite_plugin_react_preamble_installed__ = true;
+</script>
+<script type="module" src="{{ VITE_DEV_URL }}/@vite/client"></script>
+<script type="module" src="{{ VITE_DEV_URL }}/src/today/main.jsx"></script>
+{% else %}
+{% set today_bundle = vite_asset('src/today/main.jsx') %}
+{% if today_bundle %}<script type="module" src="{{ today_bundle }}"></script>{% endif %}
+{% endif %}
 {% endblock %}

@@ -501,6 +501,19 @@ span.class-block-label:hover .class-code { color: inherit; }
 .class-pdf-meta a { color: var(--ink); text-decoration: underline; }
 .class-pdf-meta a:hover { color: var(--rust); }
 
+/* Syllabus actions row (Reparse + Delete PDF). The default .muted-btn floats
+   right via margin-left:auto; inside this row we want them packed left. */
+.class-syllabus-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 8px;
+}
+.class-syllabus-actions .muted-btn { margin-left: 0; }
+.muted-btn.danger { color: var(--rust); border-color: var(--rust); }
+.muted-btn.danger:hover { color: var(--paper); background: var(--rust); border-color: var(--rust); }
+#class-detail-syllabus-upload { margin-top: 8px; }
+
 /* Documents list — title link + × delete button per row. Upload form
    sits below with a file picker and an inline submit button. */
 .doc-list {

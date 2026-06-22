@@ -13,8 +13,12 @@ const $ = (sel) => document.querySelector(sel);
 
 let pickedFile = null;
 let pollTimer = null;
+// When set, the upload attaches to this EXISTING class (POST
+// /classes/{id}/syllabus) instead of creating a new one (POST /syllabus).
+let uploadTargetClassId = null;
 
-export function showSyllabusUpload() {
+export function showSyllabusUpload(classId = null) {
+    uploadTargetClassId = classId || null;
     showSecondary("#syllabus-upload-view");
     pickedFile = null;
     $("#syllabus-file-input").value = "";
@@ -90,7 +94,9 @@ export function bindSyllabus() {
         if (!pickedFile) return;
         setStatus("Uploading…", "pending");
         try {
-            const r = await api.uploadSyllabus(pickedFile);
+            const r = uploadTargetClassId
+                ? await api.uploadSyllabusToClass(uploadTargetClassId, pickedFile)
+                : await api.uploadSyllabus(pickedFile);
             $("#syllabus-upload-stage").hidden = true;
             $("#syllabus-parse-stage").hidden = false;
             $("#syllabus-parse-actions").hidden = true;
@@ -118,7 +124,8 @@ export function bindSyllabus() {
     });
 
     $("#syllabus-back").addEventListener("click", hideSyllabusUpload);
-    $("#syllabus-retry").addEventListener("click", () => showSyllabusUpload());
+    // Retry keeps the same target (existing class vs new class).
+    $("#syllabus-retry").addEventListener("click", () => showSyllabusUpload(uploadTargetClassId));
 }
 
 // Reparse an existing syllabus from the class-detail surface: kick the
