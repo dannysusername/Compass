@@ -30,22 +30,10 @@ export function bindLogin() {
         if (!email || !password) return;
         setLoginStatus("Signing in…", "pending");
         try {
-            const base = await api.base();
-            const fd = new FormData();
-            fd.append("email", email);
-            fd.append("password", password);
-            // Server returns 303 on success; redirect:'manual' surfaces
-            // that as opaqueredirect (status 0) which we treat as success.
-            const r = await fetch(base + "/login", {
-                method: "POST",
-                body: fd,
-                credentials: "include",
-                redirect: "manual",
-            });
-            if (r.status === 401) {
-                setLoginStatus("Wrong email or password.", "error");
-                return;
-            }
+            // api.login authenticates and stores the per-user bearer token;
+            // every later request rides that token (the session cookie can't
+            // travel to a chrome-extension origin).
+            await api.login(email, password);
             const me = await api.me().catch(() => null);
             if (!me) {
                 setLoginStatus("Couldn't sign in. Double-check the server URL.", "error");
@@ -58,7 +46,13 @@ export function bindLogin() {
             await Promise.all([ensureLookups(), autoSaveTimezone()]);
             await load();
         } catch (err) {
-            setLoginStatus("Couldn't sign in: " + err.message, "error");
+            // A 401 from /login surfaces as NotAuthenticated (wrong creds);
+            // anything else is a connectivity / server-URL problem.
+            if (err instanceof NotAuthenticated) {
+                setLoginStatus("Wrong email or password.", "error");
+            } else {
+                setLoginStatus("Couldn't sign in: " + err.message, "error");
+            }
         }
     });
 

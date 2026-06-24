@@ -1,5 +1,5 @@
 // Options page: store/edit the Compass server URL. The popup reads this
-// via chrome.storage.local; default is http://localhost:8000 if unset.
+// via chrome.storage.local; defaults to the production server if unset.
 //
 // One subtle bit: when the URL points outside the static `host_permissions`
 // list in manifest.json, fetch() with credentials will fail silently
@@ -9,7 +9,7 @@
 
 const $ = (sel) => document.querySelector(sel);
 
-const DEFAULT_URL = "http://localhost:8000";
+const DEFAULT_URL = "https://dannibar-compass.herokuapp.com";
 
 function setStatus(text, kind) {
     const el = $("#status");

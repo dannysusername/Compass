@@ -501,3 +501,67 @@ def test_admin_grant_needs_the_server_pool(auth_client, monkeypatch):
     auth_client.post(f"/admin/users/{uid}/unlimited",
                      data={"grant": "1"}, headers=JSON)
     assert _upload(auth_client).json() == {"error": "need_key"}
+
+
+# ---- Bearer-token auth (browser extension, no session cookie) -------------
+# The extension can't ride the SameSite=Lax session cookie cross-origin, so
+# it authenticates with the per-user extension_token in an Authorization
+# header. These pin that the token is issued and accepted cookie-free.
+
+def test_signup_returns_extension_token(client):
+    r = client.post(
+        "/signup",
+        data={"email": "exttoken@example.com", "password": "longenough"},
+        headers=JSON,
+    )
+    assert r.status_code == 200
+    assert r.json().get("extension_token")  # non-empty string
+
+
+def test_login_returns_extension_token(client):
+    client.post(
+        "/signup",
+        data={"email": "extlogin@example.com", "password": "longenough"},
+        headers=JSON,
+    )
+    r = client.post(
+        "/login",
+        data={"email": "extlogin@example.com", "password": "longenough"},
+        headers=JSON,
+    )
+    assert r.status_code == 200
+    assert r.json().get("extension_token")
+
+
+def test_me_json_includes_extension_token(auth_client):
+    assert auth_client.get("/me.json").json().get("extension_token")
+
+
+def test_bearer_token_authenticates_without_cookie(client):
+    token = client.post(
+        "/signup",
+        data={"email": "bearer@example.com", "password": "longenough"},
+        headers=JSON,
+    ).json()["extension_token"]
+    # The extension never has a session cookie — prove the token alone works.
+    client.cookies.clear()
+    me = client.get(
+        "/me.json",
+        headers={**JSON, "Authorization": f"Bearer {token}"},
+    )
+    assert me.status_code == 200
+    assert me.json()["email"] == "bearer@example.com"
+    # A protected data route authenticates by token too.
+    assert client.get(
+        "/classes.json",
+        headers={**JSON, "Authorization": f"Bearer {token}"},
+    ).status_code == 200
+
+
+def test_invalid_bearer_token_is_401(client):
+    client.cookies.clear()
+    r = client.get(
+        "/me.json",
+        headers={**JSON, "Authorization": "Bearer not-a-real-token"},
+    )
+    assert r.status_code == 401

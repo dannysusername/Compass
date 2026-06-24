@@ -572,6 +572,18 @@ class User(SQLModel, table=True):
         default_factory=lambda: secrets.token_urlsafe(32),
         unique=True, index=True,
     )
+    # Per-user bearer token for the browser extension. The session cookie is
+    # SameSite=Lax, so it isn't sent on the extension's cross-origin requests
+    # (a chrome-extension:// origin is a different site). The extension instead
+    # authenticates with this token in an `Authorization: Bearer` header.
+    # Handed to the client by /login, /signup and /me.json; never exposed to
+    # other users. Auto-generated; regenerating it revokes the extension's
+    # access. NOT a cookie, so browsers never auto-attach it cross-site —
+    # this adds no CSRF surface and the website keeps SameSite=Lax.
+    extension_token: str = Field(
+        default_factory=lambda: secrets.token_urlsafe(32),
+        unique=True, index=True,
+    )
     # JSON list of class-bucket keys ("1", "0", "3", ...) defining the
     # user's preferred display order on home/today views. "0" is the
     # Personal bucket. Buckets not listed here append in default
@@ -708,6 +720,7 @@ async def lifespan(app: FastAPI):
             _add_column_if_missing(conn, "user", "unlimited_parses", "INTEGER NOT NULL DEFAULT 0")
             _add_column_if_missing(conn, "user", "shared_key_blocked", "INTEGER NOT NULL DEFAULT 0")
             _add_column_if_missing(conn, "user", "calendar_token", "TEXT")
+            _add_column_if_missing(conn, "user", "extension_token", "TEXT")
             _add_column_if_missing(conn, "user", "class_order_json", "TEXT")
             _add_column_if_missing(conn, "user", "timezone", "TEXT")
             _add_column_if_missing(conn, "task", "notes", "TEXT")
@@ -759,6 +772,11 @@ async def lifespan(app: FastAPI):
             _seed_system_tags_for_user(u.id)
             if not (u.calendar_token or "").strip():
                 u.calendar_token = secrets.token_urlsafe(32)
+                session.add(u)
+            # Backfill extension_token for users predating the column (the
+            # release-phase migrate.py adds it nullable on Postgres).
+            if not (u.extension_token or "").strip():
+                u.extension_token = secrets.token_urlsafe(32)
                 session.add(u)
         session.commit()
         # Dedupe system tags within each user: pre-Phase-2 data may have
@@ -957,6 +975,21 @@ class NotAuthenticatedError(Exception):
 
 
 def current_user_optional(request: Request) -> Optional[User]:
+    # Bearer-token path: the browser extension can't use the session cookie
+    # (SameSite=Lax → not sent cross-origin to a chrome-extension origin), so
+    # it sends its per-user extension_token here instead. When an Authorization
+    # header is present we authenticate by token ONLY — a present-but-invalid
+    # token is a failed auth, not a reason to fall back to the cookie.
+    auth = request.headers.get("authorization", "")
+    if auth[:7].lower() == "bearer ":
+        token = auth[7:].strip()
+        if not token:
+            return None
+        with Session(engine) as session:
+            return session.exec(
+                select(User).where(User.extension_token == token)
+            ).first()
+    # Cookie path: the website, unchanged.
     user_id = request.session.get("user_id")
     if not user_id:
         return None
@@ -1430,7 +1463,11 @@ def signup_submit(request: Request, email: str = Form(...), password: str = Form
         request.session["user_id"] = user.id
     _seed_system_tags_for_user(user.id)
     if wants_json:
-        return JSONResponse({"id": user.id, "email": user.email})
+        return JSONResponse({
+            "id": user.id,
+            "email": user.email,
+            "extension_token": user.extension_token,
+        })
     return RedirectResponse("/", status_code=303)
 
 
@@ -1446,16 +1483,34 @@ def login_page(request: Request):
 
 @app.post("/login")
 def login_submit(request: Request, email: str = Form(...), password: str = Form(...)):
+    wants_json = "application/json" in request.headers.get("accept", "")
     email = email.strip().lower()
     with Session(engine) as session:
         user = session.exec(select(User).where(User.email == email)).first()
         if not user or not verify_password(password, user.password_hash):
+            if wants_json:
+                return JSONResponse({"error": "invalid_credentials"}, status_code=401)
             return templates.TemplateResponse(
                 request, "login.html",
                 {"error": "Invalid email or password.", "email": email},
                 status_code=401,
             )
+        # Insurance for accounts predating the column whose boot-time backfill
+        # hasn't run yet: mint a token now so the extension login isn't tokenless.
+        if not (user.extension_token or "").strip():
+            user.extension_token = secrets.token_urlsafe(32)
+            session.add(user)
+            session.commit()
+            session.refresh(user)
         request.session["user_id"] = user.id
+        ext_token = user.extension_token
+        uid, uemail = user.id, user.email
+    if wants_json:
+        return JSONResponse({
+            "id": uid,
+            "email": uemail,
+            "extension_token": ext_token,
+        })
     return RedirectResponse("/", status_code=303)
 
 
@@ -2274,6 +2329,9 @@ def me_json(request: Request, user: User = Depends(require_login)):
         "is_admin": _is_admin(user),
         "calendar_token": user.calendar_token,
         "calendar_urls": _calendar_urls(request, user.calendar_token),
+        # Lets the extension capture/refresh its bearer token from any
+        # authenticated /me.json call, not just the login response.
+        "extension_token": user.extension_token,
     })
 
 

@@ -19,12 +19,13 @@
     <form id="options-form">
         <label class="field">
             <span class="label">Compass server URL</span>
-            <input type="text" id="compass-url" placeholder="http://localhost:8000" autocomplete="off">
+            <input type="text" id="compass-url" placeholder="https://dannibar-compass.herokuapp.com" autocomplete="off">
         </label>
         <p class="hint" style="font-size: 11px; color: var(--ink-3); margin: 0 0 16px">
-            Where the FastAPI server is running. <code>http://localhost:8000</code> when
-            running locally; your Heroku URL once deployed. Switch the host portion only —
-            the extension appends paths automatically.
+            The Compass server to connect to. Leave blank to use the default
+            (<code>https://dannibar-compass.herokuapp.com</code>); set
+            <code>http://localhost:8000</code> only if you run the server locally.
+            Switch the host portion only — the extension appends paths automatically.
         </p>
 
         <div class="actions">

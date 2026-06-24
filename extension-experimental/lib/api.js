@@ -8,10 +8,11 @@
 //      callers throw a NotAuthenticated error the popup can catch and
 //      render the "Log in" CTA.
 //
-// Default Compass URL is http://localhost:8000 (matches CLAUDE.md run
-// command). Override via the options page.
+// Default Compass URL is the production server, so the published extension
+// works on install with nothing configured. Developers override it with a
+// localhost URL via the options page.
 
-const DEFAULT_URL = "http://localhost:8000";
+const DEFAULT_URL = "https://dannibar-compass.herokuapp.com";
 
 export class NotAuthenticated extends Error {
     constructor() { super("not_authenticated"); }
@@ -22,12 +23,35 @@ async function getBaseUrl() {
     return (compass_url || DEFAULT_URL).replace(/\/+$/, "");
 }
 
+// Per-user bearer token, captured at login/signup and stored in
+// chrome.storage.local. The session cookie is SameSite=Lax and won't ride
+// cross-origin to this extension, so the token is how we authenticate.
+const TOKEN_KEY = "compass_token";
+
+async function getToken() {
+    const o = await chrome.storage.local.get(TOKEN_KEY);
+    return o[TOKEN_KEY] || null;
+}
+async function setToken(token) {
+    if (token) await chrome.storage.local.set({ [TOKEN_KEY]: token });
+}
+async function clearToken() {
+    await chrome.storage.local.remove(TOKEN_KEY);
+}
+
 async function request(path, { method = "GET", body, headers = {} } = {}) {
     const base = await getBaseUrl();
+    const token = await getToken();
     const init = {
         method,
+        // credentials stays for the localhost-dev case (same-site cookie);
+        // in prod the Bearer header below does the real authentication.
         credentials: "include",
-        headers: { Accept: "application/json", ...headers },
+        headers: {
+            Accept: "application/json",
+            ...(token ? { Authorization: "Bearer " + token } : {}),
+            ...headers,
+        },
     };
     if (body instanceof FormData) {
         init.body = body;
@@ -58,14 +82,41 @@ async function request(path, { method = "GET", body, headers = {} } = {}) {
 
 export const api = {
     base: getBaseUrl,
-    me: () => request("/me.json"),
-    signup: (email, password) => {
+    // Token plumbing exposed so views can capture/clear it explicitly.
+    getToken,
+    setToken,
+    clearToken,
+    me: async () => {
+        const me = await request("/me.json");
+        // Refresh the stored token whenever the server hands one back.
+        if (me && me.extension_token) await setToken(me.extension_token);
+        return me;
+    },
+    login: async (email, password) => {
         const fd = new FormData();
         fd.append("email", email);
         fd.append("password", password);
-        return request("/signup", { method: "POST", body: fd });
+        const r = await request("/login", { method: "POST", body: fd });
+        if (r && r.extension_token) await setToken(r.extension_token);
+        return r;
     },
-    logout: () => request("/logout", { method: "POST" }),
+    signup: async (email, password) => {
+        const fd = new FormData();
+        fd.append("email", email);
+        fd.append("password", password);
+        const r = await request("/signup", { method: "POST", body: fd });
+        if (r && r.extension_token) await setToken(r.extension_token);
+        return r;
+    },
+    logout: async () => {
+        try {
+            return await request("/logout", { method: "POST" });
+        } finally {
+            // Drop the token regardless of how the server responds so a
+            // failed/offline logout still ends the local extension session.
+            await clearToken();
+        }
+    },
     classes: () => request("/classes.json"),
     createClass: ({ code, name }) => {
         const fd = new FormData();
