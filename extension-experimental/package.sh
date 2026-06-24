@@ -17,8 +17,6 @@ RUNTIME=(
   sidepanel.js
   sidepanel.css
   popup.css
-  options.html
-  options.js
   lib
   icons
 )

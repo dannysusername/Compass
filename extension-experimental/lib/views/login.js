@@ -17,12 +17,6 @@ export function bindLogin() {
     const loginForm = $("#login-form");
     const signupForm = $("#signup-form");
 
-    // Surface the configured server URL on the login screen.
-    api.base().then((url) => {
-        const el = $("#login-server-url");
-        if (el) el.textContent = url;
-    });
-
     loginForm.addEventListener("submit", async (e) => {
         e.preventDefault();
         const email = (loginForm.email.value || "").trim();
@@ -85,10 +79,6 @@ export function bindLogin() {
         }
     });
 
-    $("#login-open-options").addEventListener("click", (e) => {
-        e.preventDefault();
-        chrome.runtime.openOptionsPage();
-    });
     $("#login-open-signup").addEventListener("click", (e) => {
         e.preventDefault();
         showSignup();

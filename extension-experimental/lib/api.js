@@ -1,26 +1,20 @@
 // Thin fetch wrapper for the Compass server. Centralises three things:
-//   1. The base URL — read from chrome.storage so the user can point at
-//      localhost during dev and at Heroku in prod without rebuilding.
-//   2. Credentials — every call sends cookies so the user's existing
-//      session rides along (cookie was set when they logged in via the
-//      main site in a tab).
-//   3. Auth detection — a 401 from the server means "redirect to login";
-//      callers throw a NotAuthenticated error the popup can catch and
-//      render the "Log in" CTA.
-//
-// Default Compass URL is the production server, so the published extension
-// works on install with nothing configured. Developers override it with a
-// localhost URL via the options page.
+//   1. The base URL — the single SERVER_URL constant from config.js. There is
+//      no user-facing override: the extension targets one server so it "just
+//      works" with no setup. (Change SERVER_URL in config.js for local dev.)
+//   2. Auth — a per-user bearer token (see below); credentials:'include' is
+//      kept only so a same-site localhost-dev cookie still works.
+//   3. Auth detection — a 401 from the server means "not logged in"; callers
+//      catch the NotAuthenticated error and render the "Log in" CTA.
 
-const DEFAULT_URL = "https://dannibar-compass.herokuapp.com";
+import { SERVER_URL } from "./config.js";
 
 export class NotAuthenticated extends Error {
     constructor() { super("not_authenticated"); }
 }
 
 async function getBaseUrl() {
-    const { compass_url } = await chrome.storage.local.get("compass_url");
-    return (compass_url || DEFAULT_URL).replace(/\/+$/, "");
+    return SERVER_URL.replace(/\/+$/, "");
 }
 
 // Per-user bearer token, captured at login/signup and stored in

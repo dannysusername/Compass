@@ -5,11 +5,7 @@
   "description": "Track classes, tasks, and syllabus deadlines from a side panel, and add tasks from any page. Syncs with your Compass account.",
   "permissions": ["storage", "sidePanel", "contextMenus"],
   "host_permissions": [
-    "https://dannibar-compass.herokuapp.com/*"
-  ],
-  "optional_host_permissions": [
-    "http://localhost/*",
-    "http://127.0.0.1/*"
+    "https://dannibar-compass-44cf6055d5e3.herokuapp.com/*"
   ],
   "icons": {
     "16": "icons/icon16.png",
@@ -28,7 +24,7 @@
     "default_path": "sidepanel.html"
   },
   "background": {
-    "service_worker": "background.js"
-  },
-  "options_page": "options.html"
+    "service_worker": "background.js",
+    "type": "module"
+  }
 }

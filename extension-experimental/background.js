@@ -6,7 +6,7 @@
 //   3. A legacy message relay for opening the side panel from anywhere
 //      (kept for older Chrome builds where setPanelBehavior isn't honored).
 
-const DEFAULT_COMPASS_URL = "https://dannibar-compass.herokuapp.com";
+import { SERVER_URL } from "./lib/config.js";
 
 // ---- Side-panel-on-action --------------------------------------------------
 // Chrome 116+ honors this; clicking the toolbar icon opens the side panel
@@ -119,8 +119,7 @@ async function postQuickTask(title, notes) {
 }
 
 async function compassUrl() {
-    const { compass_url } = await chrome.storage.local.get("compass_url");
-    return (compass_url || DEFAULT_COMPASS_URL).replace(/\/+$/, "");
+    return SERVER_URL.replace(/\/+$/, "");
 }
 
 async function compassToken() {
