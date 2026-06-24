@@ -57,6 +57,7 @@ extension-experimental/POSSIBILITIES.md
 extension-experimental/SPEC-EDGE-CASES.md
 extension-experimental/tests/README.md
 tests_browser/MOBILE-SPEC.md
+.gbrain-source
 
 # Local-only tests — kept on disk, not pushed.
 tests/test_syllabus_class_upload.py

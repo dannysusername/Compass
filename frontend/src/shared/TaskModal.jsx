@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { toLocalInput, alertLabel, normalizeAlerts, ALERT_PRESETS } from "./format.js";
+import ModalPortal from "./ModalPortal.jsx";
 
 // The add/edit-task modal (full field set). One component serves both modes:
 //   - add  (mode="add"):  POST /tasks or /classes/{id}/tasks, then reload.
@@ -277,6 +278,7 @@ export default function TaskModal({
   const dueValue = isAllDay ? dueAt.slice(0, 10) : dueAt;
 
   return (
+    <ModalPortal>
     <div
       className="react-modal-overlay"
       onMouseDown={(e) => {
@@ -519,5 +521,6 @@ export default function TaskModal({
         </form>
       </div>
     </div>
+    </ModalPortal>
   );
 }

@@ -166,11 +166,14 @@ def test_visibility_hides_from_today_but_toggle_restores(auth_client):
     cal_id = _calendars()[0].id
 
     # The /today page is a React island; assert against the JSON it renders.
+    # Cover both items and overdue_items — depending on wall-clock time vs the
+    # event's time, a "today" event can sit in either bucket (past-due wins).
     def today_titles():
         data = auth_client.get("/today.json").json()
         return {it["title"]
                 for bucket in data["buckets"]
-                for it in bucket["items"]}
+                for key in ("items", "overdue_items")
+                for it in bucket[key]}
 
     assert "Visible event" in today_titles()
     # Hide → drops from the view.

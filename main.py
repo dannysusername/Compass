@@ -32,6 +32,7 @@ from fastapi.templating import Jinja2Templates
 from sqlmodel import (
     SQLModel, Field, Relationship, Session, create_engine, select, delete,
 )
+from sqlalchemy.orm import selectinload
 from icalendar import Calendar, Event as ICalEvent
 from pydantic import BaseModel, Field as PydanticField
 from typing import Literal
@@ -2420,34 +2421,49 @@ def month_json(
         span_start = anchor
         next_first = (anchor.replace(day=28) + timedelta(days=4)).replace(day=1)
         n_cells = (next_first - anchor).days
-    out_days = []
-    for i in range(n_cells):
-        day_start = span_start + timedelta(days=i)
-        day_end = day_start + timedelta(days=1)
-        items_by_class = _collect_items_in_range(
-            day_start, day_end, user.id,
-            tz=tz,
-            day_for_overrides=day_start.strftime("%Y-%m-%d"),
-        )
-        day_out = {
-            "date": day_start.date().isoformat(),
-            "is_today": day_start.date() == today_start.date(),
-            "buckets": [
-                {
-                    "class_id": slot["cls"].id,
-                    "code": slot["cls"].code,
-                    "name": getattr(slot["cls"], "name", "") or "",
-                    "is_personal": getattr(slot["cls"], "is_personal", False),
-                    "is_imported": getattr(slot["cls"], "is_imported", False),
-                    "color": getattr(slot["cls"], "color", None),
-                    "items": [_serialize_item(it) for it in slot["items"]],
-                }
-                for slot in items_by_class.values()
-            ],
-        }
-        if grid:
-            day_out["in_month"] = day_start.month == target_month
-        out_days.append(day_out)
+    # Load the user's items + per-day overrides ONCE, then bucket each cell
+    # in memory. Re-querying per cell is an N+1 that costs ~2s against remote
+    # Postgres for the 42-cell grid (negligible on in-process SQLite).
+    day_strs = [(span_start + timedelta(days=i)).strftime("%Y-%m-%d")
+                for i in range(n_cells)]
+    with Session(engine, expire_on_commit=False) as session:
+        ctx = _load_item_context(session, user.id)
+        overrides_by_day: dict[str, dict] = {}
+        for row in session.exec(
+            select(DayItemPosition).where(
+                DayItemPosition.user_id == user.id,
+                DayItemPosition.day_date.in_(day_strs),
+            )
+        ).all():
+            overrides_by_day.setdefault(row.day_date, {})[
+                (row.kind, row.item_id)] = row.position
+        out_days = []
+        for i in range(n_cells):
+            day_start = span_start + timedelta(days=i)
+            day_end = day_start + timedelta(days=1)
+            items_by_class = _collect_from_context(
+                ctx, day_start, day_end, user.id, tz=tz,
+                overrides=overrides_by_day.get(day_strs[i], {}),
+            )
+            day_out = {
+                "date": day_start.date().isoformat(),
+                "is_today": day_start.date() == today_start.date(),
+                "buckets": [
+                    {
+                        "class_id": slot["cls"].id,
+                        "code": slot["cls"].code,
+                        "name": getattr(slot["cls"], "name", "") or "",
+                        "is_personal": getattr(slot["cls"], "is_personal", False),
+                        "is_imported": getattr(slot["cls"], "is_imported", False),
+                        "color": getattr(slot["cls"], "color", None),
+                        "items": [_serialize_item(it) for it in slot["items"]],
+                    }
+                    for slot in items_by_class.values()
+                ],
+            }
+            if grid:
+                day_out["in_month"] = day_start.month == target_month
+            out_days.append(day_out)
     if target_month == 1:
         prev_y, prev_m = target_year - 1, 12
     else:
@@ -4410,44 +4426,102 @@ def _merge_today_with_overdue(today_items: dict, overdue: dict, user_id: int) ->
     return _apply_class_order(merged, user_id)
 
 
-def _apply_class_order(out: dict, user_id: int) -> dict:
-    """Re-key `out` (a {class_id: bucket} dict) into the user's preferred
-    display order. Buckets not mentioned in the saved order append at the
-    end in their existing order (which is class-table insertion order)."""
-    if not out:
-        return out
+def _load_class_order(user_id: int) -> list[int]:
+    """The user's saved class display order (list of class_ids), or []."""
     with Session(engine) as session:
         u = session.get(User, user_id)
-        saved: list[int] = []
         if u and u.class_order_json:
             try:
-                saved = [int(x) for x in json.loads(u.class_order_json)]
+                return [int(x) for x in json.loads(u.class_order_json)]
             except (ValueError, TypeError, json.JSONDecodeError):
-                saved = []
+                return []
+    return []
+
+
+def _reorder_by_saved(out: dict, saved: list[int]) -> dict:
+    """Re-key `out` (a {class_id: bucket} dict) into `saved` order. Buckets
+    not mentioned append at the end in their existing order (class-table
+    insertion order)."""
+    if not out:
+        return out
     present = set(out.keys())
     ordered_keys = [k for k in saved if k in present]
     ordered_keys.extend(k for k in out.keys() if k not in ordered_keys)
     return {k: out[k] for k in ordered_keys}
 
 
-def _collect_items_in_range(start: datetime, end: datetime, user_id: int,
-                             day_for_overrides: Optional[str] = None,
-                             tz: ZoneInfo = LOCAL_TZ,
-                             hide_completed: bool = False) -> dict:
-    """Return {class_id: {class, items: [{kind, id, title, due_at, completed, notes}]}}
-    for tasks + events whose due/start datetime falls in [start, end). Scoped
-    to the given user. Personal tasks (class_id IS NULL) bucket under
-    PERSONAL_BUCKET (key 0). Both open and completed items are included
-    by default; pass `hide_completed=True` (today/home views) to drop them.
+def _apply_class_order(out: dict, user_id: int) -> dict:
+    """Re-key `out` into the user's saved display order (one DB read)."""
+    return _reorder_by_saved(out, _load_class_order(user_id))
 
-    `tz`: the timezone to anchor "today" / range comparisons in. Default
-    LOCAL_TZ keeps single-user paths working; per-user callers should
-    pass `_user_tz(user)`.
 
-    `day_for_overrides` (YYYY-MM-DD): when set, look up DayItemPosition
-    overrides for that date and use them as the sort key in place of the
-    global Task/Event.position. Used by the week page so reordering a
-    multi-day task in one day's modal doesn't shuffle other days."""
+def _load_item_context(session: Session, user_id: int) -> SimpleNamespace:
+    """Eager-load everything the collector needs for one user, in a fixed
+    number of queries regardless of how many day-windows are computed.
+
+    Callers that iterate many windows (the month grid loops 42 day-cells)
+    load this ONCE and pass it to `_collect_from_context` per window — the
+    alternative, re-querying inside each cell, is the classic N+1 that made
+    `/month.json` take ~2s against remote Postgres (it's free on in-process
+    SQLite, which is why local dev never showed it).
+
+    `selectinload` pulls each class's tasks/events (and each task's tag) in
+    a couple of batched queries instead of one lazy load per row."""
+    sys_tag_by_key = {
+        t.system_key: t
+        for t in session.exec(
+            select(Tag).where(Tag.is_system == True, Tag.user_id == user_id)
+        ).all()
+        if t.system_key
+    }
+    classes = session.exec(
+        select(Class).where(Class.user_id == user_id).options(
+            selectinload(Class.tasks).selectinload(Task.tag),
+            selectinload(Class.events),
+        )
+    ).all()
+    personal_tasks = session.exec(
+        select(Task).where(
+            Task.user_id == user_id,
+            Task.class_id == None,
+            Task.imported_calendar_id == None,
+        ).options(selectinload(Task.tag))
+    ).all()
+    calendars = session.exec(
+        select(ImportedCalendar).where(
+            ImportedCalendar.user_id == user_id,
+            ImportedCalendar.visible == True,
+        )
+    ).all()
+    cal_tasks: dict[int, list] = {}
+    for cal in calendars:
+        cal_tasks[cal.id] = session.exec(
+            select(Task).where(
+                Task.user_id == user_id,
+                Task.imported_calendar_id == cal.id,
+                Task.class_id == None,
+            ).options(selectinload(Task.tag))
+        ).all()
+    return SimpleNamespace(
+        sys_tag_by_key=sys_tag_by_key,
+        classes=classes,
+        personal_tasks=personal_tasks,
+        calendars=calendars,
+        cal_tasks=cal_tasks,
+        class_order=_load_class_order(user_id),
+    )
+
+
+def _collect_from_context(ctx: SimpleNamespace, start: datetime, end: datetime,
+                          user_id: int, tz: ZoneInfo = LOCAL_TZ,
+                          overrides: Optional[dict] = None,
+                          hide_completed: bool = False) -> dict:
+    """Pure(ish) bucketing pass over a pre-loaded `ctx` (see
+    `_load_item_context`) — no DB queries beyond what `ctx` already holds.
+    Returns {class_id: {class, items}} for items whose due/start datetime
+    falls in [start, end). `overrides` maps (kind, item_id) → per-day sort
+    position (week tab); pass {} for none."""
+    overrides = overrides or {}
     out: dict[int, dict] = {}
 
     def _add(cls, kind: str, item_id: int, title: str,
@@ -4552,76 +4626,72 @@ def _collect_items_in_range(start: datetime, end: datetime, user_id: int,
                  t.completed_at is not None, t.position or 0,
                  is_all_day=t.is_all_day, **tag_kw)
 
+    sys_tag_by_key = ctx.sys_tag_by_key
+    for cls in ctx.classes:
+        for t in cls.tasks:
+            _emit_task(cls, t)
+        for ev in cls.events:
+            if ev.starts_at is None:
+                continue
+            # Pending-review events live on the class page only.
+            if not ev.added_to_calendar:
+                continue
+            if hide_completed and ev.completed_at is not None:
+                # Same "just-completed-today" rule as tasks above.
+                completed_local = _to_local(ev.completed_at, tz)
+                if not (start <= completed_local < end):
+                    continue
+            local_when = _to_local(ev.starts_at, tz)
+            if start <= local_when < end:
+                sys_tag = sys_tag_by_key.get(ev.kind)
+                _add(cls, "event", ev.id, ev.title, local_when,
+                     ev.completed_at is not None, ev.position or 0,
+                     sub_kind=sys_tag.name if sys_tag else ev.kind,
+                     sub_kind_color=sys_tag.color if sys_tag else None,
+                     sub_kind_id=sys_tag.id if sys_tag else None,
+                     actionable=ev.actionable)
+    # Personal tasks (no class, not imported) — bucket under PERSONAL_BUCKET.
+    for t in ctx.personal_tasks:
+        _emit_task(PERSONAL_BUCKET, t)
+    # Imported-calendar events (stored as Tasks). One display bucket per
+    # VISIBLE calendar, colored by the calendar. Reassigning one to a
+    # class (class_id set) moves it into that class bucket instead — the
+    # class_id == None filter keeps it from rendering in both places.
+    for cal in ctx.calendars:
+        bucket = _imported_bucket(cal)
+        for t in ctx.cal_tasks.get(cal.id, []):
+            _emit_task(bucket, t)
+        slot = out.get(bucket.id)
+        if slot:
+            for it in slot["items"]:
+                it["tag_color"] = cal.color   # color rows by the calendar
+                it["class_id"] = 0            # edit modal treats as Personal
+    # Sort: position first (user's drag priority), then due time. Per-day
+    # overrides (week tab) win over the row's global position when present.
+    for slot in out.values():
+        slot["items"].sort(key=lambda it: (
+            overrides.get((it["kind"], it["id"]), it["position"]),
+            it["due_at"] is None,
+            it["due_at"] or datetime.max.replace(tzinfo=tz),
+        ))
+    return _reorder_by_saved(out, ctx.class_order)
+
+
+def _collect_items_in_range(start: datetime, end: datetime, user_id: int,
+                             day_for_overrides: Optional[str] = None,
+                             tz: ZoneInfo = LOCAL_TZ,
+                             hide_completed: bool = False) -> dict:
+    """Single-window convenience wrapper: load the user's item context and
+    bucket one [start, end) window. Multi-window callers (the month grid)
+    should call `_load_item_context` once and `_collect_from_context` per
+    window instead — see `month_json`.
+
+    `day_for_overrides` (YYYY-MM-DD): when set, DayItemPosition rows for that
+    date override the global sort position (week tab reordering)."""
     with Session(engine, expire_on_commit=False) as session:
-        sys_tag_by_key = {
-            t.system_key: t
-            for t in session.exec(
-                select(Tag).where(Tag.is_system == True, Tag.user_id == user_id)
-            ).all()
-            if t.system_key
-        }
-        for cls in session.exec(select(Class).where(Class.user_id == user_id)).all():
-            for t in cls.tasks:
-                _emit_task(cls, t)
-            for ev in cls.events:
-                if ev.starts_at is None:
-                    continue
-                # Pending-review events live on the class page only.
-                if not ev.added_to_calendar:
-                    continue
-                if hide_completed and ev.completed_at is not None:
-                    # Same "just-completed-today" rule as tasks above.
-                    completed_local = _to_local(ev.completed_at, tz)
-                    if not (start <= completed_local < end):
-                        continue
-                local_when = _to_local(ev.starts_at, tz)
-                if start <= local_when < end:
-                    sys_tag = sys_tag_by_key.get(ev.kind)
-                    _add(cls, "event", ev.id, ev.title, local_when,
-                         ev.completed_at is not None, ev.position or 0,
-                         sub_kind=sys_tag.name if sys_tag else ev.kind,
-                         sub_kind_color=sys_tag.color if sys_tag else None,
-                         sub_kind_id=sys_tag.id if sys_tag else None,
-                         actionable=ev.actionable)
-        # Personal tasks (no class, not imported) — bucket under PERSONAL_BUCKET.
-        personal_tasks = session.exec(
-            select(Task).where(
-                Task.user_id == user_id,
-                Task.class_id == None,
-                Task.imported_calendar_id == None,
-            )
-        ).all()
-        for t in personal_tasks:
-            _emit_task(PERSONAL_BUCKET, t)
-        # Imported-calendar events (stored as Tasks). One display bucket per
-        # VISIBLE calendar, colored by the calendar. Reassigning one to a
-        # class (class_id set) moves it into that class bucket instead — the
-        # class_id == None filter keeps it from rendering in both places.
-        for cal in session.exec(
-            select(ImportedCalendar).where(
-                ImportedCalendar.user_id == user_id,
-                ImportedCalendar.visible == True,
-            )
-        ).all():
-            bucket = _imported_bucket(cal)
-            for t in session.exec(
-                select(Task).where(
-                    Task.user_id == user_id,
-                    Task.imported_calendar_id == cal.id,
-                    Task.class_id == None,
-                )
-            ).all():
-                _emit_task(bucket, t)
-            slot = out.get(bucket.id)
-            if slot:
-                for it in slot["items"]:
-                    it["tag_color"] = cal.color   # color rows by the calendar
-                    it["class_id"] = 0            # edit modal treats as Personal
-    # Per-day position overrides (week tab only). Map (kind, item_id) →
-    # override position; missing keys fall back to the row's global position.
-    overrides: dict[tuple[str, int], int] = {}
-    if day_for_overrides:
-        with Session(engine) as session:
+        ctx = _load_item_context(session, user_id)
+        overrides: dict[tuple[str, int], int] = {}
+        if day_for_overrides:
             for row in session.exec(
                 select(DayItemPosition).where(
                     DayItemPosition.user_id == user_id,
@@ -4629,14 +4699,10 @@ def _collect_items_in_range(start: datetime, end: datetime, user_id: int,
                 )
             ).all():
                 overrides[(row.kind, row.item_id)] = row.position
-    # Sort: position first (user's drag priority), then due time.
-    for slot in out.values():
-        slot["items"].sort(key=lambda it: (
-            overrides.get((it["kind"], it["id"]), it["position"]),
-            it["due_at"] is None,
-            it["due_at"] or datetime.max.replace(tzinfo=tz),
-        ))
-    return _apply_class_order(out, user_id)
+        return _collect_from_context(
+            ctx, start, end, user_id, tz=tz,
+            overrides=overrides, hide_completed=hide_completed,
+        )
 
 
 def _collect_overdue(user_id: int, tz: ZoneInfo = LOCAL_TZ) -> dict:

@@ -36,7 +36,7 @@
         </p>
     {% endif %}
 
-    {% if limit_reached or (usage.server_key_available and not usage.own_key and usage.free_parses_remaining <= 0) %}
+    {% if limit_reached or (usage.server_key_available and not usage.own_key and usage.free_parses_remaining is not none and usage.free_parses_remaining <= 0) %}
         <p class="error-message">
             You've used all {{ usage.free_parse_limit }} free syllabus parses.
             Add your own xAI key below to keep parsing — your key, no limit.

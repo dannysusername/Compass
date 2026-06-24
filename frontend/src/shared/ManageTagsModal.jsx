@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import ModalPortal from "./ModalPortal.jsx";
 
 // Manage existing tags: rename / recolor any tag, delete your own (system tags
 // can be renamed/recolored but not deleted). Opened from the "Manage tags" link
@@ -85,6 +86,7 @@ export default function ManageTagsModal({ tags, onClose, onTagUpdated, onTagDele
   const ordered = [...tags.filter((t) => t.is_system), ...tags.filter((t) => !t.is_system)];
 
   return (
+    <ModalPortal>
     <div
       className="react-modal-overlay"
       onMouseDown={(e) => {
