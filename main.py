@@ -650,9 +650,10 @@ class DayItemPosition(SQLModel, table=True):
 
 # ---- App setup ----
 
-# DATABASE_URL is set by Heroku; it arrives as `postgres://...`. Rewrite to
-# the psycopg3 driver explicitly so SQLAlchemy doesn't reach for psycopg2
-# (which we don't install). Falls back to a local SQLite file for dev.
+# DATABASE_URL points at our Neon Postgres (set as a Heroku config var; it
+# may arrive as `postgres://` or `postgresql://`). Rewrite to the psycopg3
+# driver explicitly so SQLAlchemy doesn't reach for psycopg2 (which we don't
+# install). Falls back to a local SQLite file for dev.
 DB_PATH = Path(__file__).parent / "compass.db"
 _db_url = os.environ.get("DATABASE_URL", "").strip()
 if _db_url.startswith("postgres://"):

@@ -1,0 +1,40 @@
+#!/bin/sh
+#
+# Guard against the stale-frontend-build trap.
+#
+# The React frontend in frontend/src is NOT built on Heroku — the Python
+# buildpack only runs pip. The browser-ready bundles in static/dist must be
+# rebuilt locally (cd frontend && npm run build) and committed alongside the
+# source. This hook blocks a commit that changes frontend/src without also
+# staging a fresh static/dist, which would otherwise ship a stale UI.
+#
+# Bypass intentionally with:  git commit --no-verify
+
+staged=$(git diff --cached --name-only --diff-filter=ACMR)
+
+# Did this commit touch the React source?
+src_changed=$(printf '%s\n' "$staged" | grep -E '^frontend/src/' || true)
+
+# Nothing frontend-related staged → nothing to check.
+[ -z "$src_changed" ] && exit 0
+
+# Source changed — is a rebuilt bundle also staged?
+dist_staged=$(printf '%s\n' "$staged" | grep -E '^static/dist/' || true)
+
+if [ -z "$dist_staged" ]; then
+  echo "✖ Commit blocked: stale frontend build" >&2
+  echo "" >&2
+  echo "  You staged changes under frontend/src/ but no rebuilt files under" >&2
+  echo "  static/dist/. Heroku does NOT build the frontend, so the old bundle" >&2
+  echo "  would ship and your changes would not appear in the live UI." >&2
+  echo "" >&2
+  echo "  Fix:" >&2
+  echo "    cd frontend && npm run build" >&2
+  echo "    git add static/dist" >&2
+  echo "    git commit" >&2
+  echo "" >&2
+  echo "  (Intentional source-only commit? Bypass with: git commit --no-verify)" >&2
+  exit 1
+fi
+
+exit 0
