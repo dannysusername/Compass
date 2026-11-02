@@ -2,7 +2,7 @@
 
 **Compass is live — just open it in your browser:**
 
-### 👉 https://dannibar-compass-44cf6055d5e3.herokuapp.com/
+### 👉 https://compass.danielibarra.com
 
 No install, no setup, nothing to download. Sign up with an email + password and you're in. Everything below is for people who want to *develop* Compass; if you just want to *use* it, the link above is all you need.
 
