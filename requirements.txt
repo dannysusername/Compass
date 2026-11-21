@@ -1,6 +1,8 @@
 fastapi>=0.110
 uvicorn[standard]>=0.27
-sqlmodel>=0.0.16
+# Pinned: sqlmodel 0.0.50+ rejects the naive local datetimes Compass stores
+# (completed_at etc.), so marking a task done crashed on a fresh install.
+sqlmodel==0.0.38
 xai-sdk>=1.0
 pdfplumber>=0.10
 icalendar>=5.0
